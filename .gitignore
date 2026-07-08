@@ -1,0 +1,21 @@
+# GHDL / simulation build artifacts
+sim/work/
+*.cf
+*.o
+*.ghw
+*.vcd
+work-obj*.cf
+
+# Vivado synthesis artifacts
+syn/synth_*/
+*.jou
+*.log
+!syn/synthesize.tcl
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
