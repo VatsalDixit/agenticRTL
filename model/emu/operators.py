@@ -635,7 +635,9 @@ def printer(stream):
 def writer(stream, fname):
     """Writes the serialized representation of each transfer to the given
     file."""
-    with open(fname, 'w') as fil:
+    # newline='\n' forces LF even on Windows, so the *.tv vectors are read
+    # identically by GHDL on Linux/WSL regardless of where they were generated.
+    with open(fname, 'w', newline='\n') as fil:
         for transfer in stream:
             print(transfer.serialize(), file=fil)
             yield transfer
