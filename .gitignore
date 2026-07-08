@@ -26,3 +26,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Vivado stray outputs dropped in the working dir
+clockInfo.txt
+tight_setup_hold_pins.txt
+.Xil/
