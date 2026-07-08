@@ -43,10 +43,10 @@ yosys -m ghdl -s syn/synth_oss.ys 2>&1 | tee syn/oss_build/yosys.log >/dev/null
 echo "   done ($(grep -c '' syn/oss_build/yosys.log) log lines)"
 
 # ---- Parse a compact summary (the loop's feedback signal). ----
-python3 - syn/oss_build/stat.json syn/oss_build/ltp.txt syn/oss_build/summary.txt <<'PY'
+python3 - syn/oss_build/stat.json syn/oss_build/ltp.txt syn/oss_build/summary.txt syn/oss_build/metrics.json <<'PY'
 import json, re, sys
 
-stat_path, ltp_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+stat_path, ltp_path, out_path, json_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 stat = json.load(open(stat_path))
 mods = stat.get("modules", {})
@@ -68,6 +68,16 @@ srl   = total(lambda k: k.startswith(("SRL", "RAMD", "RAMS")))
 ltp_txt = open(ltp_path).read()
 depths = [int(x) for x in re.findall(r"length=(\d+)", ltp_txt)]
 depth = max(depths) if depths else None
+
+# Normalized machine-readable metrics (same schema as the Vivado flow).
+metrics = {
+    "tool": "oss-yosys",
+    "top": "vhsnunzip_unbuffered",
+    "timing": {"ltp_depth": depth},
+    "area": {"luts": lut, "lutmem": srl, "ffs": ff, "carry": carry,
+             "mux": mux, "bram36": bram, "uram": uram, "dsp": dsp},
+}
+json.dump(metrics, open(json_path, "w"), indent=2)
 
 lines = []
 lines.append("vhsnunzip_unbuffered - open-source synthesis (Yosys, xcup cell lib)")

@@ -83,9 +83,22 @@ echo "== run: $TB =="
 # A failing assertion in the testbench has severity 'failure' and stops the
 # simulation with a non-zero exit code.  --ieee-asserts=disable silences the
 # harmless numeric_std metavalue warnings from don't-care ('-') comparisons.
-if ghdl -r $STD "$TB" --ieee-asserts=disable; then
-  echo "PASS: $TB"
-else
-  echo "FAIL: $TB"
+#
+# --stop-time bounds the run so a broken edit that deadlocks the handshake
+# (valid/ready never fires) can't hang forever. A correct testbench ends well
+# before this via its `done` signal. Reaching the stop-time means the design
+# HUNG -- GHDL exits 0 in that case, so we detect the stop-time message and
+# treat it as a failure (otherwise a hang would look like a pass).
+STOP="--stop-time=20ms"
+rc=0
+ghdl -r $STD "$TB" --ieee-asserts=disable $STOP >run.log 2>&1 || rc=$?
+sed -n '1,50p' run.log
+if grep -q "stop-time" run.log; then
+  echo "FAIL: $TB (HANG — hit $STOP without finishing; likely a handshake deadlock)"
   exit 1
 fi
+if [ $rc -ne 0 ]; then
+  echo "FAIL: $TB (assertion/error, exit $rc)"
+  exit 1
+fi
+echo "PASS: $TB"

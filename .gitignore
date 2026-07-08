@@ -9,8 +9,14 @@ work-obj*.cf
 # Synthesis artifacts
 syn/synth_*/
 syn/oss_build/
+syn/vivado_build/
 *.jou
 *.log
+
+# Optimization loop: track the baseline, ignore transient metrics/logs
+flow/metrics/latest.json
+flow/metrics/*.log
+!flow/metrics/baseline.*.json
 !syn/synthesize.tcl
 
 # Python

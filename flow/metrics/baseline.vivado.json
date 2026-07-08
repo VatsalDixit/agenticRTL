@@ -1,0 +1,21 @@
+{
+  "tool": "vivado",
+  "top": "vhsnunzip_unbuffered",
+  "mode": "full",
+  "part": "xc7k160tfbg484-2",
+  "timing": {
+    "period_ns": 4.0,
+    "wns_ns": -2.654,
+    "fmax_mhz": 150.29
+  },
+  "area": {
+    "luts": 1678,
+    "lutmem": 291,
+    "ffs": 1168,
+    "carry": 65,
+    "bram36": 16,
+    "bram18": 0,
+    "uram": 0,
+    "dsp": 0
+  }
+}

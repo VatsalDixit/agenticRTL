@@ -65,15 +65,18 @@ counts vs Vivado), and there is no absolute Fmax on open-source UltraScale+.
 Vivado (`syn/synthesize.tcl`) remains the source of truth for absolute
 area/Fmax on `xcvu5p` when available.
 
-## Stage 3 — optimization subagents (future)
+## Stage 3 — optimization agents (implemented)
 
-Once stages 1–2 are solid, specialized agents consume the synthesis report and
-propose RTL edits:
+Specialized agents edit `rtl/` to improve timing or area; the harness verifies
+and measures every candidate, auto-reverting anything incorrect. Full design and
+usage in **[OPTIMIZATION.md](OPTIMIZATION.md)**.
 
-- **timing agent** — targets the worst-negative-slack path, proposes
-  retiming/pipelining/logic restructuring, re-verifies via stage 1.
-- **area agent** — targets LUT/register/URAM reduction (e.g. RAM_STYLE choice,
-  sharing), re-verifies via stage 1.
+- **`.claude/agents/rtl-timing-optimizer`** — shortens the critical path (higher
+  Fmax / lower WNS).
+- **`.claude/agents/rtl-area-optimizer`** — reduces LUT/FF/BRAM.
 
-Every proposed edit must pass stage 1 before its stage-2 numbers count. Wiring
-these in is the next milestone after the verification loop is green under GHDL.
+Both drive `flow/eval.sh <oss|vivado> --goal <timing|area>`, which runs the
+stage-1 ladder as a hard gate, measures with the chosen tool, and prints a
+verdict against `flow/metrics/baseline.json`. Vivado gives the accurate signal
+(currently Kintex-7, since UltraScale+ device support isn't installed);
+Yosys is the fast screen.

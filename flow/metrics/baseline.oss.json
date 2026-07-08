@@ -1,0 +1,17 @@
+{
+  "tool": "oss-yosys",
+  "top": "vhsnunzip_unbuffered",
+  "timing": {
+    "ltp_depth": 3420
+  },
+  "area": {
+    "luts": 6038,
+    "lutmem": 0,
+    "ffs": 10982,
+    "carry": 114,
+    "mux": 226,
+    "bram36": 16,
+    "uram": 0,
+    "dsp": 0
+  }
+}
