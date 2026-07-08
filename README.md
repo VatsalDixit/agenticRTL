@@ -21,6 +21,7 @@ vectors/    Pre-generated *.tv test vectors (repo simulates out of the box)
 sim/        GHDL runner for a single testbench
 syn/        Synthesis scaffold (Vivado tcl + constraints) for the later stage
 flow/       The verification-loop orchestrator + loop design notes
+tools/      Docker-based GHDL runner + environment probe (zero-install path)
 docs/        Attribution and upstream license
 ```
 
@@ -46,8 +47,23 @@ specific block. `vhsnunzip_ram.sim.vhd` is used for simulation;
 
 ## Quick start (verification)
 
-Runs on Linux / **WSL** (Ubuntu). Windows-native works for vector generation
-(Python) but GHDL is easiest in WSL.
+> **Status: verified green.** The full testbench ladder passes under GHDL 6.0.0
+> (unit → integration → top), across multiple random seeds and multi-chunk
+> inputs.
+
+### Option A — Docker (recommended, zero-install)
+
+Only needs a running Docker daemon; no GHDL, no sudo, nothing installed on the
+host. Uses the pre-generated vectors in `vectors/`.
+
+```bash
+# whole ladder (unit → integration → top), stops at first failure:
+bash tools/run_sim_docker.sh
+# ...or a single testbench:
+bash tools/run_sim_docker.sh vhsnunzip_unbuffered_tc
+```
+
+### Option B — local GHDL (Linux / WSL)
 
 ```bash
 # 1. Install GHDL (Debian/Ubuntu/WSL)
