@@ -49,12 +49,21 @@ design is known-correct.
 The golden model (`model/emu/`) is the reference: any RTL change must keep the
 hardware output matching the model's serialized `*.tv` transfers.
 
-## Stage 2 — synthesis (scaffolded, see `syn/`)
+## Stage 2 — synthesis (open-source flow working; see `syn/`)
 
-Gated behind an all-pass from stage 1. Produces the timing/area feedback signal.
-Not wired to a toolchain yet (no Vivado on this machine) — `syn/README.md` has
-the plan and the parsing target (`synthesize.py`-style WNS→f_max and utilization
-extraction).
+Gated behind an all-pass from stage 1. Produces the area/timing feedback signal
+via Yosys (open-source), natively in WSL:
+
+```bash
+bash syn/synth_oss.sh     # -> syn/oss_build/summary.txt
+```
+
+`summary.txt` reports mapped area (LUT/FF/CARRY/BRAM) and a relative timing
+proxy (`ltp`, longest register-to-register logic depth). **Caveats** (see
+`syn/README.md`): area is a *relative* signal (Yosys maps SRLs to FFs, inflating
+counts vs Vivado), and there is no absolute Fmax on open-source UltraScale+.
+Vivado (`syn/synthesize.tcl`) remains the source of truth for absolute
+area/Fmax on `xcvu5p` when available.
 
 ## Stage 3 — optimization subagents (future)
 

@@ -45,39 +45,58 @@ Each stage has a matching self-checking testbench, so a failure localizes to a
 specific block. `vhsnunzip_ram.sim.vhd` is used for simulation;
 `vhsnunzip_ram.syn.vhd` (same entity) is for synthesis.
 
-## Quick start (verification)
+## Quick start
 
-> **Status: verified green.** The full testbench ladder passes under GHDL 6.0.0
+> **Status: verified green** — the full testbench ladder passes under GHDL
 > (unit → integration → top), across multiple random seeds and multi-chunk
-> inputs.
+> inputs; and the design **synthesizes** under Yosys (open-source). Everything
+> runs **natively in WSL/Linux** — no Docker, no sudo.
 
-### Option A — Docker (recommended, zero-install)
+### One-time setup (WSL, no sudo)
 
-Only needs a running Docker daemon; no GHDL, no sudo, nothing installed on the
-host. Uses the pre-generated vectors in `vectors/`.
-
-```bash
-# whole ladder (unit → integration → top), stops at first failure:
-bash tools/run_sim_docker.sh
-# ...or a single testbench:
-bash tools/run_sim_docker.sh vhsnunzip_unbuffered_tc
-```
-
-### Option B — local GHDL (Linux / WSL)
+Installs the open-source EDA stack (GHDL + Yosys + ghdl-yosys-plugin, i.e. the
+OSS CAD Suite) into `~/eda`:
 
 ```bash
-# 1. Install GHDL (Debian/Ubuntu/WSL)
-sudo apt-get install -y ghdl python3
-
-# 2. Generate test vectors (pure Python, no external tools)
-python3 model/gen_vectors.py
-
-# 3. Run the whole testbench ladder (unit → integration → top)
-bash flow/run_verify.sh
-
-# ...or a single testbench:
-bash sim/run.sh vhsnunzip_unbuffered_tc
+bash tools/setup_oss_cad.sh
 ```
+
+### Functional verification (native GHDL)
+
+```bash
+bash tools/verify_wsl.sh              # whole ladder (stops at first failure)
+bash tools/verify_wsl.sh --seed 7     # regenerate vectors with a new seed (fuzz)
+bash tools/verify_wsl.sh --top-only   # just the top-level testbench
+```
+
+`verify_wsl.sh` sources the OSS CAD environment, then runs `flow/run_verify.sh`.
+If you have the environment sourced already (`source ~/eda/oss-cad-suite/environment`),
+call `bash flow/run_verify.sh` or `bash sim/run.sh <tb>` directly.
+
+### Synthesis — area + relative timing (open-source)
+
+```bash
+bash syn/synth_oss.sh                 # -> syn/oss_build/summary.txt
+```
+
+Reports mapped area (LUT/FF/CARRY/BRAM) and a relative timing proxy (logic
+depth). See caveats in [syn/README.md](syn/README.md): area is a *relative*
+signal (Yosys maps SRLs to FFs, inflating counts vs Vivado), and open-source
+tools cannot produce an absolute Fmax for UltraScale+ — Vivado remains the
+source of truth for absolute numbers on `xcvu5p`.
+
+> _Optional Docker alternative:_ `bash tools/run_sim_docker.sh` runs the sim
+> ladder inside the `ghdl/ghdl` image if you ever want a zero-install check on
+> a machine without the suite. Not needed for the normal WSL flow.
+
+`gen_vectors.py` runs the Python golden model, self-verifies it, and serializes
+the expected per-stage stream transfers to `vectors/*.tv`. The VHDL testbenches
+read those back and assert against them. Regenerate with a new seed or your own
+input to fuzz:
+
+```bash
+python3 model/gen_vectors.py --seed 7
+python3 model/gen_vectors.py path/to/your/file --min 1024 --max 65536 --max-prob 0.3
 
 `gen_vectors.py` runs the Python golden model, self-verifies it, and serializes
 the expected per-stage stream transfers to `vectors/*.tv`. The VHDL testbenches

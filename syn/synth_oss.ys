@@ -1,0 +1,25 @@
+# Open-source synthesis of vhsnunzip_unbuffered via Yosys + the GHDL plugin.
+#
+# Targets the Xilinx UltraScale+ (xcup) cell library for a realistic AREA
+# estimate (LUT/FF/CARRY/MUX/RAM). Absolute timing (Fmax) is NOT produced here
+# -- open-source P&R (nextpnr) does not support UltraScale+ -- so we report a
+# RELATIVE timing proxy instead: the longest register-to-register logic depth
+# (`ltp`), which is a valid optimization signal (lower = shorter critical path).
+#
+# The behavioral RAM (vhsnunzip_ram.sim.vhd) is used; the synthesis RAM
+# (vhsnunzip_ram.syn.vhd) hand-instantiates Xilinx unisim/unimacro primitives
+# that Yosys does not have.
+#
+# Read + elaborate the VHDL (one line: the .ys format has no line continuation).
+ghdl --std=08 --work=work rtl/vhsnunzip_utils_pkg.vhd rtl/vhsnunzip_pkg.vhd rtl/vhsnunzip_int_pkg.vhd rtl/vhsnunzip_ram.sim.vhd rtl/vhsnunzip_srl.vhd rtl/vhsnunzip_fifo.vhd rtl/vhsnunzip_pre_decoder.vhd rtl/vhsnunzip_decoder.vhd rtl/vhsnunzip_decoder_long.vhd rtl/vhsnunzip_cmd_gen_1.vhd rtl/vhsnunzip_cmd_gen_2.vhd rtl/vhsnunzip_pipeline.vhd rtl/vhsnunzip_unbuffered.vhd -e vhsnunzip_unbuffered
+
+# Synthesize to the UltraScale+ cell library; flatten so the reports below
+# give whole-design totals rather than per-module local counts.
+synth_xilinx -family xcup -flatten -top vhsnunzip_unbuffered
+
+# Area report (mapped Xilinx cells), both human-readable and machine-readable.
+tee -o syn/oss_build/stat.txt stat
+tee -o syn/oss_build/stat.json stat -json
+
+# Relative timing proxy: longest topological path between registers.
+tee -o syn/oss_build/ltp.txt ltp -noff

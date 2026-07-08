@@ -6,8 +6,9 @@ sim/work/
 *.vcd
 work-obj*.cf
 
-# Vivado synthesis artifacts
+# Synthesis artifacts
 syn/synth_*/
+syn/oss_build/
 *.jou
 *.log
 !syn/synthesize.tcl
