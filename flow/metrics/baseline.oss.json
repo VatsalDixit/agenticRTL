@@ -2,14 +2,14 @@
   "tool": "oss-yosys",
   "top": "vhsnunzip_unbuffered",
   "timing": {
-    "ltp_depth": 3420
+    "ltp_depth": 3407
   },
   "area": {
-    "luts": 6038,
+    "luts": 6123,
     "lutmem": 0,
     "ffs": 10982,
-    "carry": 114,
-    "mux": 226,
+    "carry": 112,
+    "mux": 292,
     "bram36": 16,
     "uram": 0,
     "dsp": 0
