@@ -178,7 +178,18 @@ begin
         cmh.cp_end := off;
 
         -- Determine how many literal bytes we can write.
-        if li_len < signed(resize(budget, li_len'length)) then
+        --
+        -- budget is only 4 bits wide (0..15), so a full-width signed
+        -- magnitude comparison against the 33-bit li_len is unnecessary and
+        -- creates a long borrow-ripple on the critical path. It is exactly
+        -- equivalent to: li_len is negative (validity/sign bit set), OR all of
+        -- li_len's bits above bit 3 are zero AND its low nibble is < budget.
+        -- This replaces the wide comparator with a log-depth zero-reduction
+        -- plus a 4-bit compare, shortening the logic path without changing the
+        -- result.
+        if li_len(li_len'high) = '1'
+           or (unsigned(li_len(li_len'high - 1 downto 4)) = 0
+               and unsigned(li_len(3 downto 0)) < budget) then
           len := unsigned(li_len(3 downto 0)) + 1;
         else
           len := budget;
