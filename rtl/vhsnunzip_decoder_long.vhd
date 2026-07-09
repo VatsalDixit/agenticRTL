@@ -120,7 +120,10 @@ begin
         ---------------------------------------------------------------------
         ofi := to_integer(offns(2 downto 0));
 
-        if offns > cdh.endi then
+        -- offns is 4 bits and cdh.endi is only 3 bits (0..7), so the wide
+        -- ">" is exactly: offns >= 8 (bit 3 set), or its low 3 bits exceed
+        -- endi. This avoids a resized-compare carry ripple.
+        if offns(3) = '1' or offns(2 downto 0) > cdh.endi then
           -- No element (for now); beyond end of stream or starts on the next
           -- line.
           elh.li_val := '0';
@@ -191,7 +194,13 @@ begin
         -- go inside this if statement, but by doing it this way, the decoded
         -- header information is independent of the result of the condition
         -- (only the valid bits are).
-        if off > cdh.endi or offh /= 0 then
+        -- off is 9 bits and cdh.endi is only 3 bits (0..7), so "off > endi"
+        -- is exactly: any of off's bits above bit 2 are set (off >= 8), or
+        -- off's low 3 bits exceed endi. This replaces the 9-bit resized
+        -- comparator (a carry ripple on the critical path) with a shallow
+        -- OR-reduce plus a 3-bit compare, without changing the result.
+        if off(8 downto 3) /= "000000" or off(2 downto 0) > cdh.endi
+           or offh /= 0 then
           elh.cp_val := '0';
           elh.li_val := '0';
         else
@@ -203,7 +212,8 @@ begin
         -- and decrease by 8 accordingly to prepare for the next line. Also
         -- indicate to the datapath that it should pop from the literal line
         -- stream after executing this command to stay in sync.
-        if off > cdh.endi or offh /= 0 then
+        if off(8 downto 3) /= "000000" or off(2 downto 0) > cdh.endi
+           or offh /= 0 then
           off := off - 8;
           cdh.valid := '0';
           elh.ld_pop := '1';
