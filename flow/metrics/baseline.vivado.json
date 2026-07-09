@@ -5,14 +5,14 @@
   "part": "xc7k160tfbg484-2",
   "timing": {
     "period_ns": 4.0,
-    "wns_ns": -2.527,
-    "fmax_mhz": 153.21
+    "wns_ns": -2.025,
+    "fmax_mhz": 165.98
   },
   "area": {
-    "luts": 1693,
+    "luts": 1675,
     "lutmem": 291,
-    "ffs": 1168,
-    "carry": 60,
+    "ffs": 1167,
+    "carry": 56,
     "bram36": 16,
     "bram18": 0,
     "uram": 0,
