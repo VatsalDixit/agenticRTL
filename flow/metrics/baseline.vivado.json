@@ -2,17 +2,17 @@
   "tool": "vivado",
   "top": "vhsnunzip_unbuffered",
   "mode": "full",
-  "part": "xc7k160tfbg484-2",
+  "part": "xcvu5p-flva2104-2-i",
   "timing": {
     "period_ns": 4.0,
-    "wns_ns": -2.025,
-    "fmax_mhz": 165.98
+    "wns_ns": 0.464,
+    "fmax_mhz": 282.81
   },
   "area": {
-    "luts": 1675,
+    "luts": 1673,
     "lutmem": 291,
-    "ffs": 1167,
-    "carry": 56,
+    "ffs": 1166,
+    "carry": 24,
     "bram36": 16,
     "bram18": 0,
     "uram": 0,
