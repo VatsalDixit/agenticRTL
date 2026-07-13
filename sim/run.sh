@@ -5,7 +5,12 @@
 # step of the functional-verification loop.
 #
 # Usage:
-#   sim/run.sh [TESTBENCH_ENTITY]
+#   sim/run.sh [TESTBENCH_ENTITY] [--wave[=FORMAT]]
+#
+#   --wave[=FORMAT]  Dump a waveform after the run for viewing in GTKWave /
+#                    Surfer. FORMAT is fst (default), vcd, or ghw. The file is
+#                    written as wave.<FORMAT> in the build dir and its path is
+#                    printed at the end.
 #
 #   TESTBENCH_ENTITY defaults to vhsnunzip_unbuffered_tc.  Valid entities
 #   (each has a matching tb/<entity>.sim.08.vhd):
@@ -23,7 +28,23 @@
 #
 set -euo pipefail
 
-TB="${1:-vhsnunzip_unbuffered_tc}"
+# Parse args: one optional positional testbench name, plus an optional
+# --wave / --wave=FORMAT flag (order-independent).
+TB="vhsnunzip_unbuffered_tc"
+WAVE_FMT=""
+for arg in "$@"; do
+  case "$arg" in
+    --wave)       WAVE_FMT="fst" ;;
+    --wave=*)     WAVE_FMT="${arg#--wave=}" ;;
+    -*)           echo "ERROR: unknown option '$arg'"; exit 2 ;;
+    *)            TB="$arg" ;;
+  esac
+done
+case "$WAVE_FMT" in
+  ""|fst|vcd|ghw) : ;;
+  *) echo "ERROR: --wave FORMAT must be fst, vcd, or ghw (got '$WAVE_FMT')"; exit 2 ;;
+esac
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TB_FILE="$ROOT/tb/${TB}.sim.08.vhd"
 BUILD="$ROOT/sim/work/${TB}"
@@ -90,8 +111,22 @@ echo "== run: $TB =="
 # HUNG -- GHDL exits 0 in that case, so we detect the stop-time message and
 # treat it as a failure (otherwise a hang would look like a pass).
 STOP="--stop-time=20ms"
+
+# Optional waveform dump. GHW is GHDL-native (best VHDL type fidelity, GTKWave
+# only); FST is compact (GTKWave + Surfer); VCD is universal.
+WAVE_ARG=""
+WAVE_FILE=""
+if [ -n "$WAVE_FMT" ]; then
+  WAVE_FILE="$BUILD/wave.$WAVE_FMT"
+  case "$WAVE_FMT" in
+    fst) WAVE_ARG="--fst=wave.fst" ;;
+    vcd) WAVE_ARG="--vcd=wave.vcd" ;;
+    ghw) WAVE_ARG="--wave=wave.ghw" ;;
+  esac
+fi
+
 rc=0
-ghdl -r $STD "$TB" --ieee-asserts=disable $STOP >run.log 2>&1 || rc=$?
+ghdl -r $STD "$TB" --ieee-asserts=disable $STOP $WAVE_ARG >run.log 2>&1 || rc=$?
 sed -n '1,50p' run.log
 if grep -q "stop-time" run.log; then
   echo "FAIL: $TB (HANG — hit $STOP without finishing; likely a handshake deadlock)"
@@ -102,3 +137,6 @@ if [ $rc -ne 0 ]; then
   exit 1
 fi
 echo "PASS: $TB"
+if [ -n "$WAVE_FILE" ] && [ -f "$WAVE_FILE" ]; then
+  echo "WAVE: $WAVE_FILE"
+fi
