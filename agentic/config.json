@@ -1,0 +1,22 @@
+{
+  "wsl_distro": "Ubuntu-22.04",
+  "eda_suite": "$HOME/eda/oss-cad-suite",
+  "model": "opus",
+  "effort": "high",
+  "helper_model": "sonnet",
+  "candidates": 3,
+  "session_budget_usd": 12.0,
+  "session_max_turns": 200,
+  "session_timeout_min": 45,
+  "train_pages": 12,
+  "clock_period_ps": 4000,
+  "sim_timeout_s": 1200,
+  "synth_timeout_s": 2400,
+  "area_weight": 0.15,
+  "area_penalty_pct": 10.0,
+  "min_gain_pct": 0.2,
+  "max_area_growth_pct": 60.0,
+  "heldout_share_min": 0.15,
+  "overfit_train_pct": 5.0,
+  "limit_wait_min": 20
+}

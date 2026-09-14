@@ -19,3 +19,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# agentic loop scratch (worktrees, corpus, run records)
+.agentic/
