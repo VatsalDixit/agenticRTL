@@ -55,15 +55,20 @@ LIMIT_MARKERS = ('limit', 'resets', 'rate_limit', 'overloaded', '429', 'quota')
 
 
 def child_env():
-    """The child's environment. A short placeholder API key is dropped so it
-    cannot outrank the Claude Code login."""
-    env = dict(os.environ)
-    key = env.get('ANTHROPIC_API_KEY', '')
+    """The child's environment.
+
+    A short placeholder ANTHROPIC_API_KEY would outrank the Claude Code login
+    and every call would fail with 401. The SDK merges its env on top of the
+    parent's, so a key left out of the dict is still inherited; it has to be
+    removed from this process's own environment. This is a standalone process,
+    so that is safe.
+    """
+    key = os.environ.get('ANTHROPIC_API_KEY', '')
     if key and len(key) < 40:
-        env.pop('ANTHROPIC_API_KEY', None)
-    env.pop('CLAUDECODE', None)
-    env.pop('CLAUDE_CODE_ENTRYPOINT', None)
-    return env
+        os.environ.pop('ANTHROPIC_API_KEY', None)
+    for name in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION'):
+        os.environ.pop(name, None)
+    return {}
 
 
 def availability():
