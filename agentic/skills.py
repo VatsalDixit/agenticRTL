@@ -83,6 +83,30 @@ def record_outcome(data, skill_ids, passed, adopted, advantage):
             sk['advantages'] = (sk['advantages'] + [round(advantage, 3)])[-20:]
 
 
+def step_confidence(sk, wanted):
+    """Move a skill's confidence at most one level per iteration, and only
+    with evidence.
+
+    One failed attempt is not a reason to mark a skill 'avoid': the biggest
+    win of an earlier campaign was a line widening that failed on its first
+    try. So: down one level at a time, 'avoid' only after two measured tries
+    with no adoption, 'high' only after an adoption.
+    """
+    cur = sk['confidence']
+    if wanted == cur or wanted not in ORDER or cur not in ORDER:
+        return cur
+    ci, wi = ORDER.index(cur), ORDER.index(wanted)
+    if wi > ci:                                   # demotion, one step
+        nxt = ORDER[ci + 1]
+        if nxt == 'avoid' and not (sk.get('tried', 0) >= 2 and sk.get('adopted', 0) == 0):
+            return cur
+        return nxt
+    nxt = ORDER[ci - 1]                           # promotion, one step
+    if nxt == 'high' and sk.get('adopted', 0) < 1:
+        return cur
+    return nxt
+
+
 def apply_updates(data, updates, iteration):
     """Merge skill updates proposed by the learning step.
 
@@ -116,9 +140,10 @@ def apply_updates(data, updates, iteration):
             data['skills'].append(sk)
             changed.append('new: ' + sid)
         else:
-            if conf != sk['confidence']:
-                changed.append('%s: %s -> %s' % (sid, sk['confidence'], conf))
-                sk['confidence'] = conf
+            new_conf = step_confidence(sk, conf)
+            if new_conf != sk['confidence']:
+                changed.append('%s: %s -> %s' % (sid, sk['confidence'], new_conf))
+                sk['confidence'] = new_conf
             if strategy and len(strategy) > len(sk['strategy']) + 40:
                 sk['strategy'] = strategy[:900]
         if note:

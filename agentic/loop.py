@@ -812,6 +812,13 @@ def main():
             if args.max_hours and (time.time() - t_start) > args.max_hours * 3600:
                 state['stopped'] = 'time limit of %.1f h reached' % args.max_hours
                 break
+            # Re-read the skill library each iteration so a person can edit
+            # it while the run is going.
+            if os.path.exists(run.skills_path):
+                try:
+                    skills_data = skills_mod.load(run.skills_path)
+                except Exception as exc:
+                    log('  could not reload skills.json (%s); keeping the copy in memory' % exc)
             outcome = run_iteration(run, draws, skills_data, k, n_cands,
                                     dry_run=args.dry_run, fake=args.fake)
             if args.dry_run:
