@@ -25,6 +25,7 @@ Standard library only (tkinter), so it runs wherever the kit runs.
 import argparse
 import datetime
 import json
+import math
 import os
 import sys
 import time
@@ -215,29 +216,39 @@ def rounded(cv, x1, y1, x2, y2, r, **kw):
     return cv.create_polygon(pts, smooth=True, **kw)
 
 
-def nice_bounds(lo, hi):
-    """A rounded (lo, hi, step) that contains the data with a little air."""
+def nice_bounds(lo, hi, target=5):
+    """A rounded (lo, hi, step) that contains the data with a little air.
+
+    Deliberately NOT anchored at zero. These charts exist to show a design
+    changing by tens of percent, and a zeroed axis squashed a real 24% rise
+    in area into 11% of the chart height, which read as a flat line.
+    """
     if lo is None or hi is None:
         return 0.0, 1.0, 0.5
     if hi == lo:
-        pad = abs(hi) * 0.1 or 1.0
+        pad = abs(hi) * 0.05 or 1.0
         lo, hi = lo - pad, hi + pad
     span = hi - lo
-    lo -= span * 0.12
-    hi += span * 0.12
-    if lo > 0 and lo < span:
-        lo = 0.0
-    raw = (hi - lo) / 4.0
-    mag = 10 ** int(('%e' % raw).split('e')[1])
+    lo -= span * 0.06
+    hi += span * 0.06
+    raw = (hi - lo) / float(target)
+    mag = 10.0 ** math.floor(math.log10(raw)) if raw > 0 else 1.0
     for mult in (1, 2, 2.5, 5, 10):
         if mult * mag >= raw:
             step = mult * mag
             break
     else:
         step = 10 * mag
-    lo = step * (int(lo / step) - (1 if lo % step else 0)) if lo else 0.0
-    hi = step * (int(hi / step) + (1 if hi % step else 0))
+    lo = math.floor(lo / step) * step
+    hi = math.ceil(hi / step) * step
     return lo, hi, step
+
+
+# A rejected candidate can sit far outside the range the kept design ever
+# occupies (one here was +91% area). Letting it set the scale flattens the
+# line the chart is actually about, so it is drawn pinned to the edge with a
+# caret instead, and the axis is scaled to the design.
+OUTLIER_SPAN_FACTOR = 2.0
 
 
 def fmt(v):
@@ -418,7 +429,16 @@ class Chart(tk.Canvas):
                              fill=C['faint'], font=self.f['small'])
             return
 
-        lo, hi, step = nice_bounds(min(vals), max(vals))
+        # Scale to the design the loop kept; a candidate far outside that
+        # range is pinned to the edge rather than allowed to flatten it.
+        line = [p[self.key] for p in self.best if p.get(self.key) is not None]
+        if line and len(line) > 1:
+            lspan = max(line) - min(line)
+            room = max(lspan * OUTLIER_SPAN_FACTOR, abs(max(line)) * 0.04)
+            keep = [v for v in vals if min(line) - room <= v <= max(line) + room]
+            lo, hi, step = nice_bounds(min(keep or line), max(keep or line))
+        else:
+            lo, hi, step = nice_bounds(min(vals), max(vals))
         imax = max([p['i'] for p in self.best] + [p['i'] for p in self.cands] + [1])
         px = lambda i: pad_l + (w - pad_l - pad_r) * (i / float(max(imax, 1)))
         py = lambda v: h - pad_b - (h - pad_t - pad_b) * ((v - lo) / float(hi - lo))
@@ -448,16 +468,23 @@ class Chart(tk.Canvas):
         # rejected / adopted candidates
         for p in self.cands:
             v = p.get(self.key)
-            if v is None:
+            if v is None or p['adopted']:
                 continue
-            x, yv = px(p['i']), py(v)
-            if p['adopted']:
+            x = px(p['i'])
+            tag = ('pt', 'pt:%s' % json.dumps(
+                {'i': p['i'], 'id': p.get('id'), 'v': v, 'o': p.get('outcome')}))
+            if v > hi or v < lo:                 # off the scale: pin it
+                edge = pad_t + 5 if v > hi else h - pad_b - 5
+                up = 1 if v > hi else -1
+                self.create_polygon(x, edge - 5 * up, x - 4, edge + 2 * up,
+                                    x + 4, edge + 2 * up, fill=C['panel'],
+                                    outline=C['faint'], width=1, tags=tag)
+                self.create_text(x + 7, edge, text=fmt(v), anchor='w',
+                                 fill=C['faint'], font=self.f['tiny'], tags=tag)
                 continue
+            yv = py(v)
             self.create_oval(x - 3, yv - 3, x + 3, yv + 3, outline=C['faint'],
-                             fill=C['panel'], width=1,
-                             tags=('pt', 'pt:%s' % json.dumps(
-                                 {'i': p['i'], 'id': p.get('id'), 'v': v,
-                                  'o': p.get('outcome')})))
+                             fill=C['panel'], width=1, tags=tag)
 
         # the design the loop kept
         pts = [(px(p['i']), py(p[self.key])) for p in self.best
