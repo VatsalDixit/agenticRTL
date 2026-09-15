@@ -176,6 +176,85 @@ def fake_write_candidates(assignments, log):
     return out
 
 
+RETRY_MIN_GAIN_PCT = 5.0
+RETRY_PER_ITERATION = 2
+
+
+def retry_candidates(run, state, k, iter_dir, log):
+    """Re-merge earlier rejected candidates with a large gain onto the current
+    best and offer them as extra candidates.
+
+    A candidate can be rejected for a rule that later changes (area pricing),
+    or lose only because a sibling scored better that iteration. If its
+    branch still merges cleanly onto the best design, measuring it again
+    costs half a minute. Each old candidate is retried once.
+    """
+    retried = state.setdefault('retried', [])
+    pool = []
+    for it in state['iterations']:
+        for c in it.get('candidates', []):
+            m = c.get('measured') or {}
+            if c.get('outcome') in ('too_expensive', 'candidate') and c.get('branch') \
+                    and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT \
+                    and c['branch'] not in retried \
+                    and git_ok(['rev-parse', '--verify', 'refs/heads/' + c['branch']]):
+                pool.append(c)
+    pool.sort(key=lambda c: -(c['measured'].get('gain_pct') or 0))
+    out = []
+    for j, old in enumerate(pool[:RETRY_PER_ITERATION], 1):
+        retried.append(old['branch'])
+        label = 'r%d' % j
+        branch = 'agentic-cand/%s/i%d-%s' % (state['run'], k, label)
+        path = os.path.join(iter_dir, label)
+        try:
+            add_worktree(path, branch, state['best']['commit'])
+            merged = git_ok(['-c', 'user.name=agentic-loop', '-c', 'user.email=agentic@localhost',
+                             'merge', '--no-edit', '-m', 'agentic i%d %s: retry %s'
+                             % (k, label, old.get('id')), old['branch']], cwd=path)
+            if not merged:
+                git_ok(['merge', '--abort'], cwd=path)
+                log('  %s: retry of %s does not merge onto the current best; skipped'
+                    % (label, old.get('id')))
+                remove_worktree(path)
+                git_ok(['branch', '-D', branch])
+                continue
+            sha = git(['rev-parse', 'HEAD'], cwd=path)
+            if sha == state['best']['commit']:
+                remove_worktree(path)
+                git_ok(['branch', '-D', branch])
+                continue
+            files = git(['diff', '--name-only', 'HEAD^1', 'HEAD'], cwd=path).splitlines()
+        except GitError as exc:
+            log('  %s: retry of %s failed: %s' % (label, old.get('id'), exc))
+            continue
+        log('  %s: retrying %s (measured %+.2f%% at iteration %d) merged onto the current best'
+            % (label, old.get('id'), old['measured'].get('gain_pct') or 0,
+               it_of(state, old)))
+        out.append(({'label': label, 'branch': branch,
+                     'direction': {'focus': 'retry of %s: %s' % (old.get('id'), old['direction'].get('focus', '')),
+                                   'hypothesis': 'rejected or outscored earlier with %+.2f%% gain; '
+                                                 'may pass under the current rule or on the current best'
+                                                 % (old['measured'].get('gain_pct') or 0),
+                                   'skill_ids': old['direction'].get('skill_ids') or []},
+                     'id': 'retry-' + str(old.get('id')), 'rationale': old.get('rationale', ''),
+                     'expected_gain_pct': old['measured'].get('gain_pct'),
+                     'expected_effect': old.get('expected_effect', ''), 'risk': old.get('risk', ''),
+                     'skills_used': old.get('skills_used') or [],
+                     'session': {'status': 'retry', 'cost_usd': 0.0, 'turns': 0, 'seconds': 0.0,
+                                 'error': '', 'subtype': 'retry'},
+                     'commit': sha, 'files_changed': files, 'outcome': '', 'reason': '',
+                     'measured': {}, 'score': None, 'advantage': None, 'adopted': False},
+                    {'label': label, 'worktree': path, 'direction': {}, 'branch': branch}))
+    return out
+
+
+def it_of(state, cand):
+    for it in state['iterations']:
+        if cand in it.get('candidates', []):
+            return it['iteration']
+    return 0
+
+
 def blind(path):
     """Remove the scoring stimulus from a candidate worktree."""
     for rel in BLIND_DIRS:
@@ -544,6 +623,12 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                 asg['label'], cand['id'], ', '.join(files)[:120],
                 cand['expected_gain_pct']))
         cands.append(cand)
+
+    # earlier rejected candidates with a big gain, re-merged onto the best
+    if not fake:
+        for cand, asg in retry_candidates(run, state, k, iter_dir, log):
+            cands.append(cand)
+            assignments.append(asg)
 
     # measure the ones that changed something
     to_measure = [(c, asg) for c, asg in zip(cands, assignments) if c['commit']
