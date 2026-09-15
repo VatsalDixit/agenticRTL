@@ -282,11 +282,16 @@ def make_gate(worktree):
         tool_input = tool_input or {}
         if tool_name == 'Bash':
             cmd = (tool_input.get('command') or '').strip()
+            # Read-only git views of other branches (a rejected attempt's
+            # files) are allowed; nothing with pipes, redirects or chaining.
+            if re.match(r'^git (show|diff|log)\b[^|;&><`$]*$', cmd):
+                return PermissionResultAllow()
             if cmd not in PERMITTED_COMMANDS:
                 return PermissionResultDeny(
-                    message=('Only this command is permitted, exactly as written: '
-                             '`python agentic/check.py` (or with --quick). Use the '
-                             'Read, Grep, Glob, Edit and Write tools for everything else.'))
+                    message=('Only these commands are permitted: '
+                             '`python agentic/check.py` (or with --quick), and read-only '
+                             '`git show`, `git diff`, `git log` without pipes or redirects. '
+                             'Use the Read, Grep, Glob, Edit and Write tools for everything else.'))
             if not _harness_clean():
                 return PermissionResultDeny(
                     message=('agentic/ has been modified in this worktree. Restore it '
@@ -374,8 +379,12 @@ THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
                                     Also prints bytes/cycle and a stage
                                     profile on invented data (about 15 s).
   python agentic/check.py --quick   the first three shapes.
-  Any other shell command is refused. Use Read/Grep/Glob/Edit/Write for
-  everything else. You cannot see the scoring data; that is deliberate.
+  Also allowed, read-only and without pipes or redirects: `git show`,
+  `git diff`, `git log`. When the history names an earlier attempt's branch,
+  `git show <branch>:rtl/<file>` shows its version of a file; reuse what was
+  right in it and fix what was wrong. Any other shell command is refused.
+  Use Read/Grep/Glob/Edit/Write for everything else. You cannot see the
+  scoring data; that is deliberate.
 
 HOW TO WORK
   * Read the RTL before changing it. Understand the stage the profile names.

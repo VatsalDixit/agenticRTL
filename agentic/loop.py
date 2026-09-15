@@ -233,18 +233,25 @@ def evaluate(metrics, parent, goal):
         return out
     gain = meas['gain_pct']
     area = meas['area_gain_pct'] or 0.0
+    # Area is priced, not capped: a throughput goal on this design is reached
+    # by widening, and widening costs silicon. The one hard rule is an
+    # efficiency floor (gain per percent of area) so that a small gain cannot
+    # buy a lot of area. An earlier version added a heavy penalty above 10%
+    # area growth; it rejected a +28.9% throughput widening at +91% area in
+    # favour of +3% at +10%, which is the wrong trade for a throughput goal.
     score = -gain + float(CONFIG['area_weight']) * max(area, 0.0)
-    if area > float(CONFIG['area_penalty_pct']):
-        score += 0.5 * max(area - float(CONFIG['area_penalty_pct']), 0.0)
     out['score'] = round(score, 4)
     if gain < float(CONFIG['min_gain_pct']):
         out['outcome'] = 'no_gain' if gain > -float(CONFIG['min_gain_pct']) else 'regressed'
         out['reason'] = 'goal metric %+.2f%% (needs at least +%.2f%%)' % (
             gain, float(CONFIG['min_gain_pct']))
         return out
-    if area > float(CONFIG['max_area_growth_pct']) and gain < area:
+    ei = gain / area if area > 0 else float('inf')
+    meas['efficiency'] = round(ei, 3) if ei != float('inf') else None
+    if area > float(CONFIG['max_area_growth_pct']) and ei < float(CONFIG['ei_floor']):
         out['outcome'] = 'too_expensive'
-        out['reason'] = 'area +%.1f%% for %+.2f%% gain' % (area, gain)
+        out['reason'] = ('area +%.1f%% for %+.2f%% gain: efficiency %.2f is under the '
+                         'floor of %.2f' % (area, gain, ei, float(CONFIG['ei_floor'])))
         return out
     out['outcome'] = 'candidate'
     out['adoptable'] = True
@@ -327,6 +334,12 @@ def history_text(state):
             line = '- ' + ': '.join(bits[:2]) + ('; ' + '; '.join(bits[2:]) if len(bits) > 2 else '')
             if c.get('reason') and c.get('outcome') not in ('adopted', 'candidate'):
                 line += ' -- ' + c['reason'][:160]
+            # A rejected attempt with a real gain is worth rebuilding; the
+            # session can read its files with `git show <branch>:<path>`.
+            if c.get('outcome') in ('too_expensive', 'regressed') and c.get('branch') \
+                    and (m.get('bpc_gain_pct') or 0) >= 5.0:
+                line += (' [its files are on git branch %s: read them with '
+                         '`git show %s:rtl/<file>`]' % (c['branch'], c['branch']))
             lines.append(line)
         for les in it.get('lessons', []):
             lines.append('  lesson: ' + les)

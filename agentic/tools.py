@@ -53,10 +53,12 @@ DEFAULT_CONFIG = {
     "sim_timeout_s": 1200,
     "synth_timeout_s": 2400,
     # Scoring.
+    # Scoring: score = -gain% + area_weight x area_growth%. Above
+    # max_area_growth_pct a candidate also needs gain/area >= ei_floor.
     "area_weight": 0.15,
-    "area_penalty_pct": 10.0,
     "min_gain_pct": 0.2,
-    "max_area_growth_pct": 60.0,
+    "max_area_growth_pct": 25.0,
+    "ei_floor": 0.2,
     "heldout_share_min": 0.15,
     "overfit_train_pct": 5.0,
     # How long to wait when the model provider says "limit reached".

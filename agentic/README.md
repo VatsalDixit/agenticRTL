@@ -126,8 +126,12 @@ checkout is never modified by the loop.
 2. Throughput = geomean bytes/cycle over the 8 real draws x f_max from
    Yosys/ABC on Nangate 45 nm. Synthetic draws must pass but do not enter
    the score (an earlier loop let one synthetic draw outvote every real one).
-3. Score = -gain% + 0.15 x area growth% (+ extra above 10% area growth).
-   Adopted only if gain >= 0.2% and area growth <= 60% or gain >= growth.
+3. Score = -gain% + 0.15 x area growth%. Area is priced, not capped:
+   adopted only if gain >= 0.2%, and when area grows more than 25% the
+   efficiency (gain per percent of area) must be at least 0.2. A first
+   version added a heavy penalty above 10% area growth; it rejected a +28.9%
+   throughput widening at +91% area in favour of +3% at +10%, which is the
+   wrong trade for a throughput goal.
 4. Among adoptable candidates the lowest score wins and the run branch
    moves to its commit.
 
