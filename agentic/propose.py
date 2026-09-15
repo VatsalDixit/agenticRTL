@@ -264,9 +264,19 @@ def make_gate(worktree):
         try:
             res = subprocess.run(['git', 'status', '--porcelain', '--', 'agentic'],
                                  cwd=root, capture_output=True, text=True, timeout=60)
-            return res.returncode == 0 and not res.stdout.strip()
         except Exception:
             return False
+        if res.returncode != 0:
+            return False
+        for line in res.stdout.splitlines():
+            path = line[3:].strip().replace('\\', '/')
+            # The scoring data is deliberately absent from a candidate
+            # worktree; its absence is not a modification of the harness.
+            if path.startswith('agentic/data/') or path.endswith('.parquet'):
+                continue
+            if path:
+                return False
+        return True
 
     async def gate(tool_name, tool_input, _ctx):
         tool_input = tool_input or {}
@@ -345,7 +355,8 @@ WHAT YOU MUST NOT CHANGE
   agentic/ (the harness), vectors/, model/, tb/. The unit testbenches in tb/
   compare against a model of the ORIGINAL micro-architecture, so they are
   allowed to break; they are not used to judge you. Only the bytes that come
-  out of the top entity are judged.
+  out of the top entity are judged. The worktree is exactly as intended: do
+  not try to restore, fetch or recreate any file that seems to be missing.
 
 HOW YOU ARE JUDGED
   1. Correctness: compressed Snappy chunks in, and every output byte must

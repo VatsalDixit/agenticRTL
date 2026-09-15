@@ -22,3 +22,7 @@ Thumbs.db
 
 # agentic loop scratch (worktrees, corpus, run records)
 .agentic/
+
+# The TPC-H Parquet tables travel with the kit folder, not with git, so a
+# candidate worktree never contains the scoring data.
+agentic/data/

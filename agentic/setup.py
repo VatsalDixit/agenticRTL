@@ -128,13 +128,28 @@ def main():
         ok('no API key; the claude login on this machine is used')
 
     print('5. stimulus corpus')
-    try:
-        import measure
-        draws = measure.prepare_corpus()
-        ok('%d draws under %s' % (len(draws), measure.corpus_dir()))
-    except Exception as exc:
-        bad('could not build the corpus: %s' % exc)
+    import stim
+    missing = []
+    for table in stim.TRAIN_TABLES + stim.HELD_OUT_TABLES:
+        try:
+            stim.table_path(table)
+        except IOError:
+            missing.append(table)
+    if missing:
+        bad('Parquet tables missing: %s. They travel with the agentic/data folder '
+            '(not with git); copy the whole agentic/ folder from the source repo, '
+            'or generate them with the old flow/make_test_parquet.py --table all '
+            'into test_data/.' % ', '.join(missing))
         failures += 1
+    else:
+        ok('all %d Parquet tables present' % len(stim.TRAIN_TABLES + stim.HELD_OUT_TABLES))
+        try:
+            import measure
+            draws = measure.prepare_corpus()
+            ok('%d draws under %s' % (len(draws), measure.corpus_dir()))
+        except Exception as exc:
+            bad('could not build the corpus: %s' % exc)
+            failures += 1
 
     print('6. frozen instrument')
     import freeze

@@ -62,8 +62,10 @@ limit entirely.
 ## Setup on a fresh machine
 
 1. Clone the design repo (the `vhsnunzip` lite layout: `rtl/`, `tb/`,
-   `model/`, `vectors/`). Copy this `agentic/` folder into it. The repo path
-   must not contain spaces.
+   `model/`, `vectors/`). Copy this whole `agentic/` folder into it, as a
+   folder, not through git: `agentic/data/*.parquet` (the scoring data) is
+   deliberately git-ignored so that a candidate worktree never contains it.
+   The repo path must not contain spaces.
 2. Tools where the simulator lives (WSL Ubuntu on Windows, or plain Linux):
    the OSS CAD Suite (GHDL + Yosys with the ghdl plugin) unpacked at
    `~/eda/oss-cad-suite`. Change `eda_suite` / `wsl_distro` in

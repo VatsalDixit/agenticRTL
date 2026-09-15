@@ -52,8 +52,13 @@ from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: 
                    git_ok, now_iso, pct, read_json, rmtree, write_json)
 from tools import kill_all as tools_kill_all                          # noqa: E402
 
-BLIND_DIRS = ('vectors', 'test_data', os.path.join('agentic', 'data'))
-BLIND_SUFFIXES = ('.tv', '.parquet')
+# The scoring data (agentic/data, test_data) is not tracked by git, so a new
+# worktree never contains it. These are removed only if someone committed
+# them by hand. vectors/ (the upstream unit-test vectors from a built-in
+# sample) stays: it is not the scoring data and deleting tracked files makes
+# the worktree look damaged to the session working in it.
+BLIND_DIRS = ('test_data', os.path.join('agentic', 'data'))
+BLIND_SUFFIXES = ('.parquet',)
 METRIC_KEYS = {'throughput': 'throughput_gbps', 'bytes_per_cycle': 'bytes_per_cycle',
                'fmax': 'f_max_mhz', 'area': 'area_um2'}
 
