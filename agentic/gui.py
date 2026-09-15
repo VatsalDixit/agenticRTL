@@ -70,8 +70,8 @@ SETUP_STEPS = [
     ('baseline', 'measure baseline',  'simulate every draw, then synthesise'),
 ]
 LOOP_STEPS = [
-    ('plan',    '1. analyse & plan',  'stage rates vs ceilings, then pick N directions'),
-    ('write',   '2. write candidates', 'N Claude sessions, each in its own git worktree'),
+    ('plan',    '1. analyse & plan',  'stage rates vs ceilings, then pick {n} direction{s}'),
+    ('write',   '2. write candidates', '{n} Claude session{s}, each in its own git worktree'),
     ('measure', '3. measure each',    'oracle on every byte, bytes/cycle, f_max, area'),
     ('adopt',   '4. select & adopt',  'best score moves the run branch'),
     ('learn',   '5. learn skills',    'group advantage updates skills.json'),
@@ -317,10 +317,20 @@ class FlowDiagram(tk.Canvas):
         total = state.get('max_iters') or '?'
         y = self._heading(x1, y, 'EVERY ITERATION' + ('    iteration %s of %s' % (k, total)
                                                       if k else ''))
+        # How many candidates this run actually writes each iteration. Taken
+        # from the last iteration on record rather than the setting, because
+        # --candidates can change when a run is resumed, and it did here.
+        n = state.get('candidates') or 3
+        iters = state.get('iterations') or []
+        if iters and iters[-1].get('candidates'):
+            n = len([c for c in iters[-1]['candidates']
+                     if (c.get('session') or {}).get('status') != 'retry']) or n
+        fill = {'n': n, 's': '' if n == 1 else 's'}
+
         top = y
         for key, title, sub in LOOP_STEPS:
             active = (phase == key) and not stopped
-            y = self._step(x1 + 16, x2, y, title, sub, active, False,
+            y = self._step(x1 + 16, x2, y, title, sub.format(**fill), active, False,
                            st.get('detail') if active else '')
             if key != LOOP_STEPS[-1][0]:
                 y = self._arrow(x1 + 16, x2, y)
