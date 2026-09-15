@@ -736,16 +736,28 @@ class Dashboard(tk.Tk):
             label, colour = 'DEMO: replaying phases, not a live run', C['warn']
         self.live_lbl.configure(text=label, fg=colour)
 
-        # phase line
+        # phase line. The elapsed counter means different things depending on
+        # whether the loop is still working: "in this step" while it runs, and
+        # "ago" once it has stopped. Showing a climbing "in this step" on a
+        # finished run reads as if something were still happening.
         started = st.get('phase_started')
         secs = time.time() - started if started else 0
         k = st.get('iteration') or len(state.get('iterations', []))
         phase = st.get('phase') or '-'
         pretty = {key: title for key, title, _ in SETUP_STEPS + LOOP_STEPS}.get(phase, phase)
-        # Two lines: the left panel is narrow and one line gets clipped.
+        over = bool(state.get('stopped') or st.get('finished'))
+        if over:
+            when = st.get('finished') or ''
+            tail = 'stopped %s ago%s' % (hhmmss(secs),
+                                         ', at ' + when[11:16] if len(when) >= 16 else '')
+        elif not pid_alive(st.get('pid')) and not self.demo:
+            tail = 'no loop process; last wrote %s ago' % hhmmss(secs)
+        else:
+            tail = '%s in this step' % hhmmss(secs)
         self.phase_lbl.configure(
-            text='iteration %s of %s\n%s   ·   %s in this step'
-                 % (k or '-', state.get('max_iters', '?'), pretty, hhmmss(secs)))
+            text='iteration %s of %s\n%s   ·   %s'
+                 % (k or '-', state.get('max_iters', '?'),
+                    'finished' if over else pretty, tail))
 
         base = state.get('baseline') or {}
         best = (state.get('best') or {}).get('metrics') or {}
