@@ -7,7 +7,29 @@ as you ask, and leaves the best design on a git branch.
 python agentic/setup.py                                   # once: check tools, build stimulus
 python agentic/loop.py --goal "increase throughput by 50%" --iters 100
 python agentic/loop.py --status                           # what is it doing right now
+python agentic/gui.py                                     # the live dashboard window
 ```
+
+## The dashboard
+
+`python agentic/gui.py` opens a window that watches a run. It reads the run's
+two JSON files once a second and writes nothing, so it cannot affect the loop;
+open it, close it, or crash it at any time.
+
+- **The loop as a flow diagram**, with the step the run is in right now lit up,
+  the iteration number, and how long it has been in that step. The step names
+  are the same strings the loop writes into `status.json`, so the highlight is
+  read from the run, not guessed.
+- **Area and clock frequency per iteration**, plus throughput. The line is the
+  design the loop kept, the filled dots are adoptions, and the hollow dots are
+  every candidate it measured and rejected, so the chart shows the search and
+  not just the result. Hover a dot for its name and value.
+- **Headline numbers** against the baseline, and the table of what each
+  iteration adopted.
+
+`--run NAME` picks a run (the dropdown lists them all, newest first).
+`--demo` replays a finished run's phases one a second, which is how to see the
+highlighting without waiting for a live run. Tkinter only, no extra packages.
 
 The design is `vhsnunzip`, a VHDL-2008 Snappy decompressor (`rtl/`). Nothing
 in this folder is specific to one version of that design: the harness reads
@@ -160,6 +182,7 @@ session reads it. You can edit it by hand.
 | `tb/vhsnunzip_perf_tc.sim.08.vhd` | width-generic throughput testbench |
 | `syn/sim_draws.sh`, `syn/synth.sh`, `syn/ram_stub.vhd` | tool scripts (run in WSL/bash) |
 | `report.py` | status.json and report.html |
+| `gui.py` | the live dashboard window (Tkinter) |
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |
 | `setup.py` | doctor + preparation |
 | `tools.py`, `config.json` | shared helpers and settings |

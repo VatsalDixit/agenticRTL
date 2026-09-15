@@ -654,6 +654,12 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
             raw[c['label']] = metrics
             c.update({'measured': ev['measured'], 'score': ev['score'],
                       'outcome': ev['outcome'], 'reason': ev['reason'],
+                      # Kept in the saved record (unlike 'metrics', which is
+                      # stripped) so the dashboard can plot a candidate's real
+                      # numbers instead of rebuilding them from percentages.
+                      'absolute': {kk: metrics.get(kk) for kk in
+                                   ('area_um2', 'f_max_mhz', 'throughput_gbps',
+                                    'bytes_per_cycle', 'wns_ns', 'regs')},
                       'metrics': {kk: vv for kk, vv in metrics.items() if kk != 'draws'},
                       'draws': [{kk: vv for kk, vv in r.items() if kk not in ('analysis', 'counters')}
                                 for r in metrics.get('draws', [])]})
