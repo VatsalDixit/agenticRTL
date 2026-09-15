@@ -407,9 +407,15 @@ WHEN YOU ARE DONE
    "risk": "what you are least sure about",
    "skills_used": ["skill ids from the library you applied"]}
   expected_gain_pct is scored against the measurement afterwards; an honest
-  small number is worth more than a hopeful one. If you could not produce a
-  working change, write {"id": "none", "rationale": "why"} and leave the RTL
-  as you found it.
+  small number is worth more than a hopeful one.
+
+  Declining is the last resort, not an option to reach for after reading.
+  A structural change (wider line, wider port, more elements per cycle) is
+  hard and touches several files; that is exactly why this session exists
+  and why it has a large budget. Plan it, build it in verified steps, and
+  keep going while the check passes. Only if the change is genuinely
+  impossible or the measured profile contradicts the assignment, write
+  {"id": "none", "rationale": "why"} and leave the RTL as you found it.
 """
 
 
@@ -484,6 +490,11 @@ HISTORY (most recent last)
 Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
 - Each direction targets the measured bottleneck or a credible second one;
   never an idle stage. Prefer high-confidence skills that fit the profile.
+- Direction 1 MUST raise the per-cycle ceiling of the stage the lever names
+  (a structural change: wider line, wider port, more elements per cycle),
+  not a timing tweak, unless the history shows that exact change failing
+  three times. Timing tweaks are for the other directions. Spell out the
+  steps: which records, which stages, which files, in what order.
 - Do not repeat a direction that failed in the history unless you say what
   is different this time. Never choose an AVOID skill.
 - Diversify: different mechanisms, not three flavours of one idea. Include
