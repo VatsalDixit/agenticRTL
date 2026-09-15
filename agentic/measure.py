@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 
 KIT = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +43,10 @@ TOP = 'vhsnunzip_unbuffered'
 _DELAY = re.compile(r'Delay\s*=\s*([\d.]+)\s*ps')
 _AREA = re.compile(r'Chip area for module .*?:\s*([\d.]+)')
 _SEQ_AREA = re.compile(r'used for sequential elements:\s*([\d.]+)')
-_CELL = re.compile(r'^\s*(\d+)\s+[\d.E+-]+\s+(\S+)\s*$', re.M)
+# A stat -liberty row with a real area number: "     3120 1.41E+04   DFF_X1".
+# Rows for wires/ports ("38638 - wires"), internal $cells and the total row
+# ("38473 9.02E+04 cells") are not cells and are skipped below.
+_CELL = re.compile(r'^\s*(\d+)\s+(\d[\d.E+-]*)\s+([A-Za-z]\S*)\s*$', re.M)
 
 
 class MeasureError(RuntimeError):
@@ -83,17 +87,38 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
     when something went wrong. Raises MeasureError when the design does not
     even compile.
     """
+    if widths.get('unresolved'):
+        raise MeasureError('cannot read the width of %s from the RTL: declare '
+                           'top-level ports with a literal range, e.g. '
+                           'std_logic_vector(127 downto 0)'
+                           % ', '.join(widths['unresolved']))
     generics = ('-gCO_BYTES=%d -gCO_CNT_BITS=%d -gDE_BYTES=%d -gDE_CNT_BITS=%d'
                 % (widths['in_bytes'], widths['in_cnt_bits'],
                    widths['out_bytes'], widths['out_cnt_bits']))
     if widths['in_bytes'] % 8 != 0:
         raise MeasureError('co_data is %d bytes wide; the harness needs a '
                            'multiple of 8' % widths['in_bytes'])
+
+    # Every measurement simulates in its own copies of the draw folders.
+    # Several candidates are measured at once, and the testbench writes
+    # perf.txt/out.hex into the folder it runs in, so a shared folder would
+    # let one candidate's results overwrite another's.
+    private = []
+    for draw, ddir, chunks in draws:
+        mine = os.path.join(build_dir, 'draws', draw.name)
+        os.makedirs(mine, exist_ok=True)
+        shutil.copyfile(os.path.join(ddir, 'cs.tv'), os.path.join(mine, 'cs.tv'))
+        private.append((draw, mine, chunks))
+    draws = private
+
     specs = ' '.join('"%s:%d"' % (shell_path(d), c) for _draw, d, c in draws)
-    script = ('bash "%s" "%s" "%s" "%s" "%s" 50ms %s'
+    # 5 ms of simulated time is 5 million cycles: 50x the longest real draw,
+    # and a deadlocked draw costs under a minute instead of seven.
+    script = ('bash "%s" "%s" "%s" "%s" "%s" 5ms %s'
               % (shell_path(SIM_SCRIPT), shell_path(rtl_dir),
                  shell_path(TB_FILE), shell_path(build_dir), generics, specs))
-    res = eda_shell(script, timeout=timeout or CONFIG['sim_timeout_s'])
+    res = eda_shell(script, timeout=timeout or CONFIG['sim_timeout_s'],
+                    kill_token='sim-' + os.path.basename(os.path.dirname(build_dir)))
     text = res.text
     if res.timed_out:
         raise MeasureError('simulation did not finish within %d s'
@@ -184,7 +209,8 @@ def synthesize(rtl_dir, out_dir, timeout=None):
               % (shell_path(SYNTH_SCRIPT), shell_path(rtl_dir),
                  shell_path(STUB_FILE), shell_path(LIB_FILE),
                  shell_path(out_dir), TOP, int(CONFIG['clock_period_ps'])))
-    res = eda_shell(script, timeout=timeout or CONFIG['synth_timeout_s'])
+    res = eda_shell(script, timeout=timeout or CONFIG['synth_timeout_s'],
+                    kill_token='synth-' + os.path.basename(os.path.dirname(out_dir)))
     if res.timed_out:
         raise MeasureError('synthesis did not finish within %d s'
                            % (timeout or CONFIG['synth_timeout_s']))
@@ -197,7 +223,8 @@ def synthesize(rtl_dir, out_dir, timeout=None):
     if os.path.exists(stat):
         with open(stat, encoding='utf-8', errors='replace') as fil:
             block = fil.read()
-        cells = {name: int(n) for n, name in _CELL.findall(block)}
+        cells = {name: int(n) for n, _area, name in _CELL.findall(block)
+                 if name != 'cells'}
         regs = sum(n for name, n in cells.items()
                    if name.startswith(('DFF', 'SDFF')))
         if regs:

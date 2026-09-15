@@ -32,15 +32,18 @@ DEFAULT_CONFIG = {
     # Folder of the OSS CAD Suite inside that shell ($HOME is expanded there).
     "eda_suite": "$HOME/eda/oss-cad-suite",
     # Which Claude model writes the RTL candidates, and how hard it thinks.
-    "model": "opus",
+    # Sonnet by default: on a subscription the 5-hour usage window is the
+    # real budget, and Opus spends it about five times faster. Pass
+    # --model opus for higher quality per session and fewer iterations per day.
+    "model": "sonnet",
     "effort": "high",
     # Cheaper model for the planning and skill-learning calls (no tools).
     "helper_model": "sonnet",
     # How many RTL candidates are written in parallel each iteration.
     "candidates": 3,
     # Limits for one candidate-writing session.
-    "session_budget_usd": 12.0,
-    "session_max_turns": 200,
+    "session_budget_usd": 10.0,
+    "session_max_turns": 300,
     "session_timeout_min": 45,
     # Stimulus: pages per real-data draw.
     "train_pages": 12,
@@ -130,6 +133,15 @@ def _kill_tree(proc):
         pass
 
 
+# Every process this module starts, so a Ctrl-C can kill them all.
+_LIVE = set()
+
+
+def kill_all():
+    for proc in list(_LIVE):
+        _kill_tree(proc)
+
+
 def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None):
     """Run a command. Bytes in, bytes out, hard timeout, children killed too."""
     start = time.time()
@@ -141,6 +153,7 @@ def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None):
                             else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **kwargs)
+    _LIVE.add(proc)
     try:
         out, err = proc.communicate(input=stdin_bytes, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -149,8 +162,11 @@ def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None):
             out, err = proc.communicate(timeout=30)
         except Exception:
             out, err = b'', b''
+        _LIVE.discard(proc)
         return Result(-1, _dec(out), _dec(err), timed_out=True,
                       seconds=time.time() - start)
+    finally:
+        _LIVE.discard(proc)
     return Result(proc.returncode, _dec(out), _dec(err),
                   seconds=time.time() - start)
 
@@ -163,21 +179,36 @@ def _dec(data):
     return data
 
 
-def eda_shell(script, timeout, cwd=None):
+def _eda_cmd(full):
+    if is_windows():
+        return ['wsl.exe', '-d', CONFIG['wsl_distro'], '-e', 'bash', '-c', full]
+    return ['bash', '-c', full]
+
+
+def eda_shell(script, timeout, cwd=None, kill_token=None):
     """Run a bash script where ghdl and yosys live.
 
     On Windows that is the WSL distro named in the config. Elsewhere it is
     plain bash. The OSS CAD Suite bin folder is put on PATH first.
+
+    ``kill_token`` names this job inside the Linux side. On a timeout the
+    Windows side can only kill wsl.exe; ghdl and yosys would keep running.
+    With a token in their environment they can be found and killed too.
     """
-    prefix = 'export PATH="%s/bin:$PATH"; ' % CONFIG['eda_suite']
+    token = 'AGENTIC_JOB=%s-%d-%d' % (kill_token or 'job', os.getpid(),
+                                      int(time.time() * 1000) % 100000)
+    prefix = 'export %s; export PATH="%s/bin:$PATH"; ' % (token, CONFIG['eda_suite'])
     if cwd:
         prefix += 'cd "%s" || exit 97; ' % shell_path(cwd)
-    full = prefix + script
-    if is_windows():
-        cmd = ['wsl.exe', '-d', CONFIG['wsl_distro'], '-e', 'bash', '-c', full]
-    else:
-        cmd = ['bash', '-c', full]
-    return run(cmd, timeout=timeout)
+    res = run(_eda_cmd(prefix + script), timeout=timeout)
+    if res.timed_out:
+        killer = ("for p in /proc/[0-9]*; do grep -qz '%s' $p/environ 2>/dev/null "
+                  "&& kill -9 ${p##*/} 2>/dev/null; done; true" % token)
+        try:
+            run(_eda_cmd(killer), timeout=60)
+        except Exception:
+            pass
+    return res
 
 
 def eda_available():

@@ -64,7 +64,7 @@ run_one() {
     fi
     rc=$?
     dl=0
-    if grep -q "stopped by --stop-time" sim.log; then dl=1; fi
+    if grep -q -e "stopped by --stop-time" -e "DEADLOCK" sim.log; then dl=1; fi
     echo "DRAW $dir rc=$rc deadlock=$dl"
   )
 }

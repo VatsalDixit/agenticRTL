@@ -128,7 +128,8 @@ def render_html(state):
                 (' (throughput %s, area %s, predicted %s)' % (
                     _pct(m.get('throughput_gain_pct')), _pct(m.get('area_gain_pct')),
                     _pct(c.get('expected_gain_pct')))) if m else
-                (': ' + html.escape((c.get('problem') or '')[:160]) if c.get('problem') else '')))
+                (': ' + html.escape((c.get('reason') or c.get('problem') or '')[:160])
+                 if (c.get('reason') or c.get('problem')) else '')))
         rows.append('<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
             it['iteration'], html.escape(it.get('at', '')),
             html.escape((win.get('id') if win else '-') or '-'),
@@ -197,7 +198,7 @@ def print_status(name):
                 c.get('label'), (c.get('id') or 'no proposal')[:40], c.get('outcome', ''),
                 ('throughput %s area %s' % (_pct(m.get('throughput_gain_pct')),
                                              _pct(m.get('area_gain_pct')))) if m
-                else (c.get('problem') or '')[:80]))
+                else (c.get('reason') or c.get('problem') or '')[:80]))
 
 
 def main():

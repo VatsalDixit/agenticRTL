@@ -106,10 +106,19 @@ def learn(ctx, group, skills_data, log):
     if res.get('status') == 'ok':
         data = propose.extract_json(res.get('text', ''))
         if isinstance(data, dict):
-            changed = skills_mod.apply_updates(skills_data,
-                                               data.get('skill_updates') or [],
-                                               ctx['iteration'])
-            lessons = [str(l)[:300] for l in (data.get('lessons') or [])][:4]
+            updates = data.get('skill_updates') or []
+            if isinstance(updates, dict):
+                updates = [updates]
+            try:
+                changed = skills_mod.apply_updates(skills_data, updates,
+                                                   ctx['iteration'])
+            except Exception as exc:          # a malformed update must not end a run
+                log('  skill update ignored: %s' % str(exc)[:200])
+            raw = data.get('lessons') or []
+            if isinstance(raw, str):
+                raw = [raw]
+            if isinstance(raw, list):
+                lessons = [str(l)[:300] for l in raw if l][:4]
     else:
         log('  learning call failed (%s): %s'
             % (res.get('status'), (res.get('error') or '')[:200]))

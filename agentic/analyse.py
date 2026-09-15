@@ -41,22 +41,62 @@ def _read(path):
         return ''
 
 
+def _constants(texts):
+    """Integer constants/generics declared in the given VHDL texts."""
+    out = {}
+    for text in texts:
+        for m in re.finditer(r'\b(?:constant|generic)?\s*([A-Za-z_]\w*)\s*:\s*'
+                             r'(?:natural|positive|integer)\s*:=\s*([^;]+);', text):
+            expr = m.group(2).strip()
+            try:
+                out[m.group(1)] = int(_eval_int(expr, out))
+            except Exception:
+                pass
+    return out
+
+
+def _eval_int(expr, consts):
+    """Evaluate a small integer expression like LINE_BYTES*8-1."""
+    expr = expr.strip()
+    if not re.match(r'^[\w\s*+\-/()]+$', expr):
+        raise ValueError(expr)
+    tokens = re.sub(r'\b([A-Za-z_]\w*)\b',
+                    lambda m: str(consts[m.group(1)]) if m.group(1) in consts
+                    else m.group(1), expr)
+    if re.search(r'[A-Za-z_]', tokens):
+        raise ValueError(expr)
+    return eval(tokens, {'__builtins__': {}}, {})       # digits and operators only
+
+
 def rtl_widths(rtl_dir):
-    """Port widths, count-field widths, core count and core line width."""
+    """Port widths, count-field widths, core count and core line width.
+
+    Read from the RTL, never assumed. A width the reader cannot resolve is
+    listed under 'unresolved' and the measurement refuses to guess.
+    """
     top = _read(os.path.join(rtl_dir, 'vhsnunzip_unbuffered.vhd'))
     pkg = _read(os.path.join(rtl_dir, 'vhsnunzip_int_pkg.vhd'))
+    others = [_read(os.path.join(rtl_dir, f)) for f in sorted(os.listdir(rtl_dir))
+              if f.endswith('_pkg.vhd')] if os.path.isdir(rtl_dir) else []
+    consts = _constants([top] + others)
     out = {'in_bytes': 8, 'in_cnt_bits': 3, 'out_bytes': 8, 'out_cnt_bits': 4,
            'cores': 1, 'core_line_bytes': 8.0,
-           'elements_per_transfer': DEFAULT_ELEMENTS_PER_TRANSFER}
+           'elements_per_transfer': DEFAULT_ELEMENTS_PER_TRANSFER,
+           'unresolved': []}
 
     def width(port):
         found = re.search(
-            port + r'\s*:\s*(?:in|out)\s+std_logic_vector\s*\(\s*(\d+)\s+downto\s+0\s*\)',
+            port + r'\s*:\s*(?:in|out)\s+std_logic_vector\s*\(\s*(.+?)\s+downto\s+0\s*\)',
             top)
-        return int(found.group(1)) + 1 if found else None
+        if not found:
+            return None
+        try:
+            return int(_eval_int(found.group(1), consts)) + 1
+        except Exception:
+            out['unresolved'].append(port)
+            return None
 
-    for port, key, kbits in (('co_data', 'in_bytes', 'in_cnt_bits'),
-                             ('de_data', 'out_bytes', 'out_cnt_bits')):
+    for port, key in (('co_data', 'in_bytes'), ('de_data', 'out_bytes')):
         bits = width(port)
         if bits:
             out[key] = bits // 8

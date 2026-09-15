@@ -33,12 +33,23 @@ def load(path=None):
     with open(path, encoding='utf-8') as fil:
         data = json.load(fil)
     data.setdefault('skills', [])
+    kept = []
     for sk in data['skills']:
+        if not isinstance(sk, dict) or not sk.get('id'):
+            continue                      # a hand edit gone wrong; skip it
+        sk.setdefault('pattern', '')
+        sk.setdefault('strategy', '')
+        sk.setdefault('confidence', 'low')
+        if str(sk['confidence']).lower() not in ORDER:
+            sk['confidence'] = 'low'
+        sk['confidence'] = str(sk['confidence']).lower()
         sk.setdefault('tried', 0)
         sk.setdefault('passed', 0)
         sk.setdefault('adopted', 0)
         sk.setdefault('advantages', [])
         sk.setdefault('notes', [])
+        kept.append(sk)
+    data['skills'] = kept
     return data
 
 
@@ -79,32 +90,39 @@ def apply_updates(data, updates, iteration):
     adds a new skill; a known id may change its confidence and add a note.
     """
     changed = []
+    if isinstance(updates, dict):
+        updates = [updates]
     for up in updates or []:
-        sid = (up.get('id') or '').strip()
+        if not isinstance(up, dict):
+            continue
+        sid = str(up.get('id') or '').strip()
+        sid = ''.join(ch if ch.isalnum() or ch in '-_' else '-' for ch in sid.lower())[:60]
         if not sid:
             continue
-        conf = (up.get('confidence') or 'low').lower()
+        conf = str(up.get('confidence') or 'low').lower().strip()
         if conf not in ORDER:
             conf = 'low'
-        note = (up.get('note') or '').strip()
+        pattern = str(up.get('pattern') or '').strip()
+        strategy = str(up.get('strategy') or '').strip()
+        note = str(up.get('note') or '').strip()
         sk = by_id(data, sid)
         if sk is None:
-            if not up.get('pattern') or not up.get('strategy'):
+            if not pattern or not strategy:
                 continue
-            sk = {'id': sid, 'pattern': up['pattern'].strip(),
-                  'strategy': up['strategy'].strip(), 'confidence': conf,
-                  'tried': 0, 'passed': 0, 'adopted': 0, 'advantages': [],
-                  'notes': [], 'source': 'learned at iteration %d' % iteration}
+            sk = {'id': sid, 'pattern': pattern[:600], 'strategy': strategy[:900],
+                  'confidence': conf, 'tried': 0, 'passed': 0, 'adopted': 0,
+                  'advantages': [], 'notes': [],
+                  'source': 'learned at iteration %d' % iteration}
             data['skills'].append(sk)
             changed.append('new: ' + sid)
         else:
             if conf != sk['confidence']:
                 changed.append('%s: %s -> %s' % (sid, sk['confidence'], conf))
                 sk['confidence'] = conf
-            if up.get('strategy') and len(up['strategy']) > len(sk['strategy']) + 40:
-                sk['strategy'] = up['strategy'].strip()
+            if strategy and len(strategy) > len(sk['strategy']) + 40:
+                sk['strategy'] = strategy[:900]
         if note:
-            sk['notes'] = (sk['notes'] + ['i%d: %s' % (iteration, note)])[-6:]
+            sk['notes'] = (sk['notes'] + ['i%d: %s' % (iteration, note[:300])])[-6:]
     return changed
 
 
@@ -116,7 +134,9 @@ def mean_advantage(sk):
 def format_for_prompt(data, max_entries=40):
     """The library as text for a brief, best first, avoid last."""
     lines = []
-    count = 0
+    # A cap per group, so a growing library never pushes the AVOID entries
+    # (the ones that stop a session repeating a known failure) off the end.
+    per_group = max(4, max_entries // 3)
     for conf in ORDER:
         group = [s for s in data['skills'] if s['confidence'] == conf]
         group.sort(key=lambda s: (-(mean_advantage(s) or 0), -s['adopted']))
@@ -127,10 +147,8 @@ def format_for_prompt(data, max_entries=40):
                  'low': 'LOW confidence (unproven or risky)',
                  'avoid': 'AVOID (measured useless, absorbed by synthesis, or broke correctness)'}[conf]
         lines.append(title)
-        for sk in group:
-            if count >= max_entries:
-                break
-            count += 1
+        limit = len(group) if conf == 'avoid' else per_group
+        for sk in group[:limit]:
             stats = ''
             if sk['tried']:
                 adv = mean_advantage(sk)

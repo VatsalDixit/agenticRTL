@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -34,10 +35,18 @@ sys.path.insert(0, KIT)
 from tools import CONFIG   # noqa: E402
 
 try:
+    import warnings
     from claude_agent_sdk import (            # noqa: E402
         AssistantMessage, ClaudeAgentOptions, PermissionResultAllow,
         PermissionResultDeny, ResultMessage, TextBlock, ToolUseBlock, query)
     from claude_agent_sdk import ClaudeSDKError   # noqa: E402
+    try:
+        # The warning is about Read/Edit/etc. being auto-approved, which is
+        # exactly what we want; Bash is deliberately left out so it is gated.
+        from claude_agent_sdk.types import CanUseToolShadowedWarning
+        warnings.simplefilter('ignore', CanUseToolShadowedWarning)
+    except Exception:
+        pass
     SDK_OK = True
     SDK_ERROR = ''
 except Exception as exc:                       # pragma: no cover
@@ -51,7 +60,36 @@ PERMITTED_COMMANDS = (
     'python3 agentic/check.py --quick',
 )
 
-LIMIT_MARKERS = ('limit', 'resets', 'rate_limit', 'overloaded', '429', 'quota')
+# Phrases the provider uses when it is refusing for capacity reasons. Kept
+# specific: a bare 'limit' also matches a Node heap-limit crash, which is not
+# something waiting fixes.
+LIMIT_RE = re.compile(r'usage limit|session limit|rate limit|hit your limit|'
+                      r'resets at|resets \d|rate_limit|overloaded|quota|'
+                      r'error code: (?:429|529)|\b(?:429|529)\b.*(?:limit|error)',
+                      re.I)
+SOFT_STOPS = ('error_max_turns', 'error_max_budget_usd')
+
+
+def reset_wait_seconds(text, now=None):
+    """Seconds until the reset time named in a limit message, or None.
+
+    The CLI says e.g. "You've hit your session limit - resets 7:10am
+    (Asia/Kolkata)". The clock time is read as local time; if it is already
+    past, it means tomorrow.
+    """
+    import datetime as _dt
+    m = re.search(r'resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)', text or '', re.I)
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12
+    if m.group(3).lower() == 'pm':
+        hour += 12
+    minute = int(m.group(2) or 0)
+    now = now or _dt.datetime.now()
+    when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if when <= now:
+        when += _dt.timedelta(days=1)
+    return int((when - now).total_seconds())
 
 
 def child_env():
@@ -98,13 +136,16 @@ def extract_json(text):
 
 
 def _looks_like_limit(text):
-    low = (text or '').lower()
-    return any(m in low for m in LIMIT_MARKERS)
+    return bool(LIMIT_RE.search(text or ''))
 
 
 async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                      allowed, gate, timeout_s, effort=None, on_text=None,
                      restricted=True):
+    if not SDK_OK:
+        return {'status': 'error', 'text': '', 'cost_usd': 0.0, 'turns': 0,
+                'error': 'claude_agent_sdk is not importable: ' + SDK_ERROR,
+                'tools_used': [], 'seconds': 0.0, 'subtype': ''}
     opts_kwargs = dict(
         model=model, max_turns=max_turns, max_budget_usd=budget,
         tools=list(tools), allowed_tools=list(allowed),
@@ -159,14 +200,20 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
         out['error'] = 'no result within %d s' % timeout_s
     except Exception as exc:              # ProcessError, CLI errors, anything
         text = str(exc)
-        out['status'] = 'limit' if _looks_like_limit(text) else 'error'
-        out['error'] = text[:600]
+        if out['status'] == 'ok':
+            out['status'] = 'limit' if _looks_like_limit(text) else 'error'
+        if not out['error']:
+            out['error'] = text[:600]
     out['text'] = '\n'.join(texts)
     out['seconds'] = round(time.time() - start, 1)
-    if out['status'] == 'ok' and out['subtype'] and out['subtype'] != 'success':
-        # e.g. error_max_turns / error_max_budget_usd: the work so far is
-        # still in the worktree, so this is a soft stop, not a failure.
-        out['stopped_by'] = out['subtype']
+    # Hitting the turn or dollar cap is a soft stop: the CLI reports it as an
+    # error and exits 1, but the work so far is in the worktree and may well
+    # be complete. Keep it as 'budget' so the caller still reads the proposal.
+    err_low = (out['error'] or '').lower()
+    if out['subtype'] in SOFT_STOPS or 'maximum budget' in err_low \
+            or 'maximum number of turns' in err_low or 'max turns' in err_low:
+        out['status'] = 'budget'
+        out['stopped_by'] = out['subtype'] or 'cap'
     return out
 
 
@@ -199,16 +246,66 @@ def ask_many(jobs):
 # ---------------------------------------------------------------------------
 # The gate: the only shell command a candidate session may run.
 
+WRITABLE = ('rtl/', 'PROPOSAL.json', 'NOTES.md')
+
+
+def make_gate(worktree):
+    """The permission gate for one candidate session.
+
+    Bash: only the check command, and only while the harness copy inside the
+    worktree is untouched (a session could otherwise edit check.py and run
+    anything through the permitted command). Edit/Write: only rtl/, the
+    proposal and a notes file. Everything else is allowed (Read/Grep/Glob are
+    already confined to the worktree by --restricted).
+    """
+    root = os.path.abspath(worktree)
+
+    def _harness_clean():
+        try:
+            res = subprocess.run(['git', 'status', '--porcelain', '--', 'agentic'],
+                                 cwd=root, capture_output=True, text=True, timeout=60)
+            return res.returncode == 0 and not res.stdout.strip()
+        except Exception:
+            return False
+
+    async def gate(tool_name, tool_input, _ctx):
+        tool_input = tool_input or {}
+        if tool_name == 'Bash':
+            cmd = (tool_input.get('command') or '').strip()
+            if cmd not in PERMITTED_COMMANDS:
+                return PermissionResultDeny(
+                    message=('Only this command is permitted, exactly as written: '
+                             '`python agentic/check.py` (or with --quick). Use the '
+                             'Read, Grep, Glob, Edit and Write tools for everything else.'))
+            if not _harness_clean():
+                return PermissionResultDeny(
+                    message=('agentic/ has been modified in this worktree. Restore it '
+                             '(it is the measuring harness) before running the check.'))
+            return PermissionResultAllow()
+        if tool_name in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+            path = tool_input.get('file_path') or tool_input.get('path') or ''
+            try:
+                rel = os.path.relpath(os.path.abspath(path), root).replace('\\', '/')
+            except ValueError:
+                rel = '..'
+            if rel.startswith('..') or not any(rel == w or rel.startswith(w) for w in WRITABLE):
+                return PermissionResultDeny(
+                    message=('You may only write under rtl/, plus PROPOSAL.json and '
+                             'NOTES.md at the top of the worktree. %s is off limits.' % rel))
+            return PermissionResultAllow()
+        return PermissionResultAllow()
+
+    return gate
+
+
 async def bash_gate(tool_name, tool_input, _ctx):
+    """Gate without a worktree: only the check command."""
     if tool_name != 'Bash':
         return PermissionResultAllow()
     cmd = ((tool_input or {}).get('command') or '').strip()
     if cmd in PERMITTED_COMMANDS:
         return PermissionResultAllow()
-    return PermissionResultDeny(
-        message=('Only this command is permitted, exactly as written: '
-                 '`python agentic/check.py` (or with --quick). Use the Read, '
-                 'Grep, Glob, Edit and Write tools for everything else.'))
+    return PermissionResultDeny(message='Only `python agentic/check.py` is permitted.')
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +328,15 @@ WHAT YOU MAY CHANGE
   Keep the top entity name vhsnunzip_unbuffered and its port NAMES
   (clk, reset, co_valid, co_ready, co_data, co_cnt, co_last, de_valid,
   de_ready, de_dvalid, de_data, de_cnt, de_last). Port WIDTHS may change.
-  The measuring testbench reads the widths out of your RTL. Count convention:
-  a cnt field that is exactly log2(width) bits wide means 0 = all bytes valid
-  (the original 8-byte ports use this); a wider cnt field is a literal count.
-  co_data must stay a multiple of 8 bytes.
+  The measuring testbench reads the widths out of your RTL, so declare the
+  top-level ports with literal ranges, e.g. std_logic_vector(127 downto 0)
+  or (LINE_BYTES*8-1 downto 0) with LINE_BYTES a plain integer constant in
+  the same file. Count convention: a cnt field that is exactly log2(width)
+  bits wide means 0 = all bytes valid (the original 8-byte ports use this);
+  a wider cnt field is a literal count. co_data must stay a multiple of 8
+  bytes. Do not change the simulation RAM's latency (CMD_STAGES /
+  RESP_STAGES in vhsnunzip_ram.sim.vhd): synthesis uses a fixed memory, so a
+  faster simulated RAM would be scored but never built.
   If you change the RAM interface, keep the entity vhsnunzip_ram with ports
   a_cmd/a_resp/b_cmd/b_resp of the record types ram_command/ram_response,
   because synthesis swaps in a memory stub with that interface.
@@ -252,9 +354,8 @@ HOW YOU ARE JUDGED
   2. Throughput = bytes per cycle (real Parquet pages) x f_max (from Yosys/ABC
      synthesis on a 45 nm library). Both halves count. A change that raises
      bytes/cycle a little and lowers f_max more is a loss.
-  3. Area is priced: score = -gain%% + 0.15 x area_growth%% (+0.5 penalty if
-     area grows more than 10%%). Area is not capped, but silicon must buy
-     throughput.
+  3. Area is priced: score = -gain% + 0.15 x area_growth% (more above 10%
+     area growth). Area is not capped, but silicon must buy throughput.
 
 THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
   python agentic/check.py           compile + simulate 7 invented shapes and
@@ -278,6 +379,13 @@ HOW TO WORK
     touches (record types, both command generators, the datapath, the top).
   * If your assigned direction turns out to be wrong after reading the RTL,
     say so in the rationale and do the best change you can justify instead.
+
+BUDGET
+  The session has a turn cap and a dollar cap; when either is reached it
+  ends at once. So keep the design compiling and passing the check between
+  steps, write a first PROPOSAL.json as soon as you have decided what to
+  build, and update it at the end. A half-finished edit that does not
+  compile scores nothing.
 
 WHEN YOU ARE DONE
   Write PROPOSAL.json at the top of the worktree:
@@ -411,9 +519,14 @@ def plan_directions(ctx, n, log):
     if data and isinstance(data.get('directions'), list):
         for d in data['directions']:
             if isinstance(d, dict) and d.get('focus'):
+                sids = d.get('skill_ids') or []
+                if isinstance(sids, str):
+                    sids = [sids]
+                if not isinstance(sids, list):
+                    sids = []
                 dirs.append({'focus': str(d.get('focus', ''))[:400],
                              'hypothesis': str(d.get('hypothesis', ''))[:600],
-                             'skill_ids': [str(s) for s in (d.get('skill_ids') or [])][:6],
+                             'skill_ids': [str(s)[:60] for s in sids][:6],
                              'where_to_look': str(d.get('where_to_look', ''))[:300],
                              'risk': str(d.get('risk', ''))[:300]})
         if data.get('note'):
@@ -427,13 +540,14 @@ def plan_directions(ctx, n, log):
 
 def read_proposal(worktree):
     path = os.path.join(worktree, 'PROPOSAL.json')
-    if not os.path.exists(path):
+    if not os.path.isfile(path):
         return None
+    text = ''
     try:
         with open(path, encoding='utf-8', errors='replace') as fil:
             text = fil.read()
         data = json.loads(text)
-    except ValueError:
+    except (OSError, ValueError):
         data = extract_json(text) if text else None
     if not isinstance(data, dict):
         return None
@@ -476,8 +590,10 @@ def write_candidates(ctx, assignments, log):
             max_turns=int(CONFIG['session_max_turns']),
             budget=float(CONFIG['session_budget_usd']),
             tools=('Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'),
-            allowed=('Read', 'Edit', 'Write', 'Glob', 'Grep'),
-            gate=bash_gate,
+            # Edit/Write/Bash are left out of the auto-approve list so every
+            # call reaches the gate (an allowed tool never does).
+            allowed=('Read', 'Glob', 'Grep'),
+            gate=make_gate(asg['worktree']),
             timeout_s=int(CONFIG['session_timeout_min']) * 60,
             effort=CONFIG.get('effort') or None,
             on_text=on_text, restricted=True))

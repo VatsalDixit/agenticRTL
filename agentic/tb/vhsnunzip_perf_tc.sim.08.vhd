@@ -77,8 +77,16 @@ architecture testcase of vhsnunzip_perf_tc is
         return DE_BYTES;
       end if;
     end if;
+    assert n <= DE_BYTES
+      report "de_cnt exceeds the output port width" severity failure;
     return n;
   end function;
+
+  -- Cycles without an output handshake before the run is declared dead.
+  -- The longest real draw takes about 35k cycles in total; a stall this long
+  -- means the pipeline has deadlocked, and failing here is much faster than
+  -- waiting for the --stop-time guard.
+  constant WATCHDOG_CYCLES : natural := 300000;
 
 begin
 
@@ -284,6 +292,7 @@ begin
     variable de_beats   : natural := 0;
     variable co_stall   : natural := 0;
     variable de_bubble  : natural := 0;
+    variable idle_run   : natural := 0;
   begin
     wait until reset = '0';
 
@@ -292,6 +301,15 @@ begin
       exit when perf_stop;
 
       cycles := cycles + 1;
+
+      if de_valid = '1' and de_ready = '1' then
+        idle_run := 0;
+      else
+        idle_run := idle_run + 1;
+        assert idle_run < WATCHDOG_CYCLES
+          report "DEADLOCK: no output handshake for " & integer'image(WATCHDOG_CYCLES) & " cycles"
+          severity failure;
+      end if;
 
       if co_valid = '1' then
         if co_ready = '1' then

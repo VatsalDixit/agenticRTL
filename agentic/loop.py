@@ -50,6 +50,7 @@ import report                          # noqa: E402
 import skills as skills_mod            # noqa: E402
 from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: E402
                    git_ok, now_iso, pct, read_json, rmtree, write_json)
+from tools import kill_all as tools_kill_all                          # noqa: E402
 
 BLIND_DIRS = ('vectors', 'test_data', os.path.join('agentic', 'data'))
 BLIND_SUFFIXES = ('.tv', '.parquet')
@@ -99,21 +100,75 @@ def goal_gain(metrics, base, goal):
 # git worktrees
 
 def remove_worktree(path):
+    """Remove a worktree. Raises GitError if something still holds it open."""
     if not os.path.exists(path):
         git_ok(['worktree', 'prune'])
         return
     if not git_ok(['worktree', 'remove', '--force', path]):
+        git_ok(['worktree', 'remove', '--force', '--force', path])
+    if os.path.exists(path):
         rmtree(path)
-        git_ok(['worktree', 'prune'])
+    git_ok(['worktree', 'prune'])
+    if os.path.exists(path):
+        raise GitError('worktree %s is held open by another process; '
+                       'close editors/terminals inside it' % path)
 
 
-def add_worktree(path, branch, start):
+def add_worktree(path, branch, start, replace_branch=True):
     remove_worktree(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if git_ok(['rev-parse', '--verify', 'refs/heads/' + branch]):
+        if not replace_branch:
+            raise GitError('branch %s already exists' % branch)
         git(['branch', '-D', branch])
     git(['worktree', 'add', '-b', branch, path, start])
     return path
+
+
+def ram_latency(rtl_dir):
+    """The simulation RAM's command/response stage counts, as text."""
+    path = os.path.join(rtl_dir, 'vhsnunzip_ram.sim.vhd')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fil:
+            text = fil.read()
+    except IOError:
+        return ''
+    found = re.findall(r'\b(CMD_STAGES|RESP_STAGES)\s*:\s*\w+\s*:=\s*(\d+)', text)
+    return ' '.join('%s=%s' % kv for kv in sorted(found))
+
+
+# ---------------------------------------------------------------------------
+# a model-free stand-in for the coding sessions, for testing the loop itself
+
+FAKE_EDITS = [
+    ('comment-only', 'rtl/vhsnunzip_unbuffered.vhd',
+     lambda text: '-- fake candidate: no functional change\n' + text,
+     {'id': 'fake-comment-only', 'rationale': 'test: identical design',
+      'expected_gain_pct': 0.0}),
+    ('broken-cnt', 'rtl/vhsnunzip_unbuffered.vhd',
+     lambda text: text.replace('de_cnt      => de_cnt,', 'de_cnt      => de_cnt,'),
+     {'id': 'fake-no-edit', 'rationale': 'test: the session changed nothing',
+      'expected_gain_pct': 0.0}),
+]
+
+
+def fake_write_candidates(assignments, log):
+    """Apply scripted edits instead of running model sessions."""
+    out = []
+    for idx, asg in enumerate(assignments):
+        name, rel, transform, proposal = FAKE_EDITS[idx % len(FAKE_EDITS)]
+        path = os.path.join(asg['worktree'], rel)
+        with open(path, encoding='utf-8', errors='replace') as fil:
+            text = fil.read()
+        with open(path, 'w', encoding='utf-8', newline='\n') as fil:
+            fil.write(transform(text))
+        write_json(os.path.join(asg['worktree'], 'PROPOSAL.json'), proposal)
+        log('    %s | fake edit %s' % (asg['label'], name))
+        out.append({'label': asg['label'], 'direction': asg['direction'],
+                    'session': {'status': 'ok', 'cost_usd': 0.0, 'turns': 0,
+                                'seconds': 0.0, 'error': '', 'subtype': 'fake'},
+                    'proposal': propose.read_proposal(asg['worktree'])})
+    return out
 
 
 def blind(path):
@@ -311,6 +366,7 @@ class Run(object):
         self.status = report.Status(os.path.join(self.dir, 'status.json'))
         self.base_dir = os.path.join(self.dir, 'base')
         self.state = read_json(self.state_path, None)
+        self.limit_message = ''
 
     def save(self):
         self.state['updated'] = now_iso()
@@ -362,7 +418,7 @@ def measure_one(args):
                 'draws': []}
 
 
-def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False):
+def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False):
     state = run.state
     log = run.log
     goal = state['goal']
@@ -385,35 +441,53 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False):
     os.makedirs(iter_dir, exist_ok=True)
     start = git(['rev-parse', 'HEAD'], cwd=run.base_dir)
     assignments = []
-    for j, d in enumerate(directions, 1):
-        label = 'c%d' % j
-        branch = '%s/i%d-%s' % (state['branch'], k, label)
-        path = os.path.join(iter_dir, label)
-        add_worktree(path, branch, start)
-        blind(path)
-        assignments.append({'label': label, 'worktree': path, 'direction': d,
-                            'branch': branch})
+    try:
+        for j, d in enumerate(directions, 1):
+            label = 'c%d' % j
+            # Not under the run branch's name: git cannot have both a branch
+            # 'agentic/run' and a branch 'agentic/run/i1-c1'.
+            branch = 'agentic-cand/%s/i%d-%s' % (state['run'], k, label)
+            path = os.path.join(iter_dir, label)
+            add_worktree(path, branch, start)
+            blind(path)
+            assignments.append({'label': label, 'worktree': path, 'direction': d,
+                                'branch': branch})
+    except GitError as exc:
+        log('could not prepare a candidate worktree: %s' % exc)
+        return 'error'
+
+    def discard_all():
+        for asg in assignments:
+            try:
+                remove_worktree(asg['worktree'])
+            except GitError as exc:
+                log('  (%s)' % exc)
+            git_ok(['branch', '-D', asg['branch']])
 
     run.status.set(phase='write', detail='%d coding sessions in parallel' % n_cands)
     log('writing %d candidates in parallel (model %s, up to %d min each)...'
         % (n_cands, CONFIG['model'], int(CONFIG['session_timeout_min'])))
     t0 = time.time()
-    results = propose.write_candidates(ctx, assignments, log)
+    if fake:
+        results = fake_write_candidates(assignments, log)
+    else:
+        results = propose.write_candidates(ctx, assignments, log)
     log('sessions finished in %.0f min' % ((time.time() - t0) / 60.0))
 
     statuses = [r['session'].get('status') for r in results]
-    if statuses and all(s == 'limit' for s in statuses):
-        for asg in assignments:
-            remove_worktree(asg['worktree'])
-            git_ok(['branch', '-D', asg['branch']])
+    no_proposal = not any(r['proposal'] and r['proposal'].get('id') not in (None, 'none')
+                          for r in results)
+    if no_proposal and any(s == 'limit' for s in statuses):
+        # The provider is refusing; nothing was produced. Do not spend an
+        # iteration on it: wait for the reset and try this one again.
+        msgs = ' '.join((r['session'].get('error') or '') for r in results)
+        run.limit_message = msgs
+        discard_all()
         return 'limit'
-    if statuses and all(s in ('error', 'timeout') for s in statuses) and \
-            not any(r['proposal'] for r in results):
+    if no_proposal and all(s not in ('ok', 'budget') for s in statuses):
         errs = '; '.join((r['session'].get('error') or '')[:120] for r in results)
         log('every session failed: %s' % errs)
-        for asg in assignments:
-            remove_worktree(asg['worktree'])
-            git_ok(['branch', '-D', asg['branch']])
+        discard_all()
         return 'error'
 
     # commit what each session produced
@@ -456,22 +530,38 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False):
     # measure the ones that changed something
     to_measure = [(c, asg) for c, asg in zip(cands, assignments) if c['commit']
                   and c['outcome'] != 'no_proposal']
+    raw = {}
     run.status.set(phase='measure', detail='%d candidates: simulate + synthesise' % len(to_measure))
     if to_measure:
         log('measuring %d candidate(s)...' % len(to_measure))
         jobs = [(os.path.join(asg['worktree'], 'rtl'),
                  os.path.join(iter_dir, c['label'] + '-measure'), draws)
                 for c, asg in to_measure]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs))
+        try:
             metrics_list = list(pool.map(measure_one, jobs))
+        except KeyboardInterrupt:
+            tools_kill_all()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
+        parent_ram = ram_latency(os.path.join(run.base_dir, 'rtl'))
         for (c, asg), metrics in zip(to_measure, metrics_list):
             ev = evaluate(metrics, parent, goal)
+            raw[c['label']] = metrics
             c.update({'measured': ev['measured'], 'score': ev['score'],
                       'outcome': ev['outcome'], 'reason': ev['reason'],
                       'metrics': {kk: vv for kk, vv in metrics.items() if kk != 'draws'},
                       'draws': [{kk: vv for kk, vv in r.items() if kk not in ('analysis', 'counters')}
                                 for r in metrics.get('draws', [])]})
             c['adoptable'] = ev['adoptable']
+            mine_ram = ram_latency(os.path.join(asg['worktree'], 'rtl'))
+            if c['adoptable'] and mine_ram != parent_ram:
+                c['adoptable'] = False
+                c['outcome'] = 'ram_latency_changed'
+                c['reason'] = ('the simulation-only RAM latency changed (%s -> %s); '
+                               'synthesis uses a fixed memory, so this gain would '
+                               'not be real' % (parent_ram, mine_ram))
             m = ev['measured']
             if m:
                 log('  %s %s: %s  throughput %+.2f%% (bytes/cycle %+.2f%%, f_max %+.2f%%), area %+.2f%%, score %s'
@@ -498,12 +588,10 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False):
             git(['reset', '--hard', winner['commit']], cwd=run.base_dir)
         winner['adopted'] = True
         winner['outcome'] = 'adopted'
-        best_metrics = dict(winner['metrics'])
-        best_metrics['draws'] = winner['draws']
-        # keep per-draw analyses for the next brief
-        for c, asg in to_measure:
-            if c is winner:
-                pass
+        # The best design keeps the FULL measurement (per-draw stage
+        # analyses included) because the next iteration's brief is built
+        # from it; the iteration record below keeps the stripped copy.
+        best_metrics = dict(raw[winner['label']])
         state['best'] = {'commit': winner['commit'], 'metrics': best_metrics,
                          'iteration': k, 'id': winner['id']}
         run.set_progress()
@@ -521,12 +609,21 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False):
                       'expected_gain_pct': c['expected_gain_pct'],
                       'advantage': c['advantage'], 'adopted': c['adopted'],
                       'skills_used': c['skills_used'], 'files_changed': c['files_changed']})
-        used = list(c['skills_used']) + list(c['direction'].get('skill_ids') or [])
-        skills_mod.record_outcome(skills_data, sorted(set(used)),
-                                  passed=c['outcome'] in ('candidate', 'adopted', 'no_gain',
-                                                          'regressed', 'too_expensive'),
-                                  adopted=c['adopted'], advantage=c['advantage'])
-    changed, lessons, _res = learn_mod.learn(ctx, group, skills_data, log)
+        # Counters only move for candidates that were actually measured; a
+        # session that timed out or hit a limit says nothing about a skill.
+        if c['commit'] and c['outcome'] != 'no_proposal':
+            used = list(c['skills_used']) + list(c['direction'].get('skill_ids') or [])
+            skills_mod.record_outcome(skills_data, sorted(set(used)),
+                                      passed=c['outcome'] in ('candidate', 'adopted', 'no_gain',
+                                                              'regressed', 'too_expensive',
+                                                              'ram_latency_changed'),
+                                      adopted=c['adopted'], advantage=c['advantage'])
+    changed, lessons = [], []
+    if not fake:
+        try:
+            changed, lessons, _res = learn_mod.learn(ctx, group, skills_data, log)
+        except Exception as exc:              # learning is optional; never fatal
+            log('  learning step failed: %s' % str(exc)[:200])
     for ch in changed:
         log('  skill %s' % ch)
     for les in lessons:
@@ -558,10 +655,13 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--goal', default=None, help='e.g. "increase throughput by 50%%"')
     ap.add_argument('--run', default=None, help='run name (default: run-<date>)')
-    ap.add_argument('--iters', type=int, default=100)
+    ap.add_argument('--iters', type=int, default=None,
+                    help='iteration cap (default 100; on --resume keeps the run\'s cap)')
     ap.add_argument('--candidates', type=int, default=None)
     ap.add_argument('--model', default=None)
     ap.add_argument('--resume', action='store_true')
+    ap.add_argument('--fake', action='store_true',
+                    help='test the loop with scripted edits instead of model sessions')
     ap.add_argument('--patience', type=int, default=0,
                     help='stop after this many iterations without a winner (0 = never)')
     ap.add_argument('--max-hours', type=float, default=0.0)
@@ -603,79 +703,99 @@ def main():
         run.status.set(phase='failed', detail=problems[0][:200], finished=now_iso())
         return 1
 
-    if run.state is None:
+    fresh = run.state is None
+    if fresh:
         goal = parse_goal(args.goal)
         base_commit = git(['rev-parse', 'HEAD'])
+        branch = 'agentic/' + name
+        if git_ok(['rev-parse', '--verify', 'refs/heads/' + branch]):
+            log('PROBLEM: branch %s already exists (an earlier run with this name). '
+                'Pick another --run name, or --resume it.' % branch)
+            run.status.set(phase='failed', detail='branch exists', finished=now_iso())
+            return 1
         run.state = {
             'run': name, 'goal_text': goal['text'], 'goal': goal,
-            'max_iters': args.iters, 'candidates': n_cands,
+            'max_iters': args.iters or 100, 'candidates': n_cands,
             'started': now_iso(), 'base_commit': base_commit,
-            'branch': 'agentic/' + name, 'baseline': None,
+            'branch': branch, 'baseline': None,
             'best': None, 'iterations': [], 'stopped': None, 'cost_usd': 0.0,
             'model': CONFIG['model'], 'seed': args.seed,
         }
         log('goal: %s  (metric %s, target %s)' % (
             goal['text'], goal['metric'],
             '%+.0f%%' % goal['target_pct'] if goal['target_pct'] else 'as far as possible'))
-        add_worktree(run.base_dir, run.state['branch'], base_commit)
-        run.save()
     else:
         run.state['stopped'] = None
         if args.goal:
             log('note: --goal ignored on resume; the run keeps its goal')
-        run.state['max_iters'] = max(run.state['max_iters'], args.iters) if args.iters != 100 else run.state['max_iters']
-        if not os.path.exists(os.path.join(run.base_dir, '.git')):
-            remove_worktree(run.base_dir)
-            git(['worktree', 'add', run.base_dir, run.state['branch']])
+        if args.iters is not None:
+            run.state['max_iters'] = args.iters
         log('resuming at iteration %d, best so far: %s'
             % (len(run.state['iterations']) + 1, progress_text(run.state)))
 
     state = run.state
-    run.status.set(phase='corpus', iteration=len(state['iterations']),
-                   detail='building stimulus')
-    draws = measure.prepare_corpus(seed=state.get('seed', 0))
-    log('corpus: %d draws (%d scored real, %d synthetic)' % (
-        len(draws), sum(1 for d, _p, _c in draws if d.scored),
-        sum(1 for d, _p, _c in draws if d.kind == 'synthetic')))
-
-    if os.path.exists(run.skills_path):
-        skills_data = skills_mod.load(run.skills_path)
-    else:
-        skills_data = skills_mod.load()
-        skills_mod.save(skills_data, run.skills_path)
-
-    if not state.get('baseline'):
-        run.status.set(phase='baseline', detail='measuring the starting design')
-        log('measuring the baseline design...')
-        base = measure.measure(os.path.join(run.base_dir, 'rtl'),
-                               os.path.join(run.dir, 'baseline-measure'), draws)
-        if base.get('error') or not base.get('oracle_pass'):
-            log('the starting design does not pass: %s' % (base.get('error') or base.get('first_problem')))
-            state['stopped'] = 'baseline design fails the oracle'
-            run.save()
-            run.status.set(phase='failed', detail=state['stopped'], finished=now_iso())
-            return 1
-        if base.get('synth_error'):
-            log('baseline synthesis failed: %s' % base['synth_error'])
-            state['stopped'] = 'baseline synthesis failed'
-            run.save()
-            run.status.set(phase='failed', detail=state['stopped'], finished=now_iso())
-            return 1
-        state['baseline'] = base
-        state['best'] = {'commit': state['base_commit'], 'metrics': base,
-                         'iteration': 0, 'id': 'baseline'}
-        run.set_progress()
-        run.save()
-        log('baseline: %s' % state_text(base, base).splitlines()[0])
-        rmtree(os.path.join(run.dir, 'baseline-measure', 'sim'))
-
-    target = state['goal'].get('target_pct')
-    since_winner = 0
-    limit_waits = 0
-    error_waits = 0
-    t_start = time.time()
-    k = len(state['iterations']) + 1
+    draws = None
+    skills_data = None
     try:
+        if fresh:
+            add_worktree(run.base_dir, state['branch'], state['base_commit'])
+            run.save()
+        else:
+            if not os.path.exists(os.path.join(run.base_dir, '.git')):
+                remove_worktree(run.base_dir)
+                git(['worktree', 'add', run.base_dir, state['branch']])
+            if state.get('best') and state['best'].get('commit'):
+                head = git(['rev-parse', 'HEAD'], cwd=run.base_dir)
+                if head != state['best']['commit']:
+                    log('base worktree was at %s, moving it back to the recorded best %s'
+                        % (head[:12], state['best']['commit'][:12]))
+                    git(['reset', '--hard', state['best']['commit']], cwd=run.base_dir)
+
+        run.status.set(phase='corpus', iteration=len(state['iterations']),
+                       detail='building stimulus')
+        draws = measure.prepare_corpus(seed=state.get('seed', 0))
+        log('corpus: %d draws (%d scored real, %d synthetic)' % (
+            len(draws), sum(1 for d, _p, _c in draws if d.scored),
+            sum(1 for d, _p, _c in draws if d.kind == 'synthetic')))
+
+        if os.path.exists(run.skills_path):
+            skills_data = skills_mod.load(run.skills_path)
+        else:
+            skills_data = skills_mod.load()
+            skills_mod.save(skills_data, run.skills_path)
+
+        if not state.get('baseline'):
+            run.status.set(phase='baseline', detail='measuring the starting design')
+            log('measuring the baseline design...')
+            base = measure.measure(os.path.join(run.base_dir, 'rtl'),
+                                   os.path.join(run.dir, 'baseline-measure'), draws)
+            if base.get('error') or not base.get('oracle_pass'):
+                log('the starting design does not pass: %s'
+                    % (base.get('error') or base.get('first_problem')))
+                state['stopped'] = 'baseline design fails the oracle'
+                run.save()
+                run.status.set(phase='failed', detail=state['stopped'], finished=now_iso())
+                return 1
+            if base.get('synth_error'):
+                log('baseline synthesis failed: %s' % base['synth_error'])
+                state['stopped'] = 'baseline synthesis failed'
+                run.save()
+                run.status.set(phase='failed', detail=state['stopped'], finished=now_iso())
+                return 1
+            state['baseline'] = base
+            state['best'] = {'commit': state['base_commit'], 'metrics': base,
+                             'iteration': 0, 'id': 'baseline'}
+            run.set_progress()
+            run.save()
+            log('baseline: %s' % state_text(base, base).splitlines()[0])
+            rmtree(os.path.join(run.dir, 'baseline-measure', 'sim'))
+
+        target = state['goal'].get('target_pct')
+        since_winner = 0
+        limit_waits = 0
+        error_waits = 0
+        t_start = time.time()
+        k = len(state['iterations']) + 1
         while k <= state['max_iters']:
             gain = goal_gain(state['best']['metrics'], state['baseline'], state['goal'])
             if target and gain is not None and gain >= target:
@@ -687,27 +807,33 @@ def main():
             if args.max_hours and (time.time() - t_start) > args.max_hours * 3600:
                 state['stopped'] = 'time limit of %.1f h reached' % args.max_hours
                 break
-            outcome = run_iteration(run, draws, skills_data, k, n_cands, dry_run=args.dry_run)
+            outcome = run_iteration(run, draws, skills_data, k, n_cands,
+                                    dry_run=args.dry_run, fake=args.fake)
             if args.dry_run:
                 state['stopped'] = 'dry run'
                 break
             if outcome == 'limit':
                 limit_waits += 1
-                if limit_waits > 72:
+                if limit_waits > 24:
                     state['stopped'] = 'the model provider kept refusing for a day'
                     break
-                wait = int(CONFIG['limit_wait_min'])
+                wait = propose.reset_wait_seconds(run.limit_message)
+                if wait is None:
+                    wait = int(CONFIG['limit_wait_min']) * 60
+                wait = min(max(wait + 120, 300), 6 * 3600)
                 log('the model provider reports a usage limit; waiting %d min (wait %d)'
-                    % (wait, limit_waits))
-                run.status.set(phase='waiting', detail='usage limit; retrying in %d min' % wait)
-                time.sleep(wait * 60)
+                    % (wait // 60, limit_waits))
+                run.status.set(phase='waiting',
+                               detail='usage limit; retrying in %d min' % (wait // 60))
+                time.sleep(wait)
                 continue
             if outcome == 'error':
                 error_waits += 1
                 if error_waits > 12:
                     state['stopped'] = 'every coding session failed twelve times in a row'
                     break
-                log('every session failed; waiting 5 min then retrying (attempt %d)' % error_waits)
+                log('every session failed; waiting 5 min then retrying (attempt %d)'
+                    % error_waits)
                 run.status.set(phase='waiting', detail='sessions failed; retrying in 5 min')
                 time.sleep(300)
                 continue
@@ -717,16 +843,28 @@ def main():
         else:
             state['stopped'] = 'iteration cap of %d reached' % state['max_iters']
     except KeyboardInterrupt:
+        tools_kill_all()
         state['stopped'] = 'interrupted'
         log('interrupted; state saved, resume with --resume --run %s' % name)
     except Exception:
         state['stopped'] = 'crashed: ' + traceback.format_exc().strip().splitlines()[-1]
         log(traceback.format_exc())
-    run.save()
-    run.status.set(phase='finished', detail=state['stopped'] or '', finished=now_iso())
-    log('stopped: %s' % state['stopped'])
-    log('best design: branch %s at %s (%s)' % (state['branch'], state['best']['commit'][:12],
-                                                 progress_text(state)))
+
+    try:
+        run.save()
+    except Exception as exc:
+        log('could not save state: %s' % exc)
+    run.status.set(phase='finished', detail=state.get('stopped') or '', finished=now_iso())
+    if args.dry_run and fresh:
+        try:
+            remove_worktree(run.base_dir)
+        except GitError:
+            pass
+        git_ok(['branch', '-D', state['branch']])
+    log('stopped: %s' % state.get('stopped'))
+    if state.get('best'):
+        log('best design: branch %s at %s (%s)' % (state['branch'], state['best']['commit'][:12],
+                                                     progress_text(state)))
     log('total model cost this run: $%.2f' % (state.get('cost_usd') or 0))
     log('report: %s' % os.path.join(run.dir, 'report.html'))
     return 0
