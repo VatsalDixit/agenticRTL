@@ -15,6 +15,40 @@ package vhsnunzip_int_pkg is
   -- 'U' during simulation, '0' during synthesis.
   constant UNDEF    : std_logic := undef_fn;
 
+  -- Width of a line of compressed/decompressed data in bytes, and its log2.
+  -- The whole core is parameterized on this: the compressed input port, the
+  -- pre-decoder window (two lines), the literal and short-term history SRLs,
+  -- the copy rotator, the long-term history line, and the decompressed output
+  -- port are all LB bytes wide. Only powers of two that are a multiple of 8
+  -- make sense, because the long-term history RAM stores 8 bytes per line and
+  -- the toplevel stream ports are byte-multiples of 8.
+  --
+  -- NOTE: when changing this, also change the literal ranges of the toplevel
+  -- ports in vhsnunzip_unbuffered.vhd (co_data/co_cnt/de_data/de_cnt), the
+  -- component declaration in vhsnunzip_pkg.vhd, and the literal range of
+  -- decompressed_stream.data below; the measurement harness reads those with
+  -- a regular expression and needs literal integers there.
+  constant LB       : natural := 16;
+  constant LB_LOG2  : natural := 4;
+
+  -- Depths (log2, in *lines*) of the four bulk storage structures in the core.
+  -- All of these hold LB bytes per slot, so their byte capacity scales with
+  -- LB. They are sized in bytes, not in lines: doubling LB halves the number
+  -- of lines needed for the same reach, which is what keeps the register count
+  -- of a wide core close to that of a narrow one.
+  --
+  --  - ST_LOG2: short-term (SRL) copy history. Copies that reach further back
+  --    than 2**ST_LOG2-1 lines fall through to the long-term history RAM, so
+  --    this only trades area against long-term read traffic.
+  --  - LI_LOG2: literal lookahead SRL. Must cover the number of compressed
+  --    lines that can be in flight between the pre-decoder popping a line and
+  --    the datapath consuming its literal bytes.
+  --  - CO_LOG2/DE_LOG2: compressed input and decompressed output FIFOs.
+  constant ST_LOG2  : natural := 4;
+  constant LI_LOG2  : natural := 4;
+  constant CO_LOG2  : natural := 4;
+  constant DE_LOG2  : natural := 4;
+
   -- Generic array of bits. This has the same definition as an
   -- std_logic_vector for as far as VHDL is concerned, but semantically, we use
   -- this to describe individual bits (with ascending ranges), and
@@ -75,12 +109,12 @@ package vhsnunzip_int_pkg is
     valid     : std_logic;
 
     -- Compressed data line.
-    data      : byte_array(0 to 7);
+    data      : byte_array(0 to LB-1);
 
     -- Asserted to mark the last line of a chunk. When asserted, endi indicates
-    -- the index of the last valid byte. endi must be 7 otherwise.
+    -- the index of the last valid byte. endi must be LB-1 otherwise.
     last      : std_logic;
-    endi      : unsigned(2 downto 0);
+    endi      : unsigned(LB_LOG2-1 downto 0);
 
   end record;
 
@@ -106,18 +140,18 @@ package vhsnunzip_int_pkg is
     -- valid. However, if an element starts at byte 7, as much of the second
     -- line as is needed to encode the element should be valid, assuming that
     -- the input is valid snappy data.
-    data      : byte_array(0 to 15);
+    data      : byte_array(0 to 2*LB-1);
 
     -- Asserted to mark the first line of a chunk. When asserted, start
     -- indicates the byte index of the first element; start should be ignored
     -- otherwise.
     first     : std_logic;
-    start     : unsigned(2 downto 0);
+    start     : unsigned(LB_LOG2-1 downto 0);
 
     -- Asserted to mark the last line of a chunk. When asserted, endi indicates
-    -- the index of the last valid byte. endi must be 7 otherwise.
+    -- the index of the last valid byte. endi must be LB-1 otherwise.
     last      : std_logic;
-    endi      : unsigned(2 downto 0);
+    endi      : unsigned(LB_LOG2-1 downto 0);
 
   end record;
 
@@ -172,7 +206,7 @@ package vhsnunzip_int_pkg is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
     -- saves a bit).
     li_val    : std_logic;
-    li_off    : unsigned(3 downto 0);
+    li_off    : unsigned(LB_LOG2 downto 0);
     li_len    : unsigned(31 downto 0);
 
     -- Indicates that the literal data FIFO should be popped after this stream
@@ -232,7 +266,7 @@ package vhsnunzip_int_pkg is
     -- DIMINISHED-ONE, just like the value in the Snappy header (this saves a
     -- bit).
     cp_off    : unsigned(15 downto 0);
-    cp_len    : signed(3 downto 0);
+    cp_len    : signed(LB_LOG2 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -249,7 +283,7 @@ package vhsnunzip_int_pkg is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
     -- saves a bit).
     li_val    : std_logic;
-    li_off    : unsigned(3 downto 0);
+    li_off    : unsigned(LB_LOG2 downto 0);
     li_len    : unsigned(31 downto 0);
 
     -- Indicates that the literal data FIFO should be popped after this stream
@@ -313,7 +347,7 @@ package vhsnunzip_int_pkg is
     -- either the given line index must be read, or the subsequent line,
     -- depending on the rotation. This is computed by the datapath to reduce
     -- FIFO usage.
-    st_addr   : unsigned(4 downto 0);
+    st_addr   : unsigned(ST_LOG2-1 downto 0);
 
     -- Desired rotation for normal copies, or byte index for run-length copies.
     -- That is:
@@ -337,7 +371,7 @@ package vhsnunzip_int_pkg is
     --  - the effect of lt_swap is inverted on a byte-by-byte basis based on
     --    cp_rol.
     --
-    cp_rol    : unsigned(3 downto 0);
+    cp_rol    : unsigned(LB_LOG2 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -353,13 +387,13 @@ package vhsnunzip_int_pkg is
     -- + one. Bytes between cp_endi and endi are literal bytes. The copy
     -- selection signals can be decoded from this in the same way that the 
     -- byte strobe signals are determined from endi.
-    cp_end    : unsigned(3 downto 0);
+    cp_end    : unsigned(LB_LOG2 downto 0);
 
     -- Rotation for literals. The direction is rotate-left. The MSB should be
     -- handled by offsetting the SRL literal read by one line on a byte-by-byte
     -- basis, in the same way that the short-term memory read handles this. The
     -- remaining 3 LSBs must be handled by the main 8:8 rotator.
-    li_rol    : unsigned(3 downto 0);
+    li_rol    : unsigned(LB_LOG2 downto 0);
 
     -- Index of the last valid byte provided by this command + one. The byte
     -- strobe signals can be derived from this thermometer-code style, ignoring
@@ -367,7 +401,7 @@ package vhsnunzip_int_pkg is
     -- (endi > 8) should be written to a holding register, as the beginning for
     -- the next line. The MSB therefore indicates that an aligned line of
     -- decompressed data is complete.
-    li_end    : unsigned(3 downto 0);
+    li_end    : unsigned(LB_LOG2 downto 0);
 
     -- Indicates that the literal data FIFO should be popped after this command
     -- has been handled.
@@ -419,15 +453,17 @@ package vhsnunzip_int_pkg is
     -- Stream valid signal.
     valid     : std_logic;
 
-    -- Decompressed data line.
-    data      : byte_array(0 to 7);
+    -- Decompressed data line. NOTE: the range of this field must be written
+    -- with literal integers and must equal (0 to LB-1); the measurement
+    -- harness reads the core line width from it.
+    data      : byte_array(0 to 15);
 
     -- Asserted to mark the last line of a chunk.
     last      : std_logic;
 
-    -- Indicates the number of valid bytes. This is always 8 when last is not
-    -- set, but could be anything from 0 to 8 inclusive for the last transfer.
-    cnt       : unsigned(3 downto 0);
+    -- Indicates the number of valid bytes. This is always LB when last is not
+    -- set, but could be anything from 0 to LB inclusive for the last transfer.
+    cnt       : unsigned(LB_LOG2 downto 0);
 
   end record;
 
@@ -450,7 +486,7 @@ package vhsnunzip_int_pkg is
       reset       : in  std_logic;
       co          : in  compressed_stream_single;
       co_ready    : out std_logic;
-      co_level    : out unsigned(5 downto 0);
+      co_level    : out unsigned(CO_LOG2 downto 0);
       lt_off_ld   : in  std_logic := '1';
       lt_off      : in  unsigned(12 downto 0) := (others => '0');
       lt_rd_valid : out std_logic;
@@ -458,8 +494,8 @@ package vhsnunzip_int_pkg is
       lt_rd_adev  : out unsigned(11 downto 0);
       lt_rd_adod  : out unsigned(11 downto 0);
       lt_rd_next  : in  std_logic;
-      lt_rd_even  : in  byte_array(0 to 7);
-      lt_rd_odd   : in  byte_array(0 to 7);
+      lt_rd_even  : in  byte_array(0 to LB-1);
+      lt_rd_odd   : in  byte_array(0 to LB-1);
       -- pragma translate_off
       dbg_cs      : out compressed_stream_single;
       dbg_cd      : out compressed_stream_double;
@@ -470,7 +506,7 @@ package vhsnunzip_int_pkg is
       -- pragma translate_on
       de          : out decompressed_stream;
       de_ready    : in  std_logic;
-      de_level    : out unsigned(5 downto 0)
+      de_level    : out unsigned(DE_LOG2 downto 0)
     );
   end component;
 
