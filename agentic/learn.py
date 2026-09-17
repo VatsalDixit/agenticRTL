@@ -48,6 +48,12 @@ def group_text(group):
         if c.get('rationale'):
             lines.append('    rationale: %s' % c['rationale'][:500])
         lines.append('    outcome: %s' % c.get('outcome', ''))
+        if c.get('truncated'):
+            lines.append('    NOTE: this session was cut off by its budget after '
+                         '%s turns. What was measured may not be the mechanism it '
+                         'set out to build, so it is weak evidence about that '
+                         'mechanism and nothing was counted against it.'
+                         % c.get('turns'))
         if c.get('problem'):
             lines.append('    problem: %s' % c['problem'][:300])
         m = c.get('measured') or {}
@@ -63,6 +69,8 @@ def group_text(group):
             lines.append('    group advantage: %+.2f sd' % c['advantage'])
         if c.get('skills_used'):
             lines.append('    skills used: %s' % ', '.join(c['skills_used']))
+        for fact in (c.get('facts') or []):
+            lines.append('    verified fact: %s' % fact)
         lines.append('    adopted: %s' % ('YES' if c.get('adopted') else 'no'))
         if c.get('files_changed'):
             lines.append('    files: %s' % ', '.join(c['files_changed'])[:300])
@@ -86,12 +94,18 @@ Return JSON only:
    {"id": "existing-id-or-new-kebab-id",
     "pattern": "when to apply (required for a new skill)",
     "strategy": "what to do (required for a new skill)",
-    "confidence": "high|medium|low|avoid",
+    "confidence": "keep|high|medium|low|avoid",
+    "caveat": "at most one sentence to show under an existing strategy",
     "note": "one sentence of evidence from this group"}
  ],
  "lessons": ["one or two short sentences a future candidate session should know"]}
 Rules: update only skills the evidence touches (usually 1-4 entries). A new
 skill needs a concrete pattern and strategy. Keep ids stable.
+"confidence" defaults to "keep": name a level only when you mean to change it,
+and say why in the note. An existing skill's pattern and strategy are never
+rewritten; use "caveat" to qualify one. Entries marked as rules have no
+confidence and are not evidence for or against themselves when a candidate
+that cited them lost.
 """ % (ctx['goal_text'], ctx['iteration'], ctx['state_text'].splitlines()[0]
        if ctx['state_text'] else '', ctx['lever']['reason'],
        group_text(group), skills_text)

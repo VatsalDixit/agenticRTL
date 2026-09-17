@@ -41,6 +41,15 @@ try:
         PermissionResultDeny, ResultMessage, TextBlock, ToolUseBlock, query)
     from claude_agent_sdk import ClaudeSDKError   # noqa: E402
     try:
+        # The CLI emits this whenever the usage window's state changes. It
+        # carries how much of the window is gone and when it resets, which is
+        # better than parsing "resets 5am" out of an error message.
+        from claude_agent_sdk import HookMatcher         # noqa: E402
+        from claude_agent_sdk import RateLimitEvent      # noqa: E402
+    except ImportError:                       # older SDK: no window signal
+        RateLimitEvent = ()                   # isinstance(x, ()) is always False
+        HookMatcher = None
+    try:
         # The warning is about Read/Edit/etc. being auto-approved, which is
         # exactly what we want; Bash is deliberately left out so it is gated.
         from claude_agent_sdk.types import CanUseToolShadowedWarning
@@ -139,9 +148,47 @@ def _looks_like_limit(text):
     return bool(LIMIT_RE.search(text or ''))
 
 
+USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+              'cache_read_input_tokens')
+
+# Dollars per million tokens: input, output, cache write, cache read. Used
+# only to tell a session roughly where it stands; the real figure comes from
+# the CLI at the end. Reading is 4 to 200 times cheaper than writing, which is
+# why the meter warns about thinking, not about how much has been read.
+PRICES = {
+    'fable': (10.0, 50.0, 12.5, 0.25),
+    'opus': (5.0, 25.0, 6.25, 0.50),
+    'sonnet': (2.0, 10.0, 2.50, 0.20),
+    'haiku': (1.0, 5.0, 1.25, 0.10),
+}
+
+
+def estimate_cost(usage, model):
+    """Roughly what a session has spent so far, in dollars."""
+    if not usage:
+        return 0.0
+    key = next((k for k in PRICES if k in (model or '').lower()), 'sonnet')
+    pin, pout, pwrite, pread = PRICES[key]
+    return (usage.get('input_tokens', 0) * pin
+            + usage.get('output_tokens', 0) * pout
+            + usage.get('cache_creation_input_tokens', 0) * pwrite
+            + usage.get('cache_read_input_tokens', 0) * pread) / 1e6
+
+
+def add_usage(total, usage):
+    """Accumulate one turn's token counts into a running total."""
+    if not usage:
+        return
+    for key in USAGE_KEYS:
+        val = usage.get(key)
+        if isinstance(val, (int, float)):
+            total[key] = total.get(key, 0) + int(val)
+    total['turns'] = total.get('turns', 0) + 1
+
+
 async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                      allowed, gate, timeout_s, effort=None, on_text=None,
-                     restricted=True):
+                     restricted=True, meter=False):
     if not SDK_OK:
         return {'status': 'error', 'text': '', 'cost_usd': 0.0, 'turns': 0,
                 'error': 'claude_agent_sdk is not importable: ' + SDK_ERROR,
@@ -164,13 +211,43 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
     opts = ClaudeAgentOptions(**opts_kwargs)
 
     out = {'status': 'ok', 'text': '', 'cost_usd': 0.0, 'turns': 0,
-           'error': '', 'tools_used': [], 'seconds': 0.0, 'subtype': ''}
+           'error': '', 'tools_used': [], 'seconds': 0.0, 'subtype': '',
+           'usage': None, 'model_usage': None, 'turn_usage': {},
+           'rate_limit': None, 'session_id': ''}
     texts = []
     start = time.time()
+
+    if meter and HookMatcher is not None:
+        # Three of four sessions on the expensive model were killed by the
+        # dollar cap in the middle of a change, because nothing told them
+        # where they stood. This says so, once, at three quarters spent.
+        said = {'at': 0.0}
+
+        async def wrapup(_input_data, _tool_use_id, _ctx):
+            now = time.time()
+            minutes = (now - start) / 60.0
+            spent = estimate_cost(out['turn_usage'], model)
+            used = max(spent / budget if budget else 0.0,
+                       minutes / max(timeout_s / 60.0, 1.0))
+            if used < 0.75 or now - said['at'] < 120:
+                return {}
+            said['at'] = now
+            return {'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'additionalContext':
+                    'BUDGET: about $%.2f of your $%.2f and %.0f of your %.0f '
+                    'minutes are gone. Stop opening new ground. Get the check '
+                    'passing on what you have, then write NOTES.md and '
+                    'PROPOSAL.json within the next three minutes. A '
+                    'half-finished change scores nothing; a small finished one '
+                    'scores.' % (spent, budget, minutes, timeout_s / 60.0)}}
+
+        opts.hooks = {'PreToolUse': [HookMatcher(hooks=[wrapup])]}
 
     async def consume():
         async for msg in query(prompt=prompt, options=opts):
             if isinstance(msg, AssistantMessage):
+                add_usage(out['turn_usage'], msg.usage)
                 for block in msg.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         texts.append(block.text)
@@ -178,10 +255,21 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                             on_text(block.text)
                     elif isinstance(block, ToolUseBlock):
                         out['tools_used'].append(block.name)
+            elif RateLimitEvent and isinstance(msg, RateLimitEvent):
+                info = msg.rate_limit_info
+                out['rate_limit'] = {'status': info.status,
+                                     'utilization': info.utilization,
+                                     'resets_at': info.resets_at,
+                                     'window': info.rate_limit_type,
+                                     'seen_at': time.time()}
             elif isinstance(msg, ResultMessage):
                 out['cost_usd'] = float(msg.total_cost_usd or 0.0)
                 out['turns'] = int(msg.num_turns or 0)
                 out['subtype'] = msg.subtype or ''
+                out['session_id'] = msg.session_id or ''
+                out['usage'] = dict(msg.usage) if msg.usage else None
+                out['model_usage'] = ({k: dict(v) for k, v in msg.model_usage.items()}
+                                      if msg.model_usage else None)
                 if msg.result and not texts:
                     texts.append(msg.result)
                 if msg.is_error:
@@ -219,11 +307,11 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
 
 def ask(prompt, system=None, cwd=None, model=None, max_turns=1, budget=3.0,
         tools=(), allowed=(), gate=None, timeout_s=900, effort=None,
-        on_text=None, restricted=True):
+        on_text=None, restricted=True, meter=False):
     """One model call, synchronous. Returns a dict (see _ask_async)."""
     return asyncio.run(_ask_async(prompt, system, cwd, model or CONFIG['helper_model'],
                                   max_turns, budget, tools, allowed, gate,
-                                  timeout_s, effort, on_text, restricted))
+                                  timeout_s, effort, on_text, restricted, meter))
 
 
 def ask_many(jobs):
@@ -284,7 +372,11 @@ def make_gate(worktree):
             cmd = (tool_input.get('command') or '').strip()
             # Read-only git views of other branches (a rejected attempt's
             # files) are allowed; nothing with pipes, redirects or chaining.
-            if re.match(r'^git (show|diff|log)\b[^|;&><`$]*$', cmd):
+            if re.match(r'^git (show|diff|log|status)\b[^|;&><`$]*$', cmd):
+                return PermissionResultAllow()
+            # Reverting your own edits inside this worktree is allowed; it is
+            # how a resumed session gets back to a design that compiles.
+            if re.match(r'^git checkout -- rtl(/[\w./-]+)?$', cmd):
                 return PermissionResultAllow()
             if cmd not in PERMITTED_COMMANDS:
                 return PermissionResultDeny(
@@ -387,6 +479,11 @@ THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
   scoring data; that is deliberate.
 
 HOW TO WORK
+  * A map of the design, generated from this worktree's RTL, is in the brief
+    below: sizes, the records passed between stages, the module tree, and the
+    line ranges of every process. Start from it and read the lines that matter
+    rather than whole files. It can be stale about anything you change, and the
+    code always wins over the map.
   * Read the RTL before changing it. Understand the stage the profile names.
   * Make the change in small verified steps. Run the check after each step.
     An earlier attempt elaborated cleanly and drove X on undriven byte lanes;
@@ -401,20 +498,40 @@ HOW TO WORK
     say so in the rationale and do the best change you can justify instead.
 
 BUDGET
-  The session has a turn cap and a dollar cap; when either is reached it
-  ends at once. So keep the design compiling and passing the check between
+  This session may spend @@BUDGET@@; when either runs out it ends at once,
+  mid-edit, and whatever is in rtl/ is what gets measured. You will be told
+  when three quarters of it is gone. So keep the design compiling and passing the check between
   steps, write a first PROPOSAL.json as soon as you have decided what to
   build, and update it at the end. A half-finished edit that does not
   compile scores nothing.
 
 WHEN YOU ARE DONE
-  Write PROPOSAL.json at the top of the worktree:
+  First write NOTES.md at the top of the worktree, under exactly these four
+  headings, about 400 words in total:
+    ## How it works
+      What you worked out about the parts of the design you read: what a stage
+      does per cycle, what limits it, how the records and handshakes fit
+      together. Write it for the next session, which will start from your notes
+      instead of rediscovering this. Name files and line numbers.
+    ## What I tried
+      The change you built, in a few sentences.
+    ## Why it worked or failed
+      What the check showed, and what you would do differently.
+    ## Facts
+      One line per fact that is true of this design whatever anyone tries next,
+      each one something you verified rather than assumed. These are kept and
+      handed to every later session, so a wrong line here costs more than a
+      missing one.
+  Then write PROPOSAL.json at the top of the worktree:
   {"id": "kebab-case-name",
    "rationale": "what you changed and why it addresses the measured bottleneck",
    "expected_gain_pct": <number, real prediction of throughput change>,
    "expected_effect": "what should happen to bytes/cycle, f_max and area",
    "risk": "what you are least sure about",
-   "skills_used": ["skill ids from the library you applied"]}
+   "primary_skill": "the ONE skill id your change is a test of, or null if
+     none fits. This is the only id scored against your result, so name the
+     mechanism you actually built, not the one you were assigned.",
+   "skills_used": ["any other skill ids you applied"]}
   expected_gain_pct is scored against the measurement afterwards; an honest
   small number is worth more than a hopeful one.
 
@@ -428,9 +545,28 @@ WHEN YOU ARE DONE
 """
 
 
-def build_user_prompt(ctx, direction, others):
+RESUME_PREFIX = """\
+YOU HAVE ALREADY STARTED THIS CHANGE IN THIS WORKTREE.
+
+The provider's usage window ran out in the middle of your last session and the
+loop waited for it to reset. Nothing was thrown away: your edits are still in
+rtl/, and NOTES.md is there if you wrote one.
+
+Start with `git diff` to see what you changed and `python agentic/check.py` to
+see whether it still passes. If it fails and the cause is not obvious within a
+few minutes, run `git checkout -- rtl` and rebuild the change more simply. Then
+finish it and write NOTES.md and PROPOSAL.json.
+
+Your assignment has not changed; it is repeated below.
+
+"""
+
+
+def build_user_prompt(ctx, direction, others, resumed=False):
     """The measured state plus this candidate's assignment."""
     lines = []
+    if resumed:
+        lines.append(RESUME_PREFIX)
     lines.append('GOAL: %s' % ctx['goal_text'])
     lines.append('ITERATION %d of %d. Best design so far vs the original: %s'
                  % (ctx['iteration'], ctx['max_iters'], ctx['progress_text']))
@@ -441,6 +577,14 @@ def build_user_prompt(ctx, direction, others):
     lines.append('STAGE PROFILE (rate vs ceiling read from the RTL)')
     lines.append(ctx['profile_text'])
     lines.append('')
+    if ctx.get('guide_text'):
+        lines.append('A MAP OF THE DESIGN, GENERATED FROM THE RTL YOU HAVE')
+        lines.append('Use its line numbers to read the part you need instead of '
+                     'reading whole files. It describes the design only. Where it '
+                     'disagrees with the code, the code is right.')
+        lines.append('')
+        lines.append(ctx['guide_text'])
+        lines.append('')
     lines.append('WHAT THE PROFILE SAYS TO MOVE: %s -- %s'
                  % (ctx['lever']['lever'], ctx['lever']['reason']))
     lines.append('')
@@ -463,9 +607,18 @@ def build_user_prompt(ctx, direction, others):
         for od in others:
             lines.append('  - %s' % od.get('focus', ''))
     lines.append('')
-    lines.append('Start by running `python agentic/check.py` once to see the '
-                 'design work, then read the RTL that matters for your focus, '
-                 'then make the change.')
+    if ctx.get('check_text'):
+        lines.append('THE CHECK ALREADY PASSES ON THIS DESIGN. The loop ran '
+                     '`python agentic/check.py` for you on exactly this RTL:')
+        lines.append(ctx['check_text'])
+        lines.append('')
+        lines.append('So do not run the check until you have edited something. '
+                     'Read the map and the RTL that matters for your focus, then '
+                     'make the change, then check it.')
+    else:
+        lines.append('Start by running `python agentic/check.py` once to see the '
+                     'design work, then read the RTL that matters for your focus, '
+                     'then make the change.')
     return '\n'.join(lines)
 
 
@@ -491,6 +644,9 @@ STAGE PROFILE
 LEVER: %s -- %s
 
 SKILL LIBRARY
+%s
+
+FACTS SESSIONS HAVE VERIFIED ABOUT THIS DESIGN
 %s
 
 HISTORY (most recent last)
@@ -524,6 +680,7 @@ Reply with JSON only:
 """ % (ctx['goal_text'], ctx['iteration'], ctx['max_iters'], ctx['progress_text'],
        ctx['state_text'], ctx['profile_text'], ctx['lever']['lever'],
        ctx['lever']['reason'], ctx['skills_text'],
+       ctx.get('facts_text') or '(none recorded yet)',
        ctx['history_text'] or '(nothing tried yet)', n, n)
 
 
@@ -569,6 +726,45 @@ def plan_directions(ctx, n, log):
     return dirs[:n], res
 
 
+NOTES_CAP = 6000
+
+
+def read_notes(worktree):
+    """What the session wrote down about the design, capped."""
+    path = os.path.join(worktree, 'NOTES.md')
+    if not os.path.isfile(path):
+        return ''
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fil:
+            return fil.read()[:NOTES_CAP]
+    except OSError:
+        return ''
+
+
+def notes_section(notes, wanted):
+    """One '## heading' section out of a notes file, by keyword."""
+    if not notes:
+        return ''
+    body, keep = [], False
+    for line in notes.splitlines():
+        if line.lstrip().startswith('#'):
+            keep = wanted.lower() in line.lower()
+            continue
+        if keep:
+            body.append(line)
+    return '\n'.join(body).strip()
+
+
+def fact_lines(notes, cap=6):
+    """The '## Facts' bullets, one string each."""
+    out = []
+    for line in notes_section(notes, 'fact').splitlines():
+        line = line.strip().lstrip('-*').strip()
+        if len(line) > 12:
+            out.append(line[:300])
+    return out[:cap]
+
+
 def read_proposal(worktree):
     path = os.path.join(worktree, 'PROPOSAL.json')
     if not os.path.isfile(path):
@@ -589,6 +785,8 @@ def read_proposal(worktree):
         'expected_effect': str(data.get('expected_effect', ''))[:800],
         'risk': str(data.get('risk', ''))[:600],
         'skills_used': [str(s)[:60] for s in (data.get('skills_used') or [])][:8],
+        'primary_skill': (str(data['primary_skill'])[:60]
+                          if data.get('primary_skill') else None),
     }
     try:
         out['expected_gain_pct'] = float(data.get('expected_gain_pct'))
@@ -614,9 +812,14 @@ def write_candidates(ctx, assignments, log):
                 log('    %s | %s' % (label, first[:110]))
 
         jobs.append(dict(
-            prompt=build_user_prompt(ctx, asg['direction'], others),
+            prompt=build_user_prompt(ctx, asg['direction'], others,
+                                     resumed=bool(asg.get('resumed'))),
+            meter=True,
             system={'type': 'preset', 'preset': 'claude_code',
-                    'append': SYSTEM_BRIEF},
+                    'append': SYSTEM_BRIEF.replace(
+                        '@@BUDGET@@', 'about $%.0f and %d minutes'
+                        % (float(CONFIG['session_budget_usd']),
+                           int(CONFIG['session_timeout_min'])))},
             cwd=asg['worktree'], model=CONFIG['model'],
             max_turns=int(CONFIG['session_max_turns']),
             budget=float(CONFIG['session_budget_usd']),
@@ -636,6 +839,8 @@ def write_candidates(ctx, assignments, log):
         out.append({'label': asg['label'], 'direction': asg['direction'],
                     'session': {k: res.get(k) for k in
                                 ('status', 'cost_usd', 'turns', 'seconds',
-                                 'error', 'subtype', 'stopped_by')},
+                                 'error', 'subtype', 'stopped_by', 'usage',
+                                 'turn_usage', 'model_usage', 'rate_limit',
+                                 'session_id')},
                     'proposal': proposal})
     return out

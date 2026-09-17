@@ -50,6 +50,7 @@ yosys -m ghdl -q -l yosys.log -p "
   techmap
   opt
   dfflibmap -liberty $LIB
+  dump -o dffs.txt t:DFF_*
   abc -liberty $LIB -D $PERIOD -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;retime,-o,{D};strash;&get,-n;&dch,-f;&nf,{D};&put;buffer,-c;topo;stime,-p
   setundef -zero
   opt_clean

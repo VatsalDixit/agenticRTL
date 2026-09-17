@@ -34,6 +34,7 @@ import datetime
 import os
 import re
 import statistics
+import subprocess
 import sys
 import time
 import traceback
@@ -43,6 +44,7 @@ sys.path.insert(0, KIT)
 
 import analyse                         # noqa: E402
 import freeze                          # noqa: E402
+import guide as guide_mod              # noqa: E402
 import learn as learn_mod              # noqa: E402
 import measure                         # noqa: E402
 import propose                         # noqa: E402
@@ -50,6 +52,7 @@ import report                          # noqa: E402
 import skills as skills_mod            # noqa: E402
 from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: E402
                    git_ok, now_iso, pct, read_json, rmtree, write_json)
+from tools import run as tools_run                                    # noqa: E402
 from tools import kill_all as tools_kill_all                          # noqa: E402
 
 # The scoring data (agentic/data, test_data) is not tracked by git, so a new
@@ -168,6 +171,13 @@ def fake_write_candidates(assignments, log):
         with open(path, 'w', encoding='utf-8', newline='\n') as fil:
             fil.write(transform(text))
         write_json(os.path.join(asg['worktree'], 'PROPOSAL.json'), proposal)
+        with open(os.path.join(asg['worktree'], 'NOTES.md'), 'w',
+                  encoding='utf-8', newline='\n') as fil:
+            fil.write('## How it works\nfake session: nothing was read.\n'
+                      '## What I tried\n%s\n## Why it worked or failed\n'
+                      'scripted edit, not measured for meaning.\n'
+                      '## Facts\n- fake sessions write notes so this path is tested\n'
+                      % name)
         log('    %s | fake edit %s' % (asg['label'], name))
         out.append({'label': asg['label'], 'direction': asg['direction'],
                     'session': {'status': 'ok', 'cost_usd': 0.0, 'turns': 0,
@@ -366,6 +376,11 @@ def state_text(metrics, base):
                  % (w.get('in_bytes', 0), w.get('in_cnt_bits', 0), w.get('out_bytes', 0),
                     w.get('out_cnt_bits', 0), w.get('cores', 1),
                     int(w.get('core_line_bytes', 0)), metrics.get('regs', 'n/a')))
+    worst = metrics.get('critical_path')
+    if worst:
+        lines.append('worst timing path from synthesis: %s -> %s '
+                     '(the clock is what this path costs; everything else has slack)'
+                     % (worst.get('from'), worst.get('to')))
     for rec in metrics.get('draws', []):
         if rec.get('visible') and rec.get('oracle_pass'):
             lines.append('  draw %-16s %7.3f bytes/cycle, output idle %5.1f%%, input stalled %5.1f%%  (%s)'
@@ -385,6 +400,15 @@ def profile_text(metrics):
     for rec in metrics.get('draws', []):
         if rec.get('visible') and rec.get('kind') == 'real' and rec.get('analysis'):
             parts.append(analyse.describe(rec['analysis'], rec['name']))
+    # The visible draw is the fastest table and is literal-heavy, so on its own
+    # it hides which stage binds the score. The busiest held-out table's rates
+    # are shown without its name: the numbers are not the stimulus.
+    hidden = [r for r in metrics.get('draws', [])
+              if not r.get('visible') and r.get('oracle_pass') and r.get('analysis')]
+    if hidden:
+        worst = max(hidden, key=lambda r: r['analysis'].get('binding_utilisation') or 0)
+        parts.append(analyse.describe(worst['analysis'],
+                                      'the busiest held-out table (name withheld)'))
     prof = metrics.get('profile') or {}
     if prof:
         parts.append('across all real draws: binding stage %s (tightest %s at %.0f%%), '
@@ -397,6 +421,10 @@ def profile_text(metrics):
 
 def history_text(state):
     lines = []
+    # Lessons older than four iterations are dropped here: by then the learner
+    # has attached what mattered to a skill, and keeping both copies spent a
+    # fifth of the brief on the same evidence twice.
+    fresh = {it['iteration'] for it in state['iterations'][-4:]}
     for it in state['iterations'][-12:]:
         for c in it.get('candidates', []):
             m = c.get('measured') or {}
@@ -420,8 +448,9 @@ def history_text(state):
                 line += (' [its files are on git branch %s: read them with '
                          '`git show %s:rtl/<file>`]' % (c['branch'], c['branch']))
             lines.append(line)
-        for les in it.get('lessons', []):
-            lines.append('  lesson: ' + les)
+        if it['iteration'] in fresh:
+            for les in it.get('lessons', []):
+                lines.append('  lesson: ' + les)
     return '\n'.join(lines)
 
 
@@ -434,9 +463,10 @@ def progress_text(state):
                p.get('bpc_gain_pct') or 0, p.get('fmax_gain_pct') or 0, p.get('area_gain_pct') or 0))
 
 
-def build_ctx(state, skills_data, iteration):
+def build_ctx(state, skills_data, iteration, guide_text=''):
     best = state['best']['metrics']
     return {
+        'guide_text': guide_text,
         'goal_text': state['goal_text'],
         'iteration': iteration,
         'max_iters': state['max_iters'],
@@ -444,7 +474,9 @@ def build_ctx(state, skills_data, iteration):
         'state_text': state_text(best, state['baseline']),
         'profile_text': profile_text(best),
         'lever': best.get('lever') or {'lever': 'unknown', 'reason': 'no profile'},
-        'skills_text': skills_mod.format_for_prompt(skills_data, max_entries=30),
+        'skills_text': skills_mod.format_for_prompt(skills_data, max_entries=30,
+                                                    notes_per_skill=1),
+        'facts_text': '\n'.join('- %s' % f for f in (state.get('design_facts') or [])),
         'history_text': history_text(state),
     }
 
@@ -459,16 +491,42 @@ class Run(object):
         os.makedirs(self.dir, exist_ok=True)
         self.state_path = os.path.join(self.dir, 'state.json')
         self.skills_path = os.path.join(self.dir, 'skills.json')
+        self.guide_path = os.path.join(self.dir, 'guide.md')
         self.log = Logger(os.path.join(self.dir, 'loop.log'))
         self.status = report.Status(os.path.join(self.dir, 'status.json'))
         self.base_dir = os.path.join(self.dir, 'base')
         self.state = read_json(self.state_path, None)
         self.limit_message = ''
+        self.check_text = ''
 
     def save(self):
         self.state['updated'] = now_iso()
         write_json(self.state_path, self.state)
         report.write_report(self.state, os.path.join(self.dir, 'report.html'))
+
+    def guide_text(self):
+        """The design guide for the best design so far, or ''."""
+        try:
+            with open(self.guide_path, encoding='utf-8') as fil:
+                return fil.read()
+        except IOError:
+            return ''
+
+    def write_guide(self, notes=None, facts=None):
+        """Rebuild the guide from the design the base worktree now holds.
+
+        Called once after the baseline and again after every adoption, so a
+        session never reads a guide describing a design that no longer exists.
+        """
+        try:
+            text = guide_mod.write_guide(
+                self.guide_path, os.path.join(self.base_dir, 'rtl'),
+                widths=((self.state or {}).get('best') or {}).get('metrics', {}).get('widths'),
+                notes=notes, facts=facts)
+            self.log('design guide: %d characters (about %d tokens) in %s'
+                     % (len(text), len(text) // 4, os.path.basename(self.guide_path)))
+        except Exception as exc:              # a missing guide is never fatal
+            self.log('could not write the design guide: %s' % str(exc)[:200])
 
     def set_progress(self):
         base = self.state['baseline']
@@ -506,6 +564,144 @@ def preflight(log, need_model=True):
     return problems
 
 
+def call_record(res):
+    """What one model call cost, for the run record."""
+    res = res or {}
+    return {k: res.get(k) for k in ('status', 'cost_usd', 'seconds', 'turns',
+                                    'usage', 'error', 'text')}
+
+
+def log_session(log, label, sess):
+    log('  %s: session %s, %d turns, $%.2f, %.0f s%s' % (
+        label, sess.get('status'), sess.get('turns') or 0,
+        sess.get('cost_usd') or 0, sess.get('seconds') or 0,
+        (' (' + (sess.get('error') or '')[:100] + ')') if sess.get('error') else ''))
+    use = sess.get('turn_usage') or {}
+    if use.get('output_tokens'):
+        log('       tokens: %s written, %s cache write, %s cache read'
+            % (use.get('output_tokens', 0),
+               use.get('cache_creation_input_tokens', 0),
+               use.get('cache_read_input_tokens', 0)))
+
+
+def sum_usage(cands):
+    """Token totals over one iteration's sessions."""
+    total = {}
+    for cand in cands:
+        use = (cand.get('session') or {}).get('turn_usage') or {}
+        for key, val in use.items():
+            if isinstance(val, int):
+                total[key] = total.get(key, 0) + val
+    return total
+
+
+def latest_window(results):
+    """The most recent usage-window reading any session saw."""
+    seen = [(r.get('session') or {}).get('rate_limit') for r in results]
+    seen = [w for w in seen if w]
+    if not seen:
+        return None
+    return max(seen, key=lambda w: w.get('seen_at') or 0)
+
+
+def window_text(win):
+    bits = [str(win.get('status'))]
+    if win.get('utilization') is not None:
+        bits.append('%.0f%% used' % (100.0 * win['utilization']))
+    if win.get('resets_at'):
+        bits.append('resets in %.0f min' % ((win['resets_at'] - time.time()) / 60.0))
+    if win.get('window'):
+        bits.append(str(win['window']))
+    return ', '.join(bits)
+
+
+def kit_files():
+    return [os.path.join(KIT, f) for f in sorted(os.listdir(KIT))
+            if f.endswith('.py') or f == 'config.json']
+
+
+def kit_mtime():
+    try:
+        return max(os.path.getmtime(f) for f in kit_files())
+    except (OSError, ValueError):
+        return 0.0
+
+
+KIT_MTIME = kit_mtime()
+
+
+def kit_compiles(log):
+    """Never restart into a half-saved edit."""
+    import py_compile
+    for path in kit_files():
+        if not path.endswith('.py'):
+            continue
+        try:
+            py_compile.compile(path, doraise=True)
+        except Exception as exc:
+            log('  the kit does not compile (%s); keeping the running code'
+                % str(exc)[:200])
+            return False
+    return True
+
+
+def restart(name, log):
+    """Re-run this loop with the kit as it is on disk now.
+
+    os.execv is not usable here: on Windows it re-quotes the program path and
+    an interpreter installed under a user folder whose name contains a
+    space comes back split at that space.
+    Running the new process as a child and exiting with its code
+    keeps the console and the exit status intact.
+    """
+    gen = int(os.environ.get('AGENTIC_RELOAD_GEN', '0')) + 1
+    if gen > 20:
+        log('  the kit keeps changing; staying on the running code')
+        return False
+    env = dict(os.environ, AGENTIC_RELOAD_GEN=str(gen))
+    cmd = [sys.executable, os.path.abspath(__file__)] + restart_argv(name)
+    log('restarting to pick up the kit change (restart %d of at most 20)' % gen)
+    sys.stdout.flush()
+    raise SystemExit(subprocess.call(cmd, env=env))
+
+
+def restart_argv(name):
+    """This process's arguments, forced to resume the current run."""
+    argv, skip = [], False
+    for arg in sys.argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if arg in ('--run', '--goal'):
+            skip = True
+            continue
+        if arg == '--resume' or arg.startswith('--run=') or arg.startswith('--goal='):
+            continue
+        argv.append(arg)
+    return argv + ['--resume', '--run', name]
+
+
+def starting_check(base_dir, log):
+    """Run the candidates' check once, on the design they all start from.
+
+    Every session used to spend its first turn on this, and the answer is the
+    same for all of them. The worktree's own copy of check.py is used, so it
+    reports on the design in that worktree.
+    """
+    script = os.path.join(base_dir, 'agentic', 'check.py')
+    if not os.path.exists(script):
+        return ''
+    res = tools_run([sys.executable, script], timeout=900, cwd=base_dir)
+    text = (res.out or '') + (res.err or '')
+    if not res.ok:
+        log('  the starting check did not pass here (%s); sessions will run it '
+            'themselves' % (text.strip().splitlines() or [''])[-1][:160])
+        return ''
+    keep = [ln for ln in text.splitlines()
+            if ln.strip() and not ln.startswith('This is invented stimulus')]
+    return '\n'.join(keep[:40])
+
+
 def measure_one(args):
     rtl_dir, work_dir, draws = args
     try:
@@ -518,6 +714,13 @@ def measure_one(args):
 def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False):
     state = run.state
     log = run.log
+    # Sessions the previous attempt at this iteration left half-finished when
+    # the usage window ran out. Their worktrees were kept.
+    pending = state.get('pending') or {}
+    resuming = pending.get('slots') if pending.get('iteration') == k else None
+    if resuming:
+        resuming = [slot for slot in resuming if os.path.isdir(slot.get('worktree', ''))]
+    state['pending'] = None
     goal = state['goal']
     parent = state['best']['metrics']
     run.status.set(phase='plan', iteration=k, detail='choosing %d directions' % n_cands)
@@ -526,8 +729,13 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     log('lever: %s -- %s' % (parent.get('lever', {}).get('lever'),
                              parent.get('lever', {}).get('reason')))
 
-    ctx = build_ctx(state, skills_data, k)
-    directions, plan_res = propose.plan_directions(ctx, n_cands, log)
+    ctx = build_ctx(state, skills_data, k, guide_text=run.guide_text())
+    ctx['check_text'] = run.check_text
+    if resuming:
+        directions = [slot['direction'] for slot in resuming]
+        plan_res = {'status': 'reused', 'text': 'the plan from the interrupted attempt'}
+    if not resuming:
+        directions, plan_res = propose.plan_directions(ctx, n_cands, log)
     for j, d in enumerate(directions, 1):
         log('  direction c%d: %s' % (j, d['focus'][:140]))
     if dry_run:
@@ -536,24 +744,39 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
 
     iter_dir = os.path.join(run.dir, 'iter-%d' % k)
     os.makedirs(iter_dir, exist_ok=True)
+    write_json(os.path.join(iter_dir, 'plan.json'),
+               {'directions': directions, 'call': call_record(plan_res)})
     start = git(['rev-parse', 'HEAD'], cwd=run.base_dir)
     assignments = []
-    try:
-        for j, d in enumerate(directions, 1):
-            label = 'c%d' % j
-            # Not under the run branch's name: git cannot have both a branch
-            # 'agentic/run' and a branch 'agentic/run/i1-c1'.
-            branch = 'agentic-cand/%s/i%d-%s' % (state['run'], k, label)
-            path = os.path.join(iter_dir, label)
-            add_worktree(path, branch, start)
-            blind(path)
-            assignments.append({'label': label, 'worktree': path, 'direction': d,
-                                'branch': branch})
-    except GitError as exc:
-        log('could not prepare a candidate worktree: %s' % exc)
-        return 'error'
+    if resuming:
+        log('continuing %d session(s) in the worktrees the usage limit '
+            'interrupted' % len(resuming))
+        assignments = [dict(slot, resumed=True) for slot in resuming]
+        directions = [slot['direction'] for slot in assignments]
+    else:
+        try:
+            for j, d in enumerate(directions, 1):
+                label = 'c%d' % j
+                # Not under the run branch's name: git cannot have both a branch
+                # 'agentic/run' and a branch 'agentic/run/i1-c1'.
+                branch = 'agentic-cand/%s/i%d-%s' % (state['run'], k, label)
+                path = os.path.join(iter_dir, label)
+                add_worktree(path, branch, start)
+                blind(path)
+                assignments.append({'label': label, 'worktree': path, 'direction': d,
+                                    'branch': branch})
+        except GitError as exc:
+            log('could not prepare a candidate worktree: %s' % exc)
+            return 'error'
 
-    def discard_all():
+    def discard_all(spent_on=None):
+        spent = round(sum((r['session'].get('cost_usd') or 0)
+                          for r in (spent_on or [])), 2)
+        if spent:
+            state['discarded_usd'] = round((state.get('discarded_usd') or 0) + spent, 2)
+            log('  discarding %d session(s) that produced nothing: $%.2f spent, '
+                '$%.2f discarded so far this run'
+                % (len(spent_on), spent, state['discarded_usd']))
         for asg in assignments:
             try:
                 remove_worktree(asg['worktree'])
@@ -561,6 +784,11 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                 log('  (%s)' % exc)
             git_ok(['branch', '-D', asg['branch']])
 
+    if not run.check_text:
+        run.status.set(phase='check', detail='running the starting check once')
+        run.check_text = starting_check(run.base_dir, log)
+        if run.check_text:
+            log('starting check passes; its output goes into every brief')
     run.status.set(phase='write', detail='%d coding sessions in parallel' % n_cands)
     log('writing %d candidates in parallel (model %s, up to %d min each)...'
         % (n_cands, CONFIG['model'], int(CONFIG['session_timeout_min'])))
@@ -570,6 +798,12 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     else:
         results = propose.write_candidates(ctx, assignments, log)
     log('sessions finished in %.0f min' % ((time.time() - t0) / 60.0))
+    for asg, res in zip(assignments, results):
+        log_session(log, asg['label'], res['session'])
+    window = latest_window(results)
+    if window:
+        state['window'] = window
+        log('  usage window: %s' % window_text(window))
 
     statuses = [r['session'].get('status') for r in results]
     no_proposal = not any(r['proposal'] and r['proposal'].get('id') not in (None, 'none')
@@ -579,12 +813,23 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         # iteration on it: wait for the reset and try this one again.
         msgs = ' '.join((r['session'].get('error') or '') for r in results)
         run.limit_message = msgs
-        discard_all()
+        spent = round(sum((r['session'].get('cost_usd') or 0) for r in results), 2)
+        state['discarded_usd'] = round((state.get('discarded_usd') or 0) + spent, 2)
+        state['pending'] = {'iteration': k, 'slots': [
+            {'label': a['label'], 'worktree': a['worktree'], 'branch': a['branch'],
+             'direction': a['direction']} for a in assignments]}
+        log('  keeping %d worktree(s) so the sessions can be continued after the '
+            'wait ($%.2f spent so far on this attempt)' % (len(assignments), spent))
         return 'limit'
     if no_proposal and all(s not in ('ok', 'budget') for s in statuses):
         errs = '; '.join((r['session'].get('error') or '')[:120] for r in results)
         log('every session failed: %s' % errs)
-        discard_all()
+        discard_all(results)
+        # 1073807364 is DBG_TERMINATE_PROCESS: something outside killed the
+        # whole tree (a closed terminal, a reboot, Ctrl-C on the console).
+        # Retrying that twelve times helps nobody.
+        if re.search(r'exit code (?:1073807364|3221225786|3221225794)', errs):
+            return 'killed'
         return 'error'
 
     # commit what each session produced
@@ -598,13 +843,12 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                 'expected_gain_pct': prop.get('expected_gain_pct'),
                 'expected_effect': prop.get('expected_effect', ''),
                 'risk': prop.get('risk', ''), 'skills_used': prop.get('skills_used') or [],
+                'model': CONFIG['model'], 'effort': CONFIG.get('effort'),
+                'primary_skill': prop.get('primary_skill'),
+                'truncated': sess.get('status') in ('budget', 'timeout'),
                 'session': sess, 'commit': None, 'files_changed': [],
                 'outcome': '', 'reason': '', 'measured': {}, 'score': None,
                 'advantage': None, 'adopted': False}
-        log('  %s: session %s, %d turns, $%.2f, %.0f s%s' % (
-            asg['label'], sess.get('status'), sess.get('turns') or 0,
-            sess.get('cost_usd') or 0, sess.get('seconds') or 0,
-            (' (' + sess.get('error', '')[:100] + ')') if sess.get('error') else ''))
         try:
             sha, files = commit_candidate(asg['worktree'], 'agentic i%d %s: %s'
                                           % (k, asg['label'], prop.get('id') or 'no proposal'))
@@ -613,6 +857,15 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
             log('  %s: could not commit: %s' % (asg['label'], exc))
         cand['commit'] = sha
         cand['files_changed'] = files
+        notes = propose.read_notes(asg['worktree'])
+        cand['notes'] = notes
+        if notes:
+            try:
+                with open(os.path.join(iter_dir, '%s-NOTES.md' % asg['label']),
+                          'w', encoding='utf-8', newline='\n') as fil:
+                    fil.write(notes)
+            except OSError as exc:
+                log('  %s: could not save notes: %s' % (asg['label'], exc))
         if not sha or (prop.get('id') in (None, 'none')):
             cand['outcome'] = 'no_proposal'
             cand['reason'] = (prop.get('rationale') or sess.get('error') or
@@ -623,6 +876,15 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                 asg['label'], cand['id'], ', '.join(files)[:120],
                 cand['expected_gain_pct']))
         cands.append(cand)
+
+    # Facts a session verified are true of the design whatever is tried next,
+    # so they are kept for every later session (and for the guide).
+    facts = state.setdefault('design_facts', [])
+    for cand in cands:
+        for line in propose.fact_lines(cand.get('notes') or ''):
+            if line not in facts:
+                facts.append(line)
+    del facts[:-24]
 
     # earlier rejected candidates with a big gain, re-merged onto the best
     if not fake:
@@ -705,6 +967,10 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                          'iteration': k, 'id': winner['id']}
         run.set_progress()
         log('ADOPTED %s: %s' % (winner['id'], progress_text(state)))
+        run.write_guide(notes=propose.notes_section(winner.get('notes') or '',
+                                                    'how it works'),
+                        facts=state.get('design_facts'))
+        run.check_text = ''            # the design changed; the check must too
     else:
         log('nothing adopted this iteration')
 
@@ -717,20 +983,31 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                       'problem': c['reason'], 'measured': c['measured'],
                       'expected_gain_pct': c['expected_gain_pct'],
                       'advantage': c['advantage'], 'adopted': c['adopted'],
-                      'skills_used': c['skills_used'], 'files_changed': c['files_changed']})
+                      'skills_used': c['skills_used'], 'files_changed': c['files_changed'],
+                      'primary_skill': c.get('primary_skill'),
+                      'truncated': c.get('truncated'), 'turns': (c['session'] or {}).get('turns'),
+                      'facts': propose.fact_lines(c.get('notes') or '')})
         # Counters only move for candidates that were actually measured; a
-        # session that timed out or hit a limit says nothing about a skill.
-        if c['commit'] and c['outcome'] != 'no_proposal':
-            used = list(c['skills_used']) + list(c['direction'].get('skill_ids') or [])
-            skills_mod.record_outcome(skills_data, sorted(set(used)),
-                                      passed=c['outcome'] in ('candidate', 'adopted', 'no_gain',
-                                                              'regressed', 'too_expensive',
-                                                              'ram_latency_changed'),
-                                      adopted=c['adopted'], advantage=c['advantage'])
+        # session that timed out or hit a limit says nothing about a skill,
+        # and neither does one that was cut off mid-change by its budget:
+        # what got measured then is not the mechanism it set out to build.
+        if c['commit'] and c['outcome'] != 'no_proposal' and not c.get('truncated'):
+            primary = (c.get('primary_skill')
+                       or (c['direction'].get('skill_ids') or [None])[0])
+            if primary:
+                skills_mod.record_outcome(
+                    skills_data, [primary],
+                    passed=c['outcome'] in ('candidate', 'adopted', 'no_gain',
+                                            'regressed', 'too_expensive',
+                                            'ram_latency_changed'),
+                    adopted=c['adopted'], advantage=c['advantage'],
+                    count_advantage=len([x for x in cands
+                                         if x.get('score') is not None]) >= 3)
     changed, lessons = [], []
     if not fake:
         try:
             changed, lessons, _res = learn_mod.learn(ctx, group, skills_data, log)
+            write_json(os.path.join(iter_dir, 'learn.json'), call_record(_res))
         except Exception as exc:              # learning is optional; never fatal
             log('  learning step failed: %s' % str(exc)[:200])
     for ch in changed:
@@ -741,7 +1018,8 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
 
     # record
     record = {'iteration': k, 'at': now_iso(), 'directions': directions,
-              'candidates': [{kk: vv for kk, vv in c.items() if kk != 'metrics'}
+              'candidates': [{kk: (vv[:1200] if kk == 'notes' else vv)
+                              for kk, vv in c.items() if kk != 'metrics'}
                              for c in cands],
               'winner': ({'id': winner['id'], 'label': winner['label'],
                           'commit': winner['commit'], 'measured': winner['measured']}
@@ -749,6 +1027,8 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
               'best_after': {kk: state['best']['metrics'].get(kk) for kk in
                              ('throughput_gbps', 'bytes_per_cycle', 'f_max_mhz', 'area_um2')},
               'skills_changed': changed, 'lessons': lessons,
+              'model': CONFIG['model'], 'effort': CONFIG.get('effort'),
+              'tokens': sum_usage(cands),
               'cost_usd': round(sum((c['session'].get('cost_usd') or 0) for c in cands), 2)}
     state['iterations'].append(record)
     state['cost_usd'] = round((state.get('cost_usd') or 0) + record['cost_usd'], 2)
@@ -767,6 +1047,9 @@ def main():
     ap.add_argument('--iters', type=int, default=None,
                     help='iteration cap (default 100; on --resume keeps the run\'s cap)')
     ap.add_argument('--candidates', type=int, default=None)
+    ap.add_argument('--skills-from', dest='skills_from', default=None,
+                    help='start the skill library from a finished run: its '
+                         'verified facts and its avoid entries, counters reset')
     ap.add_argument('--model', default=None)
     ap.add_argument('--resume', action='store_true')
     ap.add_argument('--fake', action='store_true',
@@ -869,9 +1152,19 @@ def main():
 
         if os.path.exists(run.skills_path):
             skills_data = skills_mod.load(run.skills_path)
+        elif args.skills_from:
+            prev = report.run_dir(args.skills_from)
+            skills_data, carried, facts = skills_mod.distil(prev)
+            log('skill library distilled from %s: %d avoid entr%s and %d '
+                'verified fact(s) carried, everything else reset'
+                % (args.skills_from, len(carried),
+                   'y' if len(carried) == 1 else 'ies', len(facts)))
+            skills_mod.save(skills_data, run.skills_path)
         else:
             skills_data = skills_mod.load()
             skills_mod.save(skills_data, run.skills_path)
+        if not state.get('design_facts'):
+            state['design_facts'] = list(skills_data.get('design_facts') or [])
 
         if not state.get('baseline'):
             run.status.set(phase='baseline', detail='measuring the starting design')
@@ -896,6 +1189,7 @@ def main():
                              'iteration': 0, 'id': 'baseline'}
             run.set_progress()
             run.save()
+            run.write_guide(facts=state.get('design_facts'))
             log('baseline: %s' % state_text(base, base).splitlines()[0])
             rmtree(os.path.join(run.dir, 'baseline-measure', 'sim'))
 
@@ -923,6 +1217,26 @@ def main():
                     skills_data = skills_mod.load(run.skills_path)
                 except Exception as exc:
                     log('  could not reload skills.json (%s); keeping the copy in memory' % exc)
+            win = state.get('window') or {}
+            left = (win.get('resets_at') or 0) - time.time()
+            if (win.get('utilization') or 0) >= 0.9 and 0 < left < 25 * 60 \
+                    and not args.dry_run and not args.fake:
+                log('the usage window is %.0f%% gone and resets in %d min; '
+                    'waiting rather than starting sessions that would be cut off'
+                    % (100.0 * win['utilization'], left // 60))
+                run.status.set(phase='waiting', detail='window nearly spent')
+                time.sleep(left + 60)
+                continue
+            if kit_mtime() > KIT_MTIME + 0.5 and not args.dry_run:
+                if kit_compiles(log):
+                    log('the kit changed on disk; restarting to pick it up '
+                        '(resuming run %s at iteration %d)' % (name, k))
+                    run.status.set(phase='reloading', detail='kit changed on disk')
+                    run.save()
+                    if not restart(name, log):
+                        globals()['KIT_MTIME'] = kit_mtime()
+                else:
+                    globals()['KIT_MTIME'] = kit_mtime()
             outcome = run_iteration(run, draws, skills_data, k, n_cands,
                                     dry_run=args.dry_run, fake=args.fake)
             if args.dry_run:
@@ -933,7 +1247,17 @@ def main():
                 if limit_waits > 24:
                     state['stopped'] = 'the model provider kept refusing for a day'
                     break
-                wait = propose.reset_wait_seconds(run.limit_message)
+                win = state.get('window') or {}
+                wait = None
+                if win.get('resets_at'):
+                    wait = int(win['resets_at'] - time.time())
+                    if wait > 0:
+                        log('  the provider reports the window resets in %d min'
+                            % (wait // 60))
+                    else:
+                        wait = None
+                if wait is None:
+                    wait = propose.reset_wait_seconds(run.limit_message)
                 if wait is None:
                     wait = int(CONFIG['limit_wait_min']) * 60
                 wait = min(max(wait + 120, 300), 6 * 3600)
@@ -943,6 +1267,11 @@ def main():
                                detail='usage limit; retrying in %d min' % (wait // 60))
                 time.sleep(wait)
                 continue
+            if outcome == 'killed':
+                state['stopped'] = ('the sessions were killed from outside '
+                                    '(not a provider error); stopping instead '
+                                    'of retrying')
+                break
             if outcome == 'error':
                 error_waits += 1
                 if error_waits > 12:
@@ -981,7 +1310,10 @@ def main():
     if state.get('best'):
         log('best design: branch %s at %s (%s)' % (state['branch'], state['best']['commit'][:12],
                                                      progress_text(state)))
-    log('total model cost this run: $%.2f' % (state.get('cost_usd') or 0))
+    log('total model cost this run: $%.2f%s' % (
+        state.get('cost_usd') or 0,
+        (' (plus $%.2f spent on sessions that were discarded)'
+         % state['discarded_usd']) if state.get('discarded_usd') else ''))
     log('report: %s' % os.path.join(run.dir, 'report.html'))
     return 0
 

@@ -7,7 +7,7 @@
   "candidates": 3,
   "session_budget_usd": 10.0,
   "session_max_turns": 300,
-  "session_timeout_min": 45,
+  "session_timeout_min": 30,
   "train_pages": 12,
   "clock_period_ps": 4000,
   "sim_timeout_s": 1200,

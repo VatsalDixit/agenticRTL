@@ -8,6 +8,7 @@ python agentic/setup.py                                   # once: check tools, b
 python agentic/loop.py --goal "increase throughput by 50%" --iters 100
 python agentic/loop.py --status                           # what is it doing right now
 python agentic/gui.py                                     # the live dashboard window
+python agentic/test_kit.py                                # checks that need no model
 ```
 
 ## The dashboard
@@ -59,20 +60,59 @@ graph TD
 Each candidate-writing session may read and edit `rtl/` in its worktree and
 may run exactly one command, `python agentic/check.py`, which simulates the
 design on invented data and compares every byte with the frozen reference
-decompressor. It cannot see the data the design is scored on.
+decompressor. It cannot see the data the design is scored on. Read-only
+`git show/diff/log/status` and `git checkout -- rtl` are allowed too, so a
+session can look at an earlier attempt and undo its own half-change.
+
+## What a session is given before it starts
+
+Sessions used to spend six to fourteen minutes, about 60% of the session,
+working out the same things about the design that every other session had
+already worked out, and then the worktree was deleted and it was paid for
+again next iteration. So the loop hands over what it already knows:
+
+- **A map of the design** (`guide.py`), generated from the RTL whenever a
+  design is adopted and written to `<run>/guide.md`: port and line widths, the
+  records passed between stages with every field's size, the module tree, and
+  the line ranges of every process so a session reads 200 lines instead of a
+  900-line file. It is generated from the code, so it cannot drift; it
+  describes the design and gives no advice, so it cannot narrow what a session
+  proposes.
+- **The notes earlier sessions wrote.** Every session ends by writing
+  `NOTES.md` under four headings (how it works, what I tried, why it worked or
+  failed, facts). The loop copies them into `<run>/iter-N/`, adds the adopted
+  session's "how it works" to the guide, and keeps every verified fact in
+  `state.json` and in the planner's brief.
+- **The starting check, already run.** The loop runs `check.py` once per
+  iteration on the design all sessions start from and pastes the output into
+  every brief.
+- **The worst timing path, named.** Synthesis reports its critical path by net
+  name (`$auto$dfflibmap$238014`); the loop maps both ends back through the
+  register list to RTL names, so the brief says the path runs from
+  `cmd_gen_2 c1h[0]` to `cmd_gen_2 li_off[5]` instead of leaving a session to
+  guess which logic is slow.
 
 ## What one iteration costs
 
 | step | time | who |
 |---|---|---|
-| plan | ~20 s | one model call, no tools |
-| write N candidates | 10-45 min (in parallel) | N Claude coding sessions |
+| plan | ~25 s | one model call, no tools |
+| starting check | ~10 s | GHDL in WSL, once for every session |
+| write N candidates | 10-30 min (in parallel) | N Claude coding sessions |
 | measure N candidates | ~1 min (in parallel) | GHDL + Yosys in WSL |
-| learn | ~20 s | one model call, no tools |
+| learn | ~50 s | one model call, no tools |
 
-So an iteration is 15-45 minutes and 100 iterations is one to three days.
-The loop never stops because a model call failed: on a usage limit it reads
-the reset time from the message, waits, and retries the same iteration.
+So an iteration is the slowest session plus about two minutes, and it ends
+when that session ends: sessions are capped at `session_timeout_min` (30) and
+are told when three quarters of their budget is gone, because a session that
+is killed mid-change leaves a half-built design that gets measured as if it
+were the change it meant to make.
+
+The loop never stops because a model call failed. On a usage limit it waits
+for the reset time the provider reports (the CLI sends it; the message text is
+only a fallback), and it **keeps the worktrees**: after the wait the same
+sessions are continued where they stopped, with their own diff and notes in
+front of them, instead of the iteration being thrown away and started again.
 
 **The real budget is the subscription's 5-hour usage window, not dollars.**
 Three parallel Opus sessions can empty a Max window in one or two iterations,
@@ -112,7 +152,14 @@ python agentic/loop.py --status --run run-20260915-0300      # live view in the 
 
 Options: `--candidates N` (parallel sessions, default 3), `--model opus`,
 `--patience K` (stop after K iterations without a winner; default never),
-`--max-hours H`, `--dry-run` (baseline and plan only, no coding sessions).
+`--max-hours H`, `--dry-run` (baseline and plan only, no coding sessions),
+`--skills-from RUN` (start the library from a finished run's verified facts
+and its avoid entries, with everything else reset).
+
+Editing the kit while a run is going is safe: at the start of each iteration
+the loop notices that `agentic/*.py` or `config.json` changed, checks that it
+all still compiles, and restarts itself on the new code, resuming the same
+run. A file that does not compile is ignored until it does.
 
 Goals understood: a percentage ("by 50%"), a multiplier ("2x", "double"),
 or "maximize" / "as far as possible". The metric is throughput
@@ -159,12 +206,36 @@ checkout is never modified by the loop.
 
 ## The skill library
 
-`agentic/skills.json` holds pattern -> strategy entries with a confidence
-(high / medium / low / avoid) and counters. It is seeded from an earlier
-campaign on this design and from the Dr. RTL paper. After every iteration
-one model call compares the group of candidates (advantage in standard
-deviations from the group mean) and updates the library. Every candidate
-session reads it. You can edit it by hand.
+`agentic/skills.json` holds two kinds of entry:
+
+- **rules**: invariants and stop rules (the chunk-boundary flush ordering,
+  score on real data, do not move control across registers). They are always
+  shown, never rated and never counted. A candidate that cited a rule and then
+  lost says nothing about the rule, and rating them that way once left the
+  flush invariant filed under "low confidence (unproven or risky)".
+- **mechanisms**: things to try, with a confidence (high / medium / low /
+  avoid) and counters.
+
+After every iteration one model call reads the group of candidates and updates
+the library. Three things it cannot do: change a rating without naming one (a
+note-only update used to demote the skill it was describing), rewrite a
+pattern or strategy (one failed attempt once turned "widen the line" into "be
+cautious about widening the line", and widening was what eventually won by
++19%), or have its result charged to a session that was cut off mid-change. It
+adds short caveats under a strategy instead, and a rewrite needs an explicit
+`replace_strategy` and an adoption behind it.
+
+Each result is counted against **one** mechanism: the first skill the planner
+assigned, or the `primary_skill` the session names in `PROPOSAL.json` when it
+deviated. Group advantage is only recorded when three or more candidates were
+scored, because with two candidates it is always +1 or -1.
+
+Starting a new campaign from the previous one's learned library is a bad idea:
+that library describes a design that no longer exists. `--skills-from <run>`
+(or `python agentic/skills.py --distil <run-dir>`) carries over only what stays
+true: the facts sessions verified, and the mechanisms measured not worth trying
+again, each tagged with the design state it was measured on. Everything else
+resets.
 
 ## Files
 
@@ -176,6 +247,8 @@ session reads it. You can edit it by hand.
 | `skills.py`, `skills.json` | the skill library |
 | `measure.py` | simulate all draws + synthesise, one design |
 | `analyse.py` | stage rates vs ceilings read from the RTL |
+| `guide.py` | the map of the current design, generated from the RTL |
+| `test_kit.py` | checks for the notebook, the analyser, the guide and the timing report |
 | `stim.py` | the stimulus: real Parquet pages + synthetic chunks |
 | `oracle.py`, `ref/snappy.py` | the frozen reference (correctness) |
 | `check.py` | the one command a candidate session may run |
@@ -202,3 +275,18 @@ session reads it. You can edit it by hand.
   `echo` through, but everything that can read files is gated.
 - A placeholder `ANTHROPIC_API_KEY` must be removed from the process
   environment, not just from the child's dict: the SDK inherits it.
+- Count the element kinds separately. Pooling copies and literals into one
+  "decode engine" rate hid a copy slot running at 82-93% of its ceiling behind
+  an idle literal slot; the loop concluded "no stage saturated, look for
+  latency" and spent three iterations hunting bubbles its own learner had
+  already ruled out.
+- Reading is cheap and thinking is expensive (4x to 200x per token on the
+  large models), so a smaller prompt saves little. What saves real money is
+  not making every session work the same things out again.
+- Tell a session where it stands. Three of four sessions on the expensive
+  model were killed by the dollar cap mid-change, and one had switched its own
+  mechanism off to ship something that passed; the measurement was then
+  recorded against the mechanism it had disabled.
+- On Windows, `os.execv` re-quotes the program path, so an interpreter under a
+  user folder with a space in its name comes back split. The loop restarts
+  itself as a child process instead.

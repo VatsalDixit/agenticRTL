@@ -1,146 +1,198 @@
 {
- "version": 1,
  "about": "Pattern -> strategy skills for optimising the vhsnunzip Snappy decompressor. Seeded from an earlier optimisation campaign on this design (flow/LESSONS.md in the agenticRTL_test2 repo) and from the Dr. RTL paper (arXiv 2604.14989). learn.py updates this file after every iteration.",
  "skills": [
   {
+   "caveats": [],
+   "confidence": "high",
    "id": "relieve-the-binding-stage",
+   "kind": "mechanism",
    "pattern": "The stage profile names one stage at or near its ceiling (input port, decode engine, core datapath, output port) while the others have headroom.",
-   "strategy": "Raise the per-cycle capacity of THAT stage only. Do not widen or duplicate an idle stage. Measured on this design: relieving the named stage gave +27.7% throughput for +3.7% area; adding hardware next to an idle stage gave +12.7% for +133% area.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Raise the per-cycle capacity of THAT stage only. Do not widen or duplicate an idle stage. Measured on this design: relieving the named stage gave +27.7% throughput for +3.7% area; adding hardware next to an idle stage gave +12.7% for +133% area."
   },
   {
+   "caveats": [],
+   "confidence": "high",
    "id": "raise-bytes-per-command",
+   "kind": "mechanism",
    "pattern": "core datapath saturated: cmd_gen_2 budgets each command as (line width minus copy length) bytes and the datapath pushes at most one line per command, so a core cannot exceed the line width in bytes per cycle.",
-   "strategy": "Widen the command record, the literal/copy byte-region selection in the pipeline datapath, and the short-term history read so one command covers a wider output line (8 -> 16 -> 32 bytes). Doubling the line nearly doubled real-data throughput the first time (8.0 -> 13.0 B/cycle geomean) at small area cost. Watch overlapping copies (offset smaller than length): the forwarding must cover the wider span.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Widen the command record, the literal/copy byte-region selection in the pipeline datapath, and the short-term history read so one command covers a wider output line (8 -> 16 -> 32 bytes). Doubling the line nearly doubled real-data throughput the first time (8.0 -> 13.0 B/cycle geomean) at small area cost. Watch overlapping copies (offset smaller than length): the forwarding must cover the wider span."
   },
   {
+   "caveats": [],
+   "confidence": "high",
    "id": "widen-input-port",
+   "kind": "mechanism",
    "pattern": "input port saturated: data that barely compresses needs almost as many compressed bytes in as decompressed bytes out, and the co_data port is narrower than the core line.",
-   "strategy": "Widen co_data (and the pre-decoder's window) so the compressed stream can be fed at least as fast as the core can consume it. Cheap in area. Keep the cnt convention consistent (a cnt field exactly log2(width) bits wide means 0 = full line; a wider cnt field is a literal count).",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Widen co_data (and the pre-decoder's window) so the compressed stream can be fed at least as fast as the core can consume it. Cheap in area. Keep the cnt convention consistent (a cnt field exactly log2(width) bits wide means 0 = full line; a wider cnt field is a literal count)."
   },
   {
+   "caveats": [],
+   "confidence": "medium",
    "id": "widen-output-port",
+   "kind": "mechanism",
    "pattern": "output port saturated while the core datapath still has headroom (only possible once the core line is wider than de_data).",
-   "strategy": "Widen de_data to the core line width. Reframing which bytes land in which transfer is allowed; the score compares bytes, not transfers.",
-   "confidence": "medium",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Widen de_data to the core line width. Reframing which bytes land in which transfer is allowed; the score compares bytes, not transfers."
   },
   {
+   "caveats": [],
+   "confidence": "high",
    "id": "widening-is-done-when-no-draw-fills-the-line",
+   "kind": "mechanism",
    "pattern": "Every real draw's bytes/cycle sits well below the core line width and the output is idle a large share of cycles. Widening has converged.",
-   "strategy": "Stop widening lines and ports. The next gains come from elements per cycle (decode rate) and from removing bubbles/latency between stages, not from wider buses. On this design after the 64-byte line no table exceeded 44 B/cycle, so a 128-byte line would have bought exactly zero.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Stop widening lines and ports. The next gains come from elements per cycle (decode rate) and from removing bubbles/latency between stages, not from wider buses. On this design after the 64-byte line no table exceeded 44 B/cycle, so a 128-byte line would have bought exactly zero."
   },
   {
+   "caveats": [],
+   "confidence": "medium",
    "id": "retire-more-elements-per-cycle",
+   "kind": "mechanism",
    "pattern": "decode engine saturated: real column data has small Snappy elements (5-9 bytes per element), so the decoder's elements-per-cycle ceiling binds even though bytes-per-cycle ceilings have headroom.",
-   "strategy": "Let the decoder emit more than one element per transfer (a second copy slot, a copy-pair, or dual-issue with a select stage in front of the history), and let cmd_gen fold adjacent small elements into one command. This is the expensive, non-obvious change; verify overlapping copies and chunk boundaries carefully.",
-   "confidence": "medium",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Let the decoder emit more than one element per transfer (a second copy slot, a copy-pair, or dual-issue with a select stage in front of the history), and let cmd_gen fold adjacent small elements into one command. This is the expensive, non-obvious change; verify overlapping copies and chunk boundaries carefully."
   },
   {
+   "caveats": [],
+   "confidence": "medium",
    "id": "remove-inter-stage-bubbles",
+   "kind": "mechanism",
    "pattern": "No stage saturated, output idle 20-80% of cycles, zero input stall: the pipeline is starved by handshake bubbles, holding-register spills, per-chunk flushes or RAM read latency, not by capacity.",
-   "strategy": "Instrument the handshakes (a simulation-only counter per stage is fine while investigating, remove it after), find the stage whose valid drops when the next stage is ready, and fix the specific cause: skid buffers, ready-independent issue, overlapping the chunk-boundary flush with the next chunk's start, or forwarding around the RAM read. Cheap in area, often improves f_max too.",
-   "confidence": "medium",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Instrument the handshakes (a simulation-only counter per stage is fine while investigating, remove it after), find the stage whose valid drops when the next stage is ready, and fix the specific cause: skid buffers, ready-independent issue, overlapping the chunk-boundary flush with the next chunk's start, or forwarding around the RAM read. Cheap in area, often improves f_max too."
   },
   {
+   "caveats": [],
    "id": "chunk-boundary-flush-invariant",
+   "kind": "rule",
    "pattern": "Any change to how chunks hand over in the datapath (dead cycles between chunks, early retire of the last command, boundary line handover).",
-   "strategy": "The stage-3 output holding-register flush of a chunk must complete before the next chunk's history reads are allowed. A change that violated this passed every synthetic test and deadlocked on a real table whose last element was an overlapping copy followed by a reach-to-zero copy. Test chunk boundaries with real-shaped data, and keep the flush ordering.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "The stage-3 output holding-register flush of a chunk must complete before the next chunk's history reads are allowed. A change that violated this passed every synthetic test and deadlocked on a real table whose last element was an overlapping copy followed by a reach-to-zero copy. Test chunk boundaries with real-shaped data, and keep the flush ordering."
   },
   {
-   "id": "replicate-cores-only-when-saturated-and-fed",
-   "pattern": "One core is saturated on a stage that cannot be widened further, AND the workload has more independent chunks than cores.",
-   "strategy": "Add cores with least-loaded dispatch and an order FIFO. Area multiplies with the core count, so do this after the per-core ceiling is raised, never before. A table with 3 chunks can never use a 4th core. Reason about peak demand, not average: a 4->2 core cut predicted -5% measured -19%.",
+   "caveats": [],
    "confidence": "low",
-   "source": "earlier campaign"
+   "id": "replicate-cores-only-when-saturated-and-fed",
+   "kind": "mechanism",
+   "pattern": "One core is saturated on a stage that cannot be widened further, AND the workload has more independent chunks than cores.",
+   "source": "earlier campaign",
+   "strategy": "Add cores with least-loaded dispatch and an order FIFO. Area multiplies with the core count, so do this after the per-core ceiling is raised, never before. A table with 3 chunks can never use a 4th core. Reason about peak demand, not average: a 4->2 core cut predicted -5% measured -19%."
   },
   {
+   "caveats": [],
+   "confidence": "high",
    "id": "condition-precompute-and-fanout-split",
+   "kind": "mechanism",
    "pattern": "f_max limited by a long control path: a repeated wide comparison or complex condition feeds many muxes, or one control signal fans out to a wide datapath.",
-   "strategy": "Compute the comparison once into a wire (or a register one stage earlier when latency allows) and replicate high-fanout control signals per byte-lane group. Dr. RTL high-confidence skills 1.1 and 1.3.",
-   "confidence": "high",
-   "source": "Dr. RTL"
+   "source": "Dr. RTL",
+   "strategy": "Compute the comparison once into a wire (or a register one stage earlier when latency allows) and replicate high-fanout control signals per byte-lane group. Dr. RTL high-confidence skills 1.1 and 1.3."
   },
   {
+   "caveats": [],
+   "confidence": "medium",
    "id": "mux-before-arith-and-cse",
+   "kind": "mechanism",
    "pattern": "f_max limited by an adder or rotator that sits after a wide mux, or the same sub-expression computed on several paths.",
-   "strategy": "Move the select before the arithmetic where the operands allow it, and extract common sub-expressions into shared wires. Dr. RTL medium-confidence skills 2.2 and 2.3. Gains are modest; check that synthesis had not already done it.",
-   "confidence": "medium",
-   "source": "Dr. RTL"
+   "source": "Dr. RTL",
+   "strategy": "Move the select before the arithmetic where the operands allow it, and extract common sub-expressions into shared wires. Dr. RTL medium-confidence skills 2.2 and 2.3. Gains are modest; check that synthesis had not already done it."
   },
   {
+   "caveats": [],
+   "confidence": "medium",
    "id": "carry-select-or-prefix-for-long-carry-chains",
+   "kind": "mechanism",
    "pattern": "f_max limited by a long sequential carry chain (address arithmetic, length accumulation) on the critical path.",
-   "strategy": "Split the addition into carry-select halves or use a parallel-prefix form. Dr. RTL skill 1.2. Only when the timing report shows the chain on the worst path.",
+   "source": "Dr. RTL",
+   "strategy": "Split the addition into carry-select halves or use a parallel-prefix form. Dr. RTL skill 1.2. Only when the timing report shows the chain on the worst path."
+  },
+  {
+   "caveats": [],
    "confidence": "medium",
-   "source": "Dr. RTL"
-  },
-  {
    "id": "clock-work-only-when-slack-is-negative",
-   "pattern": "Worst slack is positive (the clock target is met) and the ask is throughput.",
-   "strategy": "Do not spend a candidate on timing. Throughput = bytes/cycle x f_max; with slack already met the clock lever is spent and only bytes/cycle can move. On this design the 250 MHz target closes with +2.4 ns to spare under the Nangate 45nm flow.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "kind": "mechanism",
+   "pattern": "Deciding whether to spend a candidate on the clock (f_max) or on bytes per cycle.",
+   "source": "earlier campaign",
+   "strategy": "Both halves count: throughput = bytes/cycle x f_max from synthesis, and positive slack against the clock target does NOT mean the clock lever is spent -- f_max here is what ABC reports for the worst path, not the target. On this design three adoptions were pure f_max wins (+3.1%, +5.7%, +12.6%) while worst slack was +2.4 ns. Aim at the worst path the synthesis report names, not at a path you guessed by reading the RTL: two attempts chosen that way lost 13-15% of f_max."
   },
   {
+   "caveats": [],
    "id": "score-on-real-data-not-synthetic",
+   "kind": "rule",
    "pattern": "A change speeds up one synthetic shape a lot (tiny chunks, one huge chunk) and real tables not at all.",
-   "strategy": "Expect it to be rejected: only real Parquet pages enter the score. Two earlier adoptions (+6% and +24% on synthetic, 0% on real) were reverted. Aim changes at what real column data does: 5-27 bytes per element, pages of hundreds of bytes to 64 KiB, overlapping copies in sequential integers.",
-   "confidence": "high",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Expect it to be rejected: only real Parquet pages enter the score. Two earlier adoptions (+6% and +24% on synthetic, 0% on real) were reverted. Aim changes at what real column data does: 5-27 bytes per element, pages of hundreds of bytes to 64 KiB, overlapping copies in sequential integers."
   },
   {
+   "caveats": [],
+   "confidence": "avoid",
    "id": "fifo-depth-and-backpressure-threshold-tuning",
+   "kind": "mechanism",
    "pattern": "Proposal only changes a FIFO depth, a backpressure threshold or an almost-full level.",
-   "strategy": "Measured at exactly zero gain at full rate on this design, three times. The sink never applies backpressure in the measurement. Do not propose.",
-   "confidence": "avoid",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Measured at exactly zero gain at full rate on this design, three times. The sink never applies backpressure in the measurement. Do not propose."
   },
   {
+   "caveats": [],
+   "confidence": "avoid",
    "id": "retime-pre-decoder",
+   "kind": "mechanism",
    "pattern": "Proposal adds a register stage inside or after the pre-decoder to shorten a path.",
-   "strategy": "Lowered f_max by 2% and gained nothing; the pre-decoder owned none of the worst paths. Do not propose unless the timing report puts the pre-decoder on the critical path.",
-   "confidence": "avoid",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Lowered f_max by 2% and gained nothing; the pre-decoder owned none of the worst paths. Do not propose unless the timing report puts the pre-decoder on the critical path."
   },
   {
+   "caveats": [],
+   "confidence": "avoid",
    "id": "trade-clock-for-bytes-blindly",
+   "kind": "mechanism",
    "pattern": "A change raises bytes/cycle a little while adding logic depth in the decoder recurrence or the datapath select.",
-   "strategy": "Three such adoptions in a row measured +1 to +2% bytes/cycle each and together cost 20.8% of f_max, a net throughput loss of 6.7%. Every candidate here is synthesised, so predict f_max honestly and prefer changes that do not deepen the decoder's tag-to-offset recurrence, which owns 9 of the 10 worst paths.",
-   "confidence": "avoid",
-   "source": "earlier campaign"
+   "source": "earlier campaign",
+   "strategy": "Three such adoptions in a row measured +1 to +2% bytes/cycle each and together cost 20.8% of f_max, a net throughput loss of 6.7%. Every candidate here is synthesised, so predict f_max honestly and prefer changes that do not deepen the decoder's tag-to-offset recurrence, which owns 9 of the 10 worst paths."
   },
   {
+   "caveats": [],
    "id": "already-done-by-synthesis",
+   "kind": "rule",
    "pattern": "Proposal manually balances an XOR tree, flattens an XOR chain, rewrites a comparison bit-by-bit, or re-associates logic that synthesis optimises anyway.",
-   "strategy": "Absorbed by synthesis; measures zero. Dr. RTL invalid skills 4.1 and 4.2. Do not propose.",
-   "confidence": "avoid",
-   "source": "Dr. RTL"
+   "source": "Dr. RTL",
+   "strategy": "Absorbed by synthesis; measures zero. Dr. RTL invalid skills 4.1 and 4.2. Do not propose."
   },
   {
+   "caveats": [],
+   "confidence": "avoid",
    "id": "pre-register-wide-concatenation",
+   "kind": "mechanism",
    "pattern": "Proposal registers a wide concatenation or a wide mux output one stage early to 'help timing'.",
-   "strategy": "Degraded timing in Dr. RTL's measurements (skill 4.3): it adds a wide register bank and moves the long path rather than shortening it.",
-   "confidence": "avoid",
-   "source": "Dr. RTL"
+   "source": "Dr. RTL",
+   "strategy": "Degraded timing in Dr. RTL's measurements (skill 4.3): it adds a wide register bank and moves the long path rather than shortening it."
   },
   {
+   "caveats": [],
    "id": "move-control-across-registers",
+   "kind": "rule",
    "pattern": "Proposal changes a counter's direction, moves a control update to the other side of a register, or otherwise changes cycle-level behaviour of control state.",
-   "strategy": "Breaks equivalence (Dr. RTL skill 4.4). Here it shows up as wrong output bytes or a deadlock on real pages. Only do it with a latency-preserving proof and the full check.",
-   "confidence": "avoid",
-   "source": "Dr. RTL"
+   "source": "Dr. RTL",
+   "strategy": "Breaks equivalence (Dr. RTL skill 4.4). Here it shows up as wrong output bytes or a deadlock on real pages. Only do it with a latency-preserving proof and the full check."
+  },
+  {
+   "adopted": 0,
+   "advantages": [],
+   "caveats": [
+    "Earlier failures under retire-more-elements-per-cycle were literal-pair and copy+copy fusion diagnosed from a POOLED element rate; the copy slot alone had not been measured then."
+   ],
+   "confidence": "medium",
+   "id": "raise-copy-elements-per-cycle",
+   "kind": "mechanism",
+   "notes": [],
+   "passed": 0,
+   "pattern": "copy slot saturated: the profile shows copies per cycle at or near its ceiling while the literal slot, the ports and the core datapath still have headroom. Real column data is copy-dominated, so the copy slot binds long before any byte-width ceiling does.",
+   "source": "the copy/literal split in analyse.py",
+   "strategy": "Raise how many copy elements per cycle leave the decoder and reach the datapath: a second copy slot in element_stream carried through cmd_gen_1, cmd_gen_2 and the datapath, or a second core with least-loaded chunk dispatch when the workload has more chunks than cores. Overlapping copies (offset < length) and chunk boundaries are where earlier attempts at this broke, so test those first.",
+   "tried": 0
   }
- ]
+ ],
+ "version": 1
 }

@@ -11,9 +11,16 @@ stale, and the report says so instead of calling it a bottleneck.
 Stages (for this Snappy decompressor):
 
     input port      compressed bytes per cycle   vs  co_data width
-    decode engine   Snappy elements per cycle    vs  elements per transfer x cores
+    copy slot       copy elements per cycle      vs  copy slots x cores
+    literal slot    literal elements per cycle   vs  literal slots x cores
     core datapath   output bytes per cycle       vs  core line width x usable cores
     output port     output bytes per cycle       vs  de_data width
+
+A transfer carries one copy and one literal, so the two element kinds have
+SEPARATE ceilings. Pooling them hides a saturated copy slot behind an idle
+literal slot: on the 32-byte design the copy slot ran at 82-93% of its ceiling
+on five of eight scored draws while the pooled number read 63-74% and the loop
+concluded "no stage saturated".
 
 Also reads worst slack when synthesis numbers are given, and answers which
 factor of throughput (bytes/cycle or f_max) is the one worth moving.
@@ -28,9 +35,10 @@ SATURATED = 0.90
 IMPOSSIBLE = 1.25
 
 # One element_stream transfer per cycle carries one copy slot and one literal
-# slot, so a cycle can retire two Snappy elements. Read from the RTL when the
-# record is recognisable, else this default.
-DEFAULT_ELEMENTS_PER_TRANSFER = 2.0
+# slot. Read from the RTL when the record is recognisable, else these defaults.
+DEFAULT_COPY_SLOTS = 1.0
+DEFAULT_LITERAL_SLOTS = 1.0
+DEFAULT_ELEMENTS_PER_TRANSFER = DEFAULT_COPY_SLOTS + DEFAULT_LITERAL_SLOTS
 
 
 def _read(path):
@@ -81,6 +89,8 @@ def rtl_widths(rtl_dir):
     consts = _constants([top] + others)
     out = {'in_bytes': 8, 'in_cnt_bits': 3, 'out_bytes': 8, 'out_cnt_bits': 4,
            'cores': 1, 'core_line_bytes': 8.0,
+           'copy_slots': DEFAULT_COPY_SLOTS,
+           'literal_slots': DEFAULT_LITERAL_SLOTS,
            'elements_per_transfer': DEFAULT_ELEMENTS_PER_TRANSFER,
            'unresolved': []}
 
@@ -115,19 +125,25 @@ def rtl_widths(rtl_dir):
     if found:
         out['core_line_bytes'] = float(int(found.group(1)) + 1)
 
-    # The element stream: count cp_val/li_val style valid flags in the record.
+    # The element stream: count cp_val/li_val style valid flags in the record,
+    # by kind, because a copy and a literal do not compete for the same slot.
     found = re.search(r'type\s+element_stream\s+is\s+record(.*?)end\s+record',
                       pkg, re.S | re.I)
     if found:
         body = found.group(1)
-        slots = len(re.findall(r'\b(?:cp|li)\d*_val\s*:', body))
-        if slots >= 1:
-            out['elements_per_transfer'] = float(slots)
+        copies = len(re.findall(r'\bcp\d*_val\s*:', body))
+        literals = len(re.findall(r'\bli\d*_val\s*:', body))
+        if copies:
+            out['copy_slots'] = float(copies)
+        if literals:
+            out['literal_slots'] = float(literals)
+        if copies + literals >= 1:
+            out['elements_per_transfer'] = float(copies + literals)
     return out
 
 
 def count_elements(compressed):
-    """Snappy elements in a chunk, and the bytes they expand to."""
+    """Literal count, copy count and expanded bytes for one chunk."""
     i, total, shift = 0, 0, 0
     while True:
         byte = compressed[i]
@@ -136,7 +152,7 @@ def count_elements(compressed):
         shift += 7
         if not byte & 0x80:
             break
-    count = 0
+    literals = copies = 0
     while i < len(compressed):
         tag = compressed[i]
         kind = tag & 3
@@ -149,29 +165,30 @@ def count_elements(compressed):
                 length = int.from_bytes(compressed[i + 1:i + 1 + extra], 'little')
                 i += 1 + extra
             i += length + 1
-        elif kind == 1:
-            i += 2
-        elif kind == 2:
-            i += 3
+            literals += 1
         else:
-            i += 5
-        count += 1
-    return count, total
+            i += {1: 2, 2: 3, 3: 5}[kind]
+            copies += 1
+    return literals, copies, total
 
 
 def stimulus_shape(cs_tv):
     chunks = oracle.read_stimulus(cs_tv)
     compressed = sum(len(c) for c in chunks)
-    elements = expanded = 0
+    literals = copies = expanded = 0
     for chunk in chunks:
-        count, total = count_elements(chunk)
-        elements += count
+        lits, cps, total = count_elements(chunk)
+        literals += lits
+        copies += cps
         expanded += total
+    elements = literals + copies
     return {
         'chunks': len(chunks),
         'compressed_bytes': compressed,
         'expanded_bytes': expanded,
         'elements': elements,
+        'literals': literals,
+        'copies': copies,
         'compression_pct': round(100.0 * compressed / max(1, expanded), 1),
         'bytes_per_element': round(expanded / max(1, elements), 2),
     }
@@ -183,15 +200,19 @@ def analyse(counters, cs_tv, widths):
     cycles = max(1, counters['cycles'])
     out_rate = counters['bytes_out'] / cycles
     in_rate = shape['compressed_bytes'] / cycles
-    elem_rate = shape['elements'] / cycles
+    copy_rate = shape['copies'] / cycles
+    literal_rate = shape['literals'] / cycles
     usable_cores = min(widths['cores'], max(1, shape['chunks']))
 
     stages = [
         {'name': 'input port', 'rate': in_rate,
          'ceiling': float(widths['in_bytes']), 'unit': 'B/cycle'},
-        {'name': 'decode engine', 'rate': elem_rate,
-         'ceiling': widths['elements_per_transfer'] * usable_cores,
-         'unit': 'elem/cycle'},
+        {'name': 'copy slot', 'rate': copy_rate,
+         'ceiling': widths.get('copy_slots', DEFAULT_COPY_SLOTS) * usable_cores,
+         'unit': 'copies/cycle'},
+        {'name': 'literal slot', 'rate': literal_rate,
+         'ceiling': widths.get('literal_slots', DEFAULT_LITERAL_SLOTS) * usable_cores,
+         'unit': 'literals/cycle'},
         {'name': 'core datapath', 'rate': out_rate,
          'ceiling': widths['core_line_bytes'] * usable_cores, 'unit': 'B/cycle'},
         {'name': 'output port', 'rate': out_rate,
@@ -286,12 +307,14 @@ def describe(report, name=None):
     """A short text block for a prompt or a log."""
     lines = []
     if name:
+        shape = report['shape']
         lines.append('draw %s: %d chunk(s), %.1f bytes/element, compresses to %.0f%%'
-                     % (name, report['shape']['chunks'],
-                        report['shape']['bytes_per_element'],
-                        report['shape']['compression_pct']))
+                     ', %d copies and %d literals'
+                     % (name, shape['chunks'], shape['bytes_per_element'],
+                        shape['compression_pct'], shape.get('copies', 0),
+                        shape.get('literals', 0)))
     for st in report['stages']:
-        lines.append('  %-14s %8.3f of %8.3f %-10s  %4.0f%%'
+        lines.append('  %-14s %8.3f of %8.3f %-15s %4.0f%%'
                      % (st['name'], st['rate'], st['ceiling'], st['unit'],
                         100.0 * st['utilisation']))
     lines.append('  output idle %.1f%% of cycles, input stalled %.1f%%; verdict: %s'

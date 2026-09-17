@@ -43,8 +43,11 @@ DEFAULT_CONFIG = {
     "candidates": 3,
     # Limits for one candidate-writing session.
     "session_budget_usd": 10.0,
+    # Turns are left high on purpose: the best candidate of an earlier campaign
+    # ran 112 turns in 17 minutes, because editing turns are seconds each. The
+    # wall-clock cap is what bounds a session.
     "session_max_turns": 300,
-    "session_timeout_min": 45,
+    "session_timeout_min": 30,
     # Stimulus: pages per real-data draw.
     "train_pages": 12,
     # Synthesis clock target in picoseconds (4000 ps = 250 MHz).

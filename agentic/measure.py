@@ -47,6 +47,11 @@ _SEQ_AREA = re.compile(r'used for sequential elements:\s*([\d.]+)')
 # Rows for wires/ports ("38638 - wires"), internal $cells and the total row
 # ("38473 9.02E+04 cells") are not cells and are skipped below.
 _CELL = re.compile(r'^\s*(\d+)\s+(\d[\d.E+-]*)\s+([A-Za-z]\S*)\s*$', re.M)
+# ABC names the ends of the critical path after the nets that carry it:
+# "Start-point = pi19775 ($auto$dfflibmap...$238014). End-point = po18498 (...)"
+_ABC_ENDS = re.compile(r'Start-point\s*=\s*\S+\s*\(([^)]*)\)\.?\s*'
+                       r'End-point\s*=\s*\S+\s*\(([^)]*)\)')
+_DFF_CELL = re.compile(r'^\s*cell\s+\\DFF\S*\s+(\S+)', re.M)
 
 
 class MeasureError(RuntimeError):
@@ -200,6 +205,66 @@ def parse_synth(text):
     return out
 
 
+def _pretty_net(name):
+    """An RTL signal name out of a yosys net name, or '' if it has none."""
+    name = (name or '').strip()
+    name = re.sub(r'^\$flatten\\?', '', name)
+    name = name.replace('\\', '')
+    if not name or name.startswith('$'):
+        return ''
+    return name.strip()
+
+
+def critical_path(out_dir, text):
+    """The worst path's two ends, named as the RTL names them.
+
+    ABC reports the path by net name, and those names are meaningless on their
+    own ($auto$dfflibmap$238014). The register dump taken just before ABC ran
+    says which register each of those nets belongs to, which turns the report
+    into "from cmd_gen_2 c1h(0) to cmd_gen_2 li_off(5)" -- something a session
+    can act on instead of guessing which logic is slow.
+    """
+    found = _ABC_ENDS.search(text or '')
+    if not found:
+        # synth.sh only echoes the summary lines; the path is in the full log.
+        try:
+            with open(os.path.join(out_dir, 'yosys.log'),
+                      encoding='utf-8', errors='replace') as fil:
+                found = _ABC_ENDS.search(fil.read())
+        except OSError:
+            found = None
+    if not found:
+        return None
+    start_net, end_net = found.group(1).strip(), found.group(2).strip()
+    path = os.path.join(out_dir, 'dffs.txt')
+    by_qn, by_d = {}, {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fil:
+            conn = {}
+            for line in fil:
+                line = line.strip()
+                if line.startswith('cell '):
+                    conn = {}
+                elif line.startswith('connect '):
+                    parts = line.split(None, 2)
+                    if len(parts) == 3:
+                        conn[parts[1].lstrip('\\')] = parts[2].strip()
+                elif line == 'end' and conn.get('Q'):
+                    qname = conn['Q']
+                    if conn.get('QN'):
+                        by_qn[conn['QN']] = qname
+                    if conn.get('D'):
+                        by_d[conn['D']] = qname
+    except OSError:
+        return None
+    start = _pretty_net(by_qn.get(start_net) or start_net)
+    end = _pretty_net(by_d.get(end_net) or end_net)
+    if not start and not end:
+        return None
+    return {'from': start or '(an input or unnamed net)',
+            'to': end or '(an output or unnamed net)'}
+
+
 def synthesize(rtl_dir, out_dir, timeout=None):
     """Area and timing for one rtl/ folder. Raises MeasureError."""
     if not os.path.exists(LIB_FILE):
@@ -219,6 +284,13 @@ def synthesize(rtl_dir, out_dir, timeout=None):
         tail = [l for l in text.splitlines() if l.strip()]
         raise MeasureError('synthesis failed:\n' + '\n'.join(tail[-25:]))
     metrics = parse_synth(text)
+    worst = critical_path(out_dir, text)
+    if worst:
+        metrics['critical_path'] = worst
+    try:                                   # several MB, and only needed once
+        os.remove(os.path.join(out_dir, 'dffs.txt'))
+    except OSError:
+        pass
     stat = os.path.join(out_dir, 'stat.log')
     if os.path.exists(stat):
         with open(stat, encoding='utf-8', errors='replace') as fil:
