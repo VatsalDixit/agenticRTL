@@ -1032,7 +1032,19 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
               'skills_changed': changed, 'lessons': lessons,
               'model': CONFIG['model'], 'effort': CONFIG.get('effort'),
               'tokens': sum_usage(cands),
+              # What those tokens price out at, as a cross-check on the cost
+              # the CLI reports and as the tokens-to-dollars mapping for
+              # comparing one model's iteration with another's.
+              'tokens_cost_estimate': round(
+                  propose.estimate_cost(sum_usage(cands), CONFIG['model']), 2),
               'cost_usd': round(sum((c['session'].get('cost_usd') or 0) for c in cands), 2)}
+    if record['tokens'].get('output_tokens'):
+        log('iteration tokens: %s written, %s cache write, %s cache read '
+            '(about $%.2f at %s rates; the provider billed $%.2f)'
+            % (record['tokens'].get('output_tokens', 0),
+               record['tokens'].get('cache_creation_input_tokens', 0),
+               record['tokens'].get('cache_read_input_tokens', 0),
+               record['tokens_cost_estimate'], CONFIG['model'], record['cost_usd']))
     state['iterations'].append(record)
     state['cost_usd'] = round((state.get('cost_usd') or 0) + record['cost_usd'], 2)
     run.save()
