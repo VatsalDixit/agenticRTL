@@ -576,10 +576,12 @@ def log_session(log, label, sess):
         label, sess.get('status'), sess.get('turns') or 0,
         sess.get('cost_usd') or 0, sess.get('seconds') or 0,
         (' (' + (sess.get('error') or '')[:100] + ')') if sess.get('error') else ''))
-    use = sess.get('turn_usage') or {}
+    use = sess.get('usage') or {}
     if use.get('output_tokens'):
-        log('       tokens: %s written, %s cache write, %s cache read'
+        thinking = (use.get('output_tokens_details') or {}).get('thinking_tokens')
+        log('       tokens: %s written%s, %s cache write, %s cache read'
             % (use.get('output_tokens', 0),
+               (' (%s thinking)' % thinking) if thinking else '',
                use.get('cache_creation_input_tokens', 0),
                use.get('cache_read_input_tokens', 0)))
 
@@ -588,7 +590,7 @@ def sum_usage(cands):
     """Token totals over one iteration's sessions."""
     total = {}
     for cand in cands:
-        use = (cand.get('session') or {}).get('turn_usage') or {}
+        use = (cand.get('session') or {}).get('usage') or {}
         for key, val in use.items():
             if isinstance(val, int):
                 total[key] = total.get(key, 0) + val
@@ -796,7 +798,8 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     if fake:
         results = fake_write_candidates(assignments, log)
     else:
-        results = propose.write_candidates(ctx, assignments, log)
+        results = propose.write_candidates(
+            ctx, assignments, log, rate=propose.burn_rate(state, CONFIG['model']))
     log('sessions finished in %.0f min' % ((time.time() - t0) / 60.0))
     for asg, res in zip(assignments, results):
         log_session(log, asg['label'], res['session'])

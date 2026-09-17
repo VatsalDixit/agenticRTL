@@ -62,6 +62,12 @@ except Exception as exc:                       # pragma: no cover
     SDK_OK = False
     SDK_ERROR = str(exc)
 
+# Every built-in the planning and learning calls never use. They are refused
+# by name because listing no tools does not stop the CLI sending their schemas.
+UNUSED_TOOLS = ('Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,WebSearch,'
+                'TodoWrite,Task,NotebookEdit,BashOutput,KillShell,SlashCommand,'
+                'Skill,ExitPlanMode')
+
 PERMITTED_COMMANDS = (
     'python agentic/check.py',
     'python agentic/check.py --quick',
@@ -176,7 +182,14 @@ def estimate_cost(usage, model):
 
 
 def add_usage(total, usage):
-    """Accumulate one turn's token counts into a running total."""
+    """Accumulate one turn's token counts.
+
+    Rough: the per-message usage the CLI sends is not a running total (it
+    under-reports what was written and over-reports cache traffic against the
+    figures the same run reports at the end), so this is only used to count
+    turns and to see that a session is alive. The totals that get recorded
+    come from the ResultMessage.
+    """
     if not usage:
         return
     for key in USAGE_KEYS:
@@ -188,7 +201,7 @@ def add_usage(total, usage):
 
 async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                      allowed, gate, timeout_s, effort=None, on_text=None,
-                     restricted=True, meter=False):
+                     restricted=True, meter=False, burn_rate=None):
     if not SDK_OK:
         return {'status': 'error', 'text': '', 'cost_usd': 0.0, 'turns': 0,
                 'error': 'claude_agent_sdk is not importable: ' + SDK_ERROR,
@@ -200,6 +213,11 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
         can_use_tool=gate, setting_sources=[], env=child_env(),
         extra_args={'no-session-persistence': None},
     )
+    if not tools:
+        # A call with no tools still ships the CLI's whole built-in tool set
+        # unless they are refused by name: measured at 30,126 tokens and $0.12
+        # against 1,822 tokens and $0.014 for the same one-line answer.
+        opts_kwargs['extra_args']['disallowed-tools'] = UNUSED_TOOLS
     if cwd:
         opts_kwargs['cwd'] = cwd
         if restricted:
@@ -220,27 +238,32 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
     if meter and HookMatcher is not None:
         # Three of four sessions on the expensive model were killed by the
         # dollar cap in the middle of a change, because nothing told them
-        # where they stood. This says so, once, at three quarters spent.
+        # where they stood. A session cannot be told its spend (the running
+        # figures the CLI sends are not totals), so it is told its time, and
+        # the time it is measured against is whichever runs out first: the
+        # wall-clock cap, or the dollar cap at the rate this model has been
+        # burning in this run.
         said = {'at': 0.0}
+        cap_min = timeout_s / 60.0
+        if burn_rate and budget:
+            cap_min = min(cap_min, budget / burn_rate)
 
         async def wrapup(_input_data, _tool_use_id, _ctx):
             now = time.time()
             minutes = (now - start) / 60.0
-            spent = estimate_cost(out['turn_usage'], model)
-            used = max(spent / budget if budget else 0.0,
-                       minutes / max(timeout_s / 60.0, 1.0))
-            if used < 0.75 or now - said['at'] < 120:
+            if minutes < 0.75 * cap_min or now - said['at'] < 120:
                 return {}
             said['at'] = now
             return {'hookSpecificOutput': {
                 'hookEventName': 'PreToolUse',
                 'additionalContext':
-                    'BUDGET: about $%.2f of your $%.2f and %.0f of your %.0f '
-                    'minutes are gone. Stop opening new ground. Get the check '
+                    'BUDGET: %.0f minutes gone, and this session ends at about '
+                    '%.0f (whichever comes first, its $%.2f cap or its %.0f '
+                    'minute cap). Stop opening new ground. Get the check '
                     'passing on what you have, then write NOTES.md and '
                     'PROPOSAL.json within the next three minutes. A '
                     'half-finished change scores nothing; a small finished one '
-                    'scores.' % (spent, budget, minutes, timeout_s / 60.0)}}
+                    'scores.' % (minutes, cap_min, budget, timeout_s / 60.0)}}
 
         opts.hooks = {'PreToolUse': [HookMatcher(hooks=[wrapup])]}
 
@@ -307,11 +330,12 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
 
 def ask(prompt, system=None, cwd=None, model=None, max_turns=1, budget=3.0,
         tools=(), allowed=(), gate=None, timeout_s=900, effort=None,
-        on_text=None, restricted=True, meter=False):
+        on_text=None, restricted=True, meter=False, burn_rate=None):
     """One model call, synchronous. Returns a dict (see _ask_async)."""
     return asyncio.run(_ask_async(prompt, system, cwd, model or CONFIG['helper_model'],
                                   max_turns, budget, tools, allowed, gate,
-                                  timeout_s, effort, on_text, restricted, meter))
+                                  timeout_s, effort, on_text, restricted, meter,
+                                  burn_rate))
 
 
 def ask_many(jobs):
@@ -470,6 +494,12 @@ THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
                                     compare every byte with the reference.
                                     Also prints bytes/cycle and a stage
                                     profile on invented data (about 15 s).
+                                    THE LOOP HAS ALREADY RUN THIS FOR YOU on
+                                    the design you start from, and its output
+                                    is in your brief. Running it again before
+                                    you have edited anything tells you what
+                                    you were already told, so do not: your
+                                    first check comes after your first edit.
   python agentic/check.py --quick   the first three shapes.
   Also allowed, read-only and without pipes or redirects: `git show`,
   `git diff`, `git log`. When the history names an earlier attempt's branch,
@@ -795,7 +825,23 @@ def read_proposal(worktree):
     return out
 
 
-def write_candidates(ctx, assignments, log):
+def burn_rate(state, model):
+    """Dollars a minute this model has actually cost in this run, or None."""
+    rates = []
+    for it in (state or {}).get('iterations', []):
+        for cand in it.get('candidates', []):
+            sess = cand.get('session') or {}
+            if cand.get('model') != model or not sess.get('cost_usd'):
+                continue
+            if (sess.get('seconds') or 0) > 60:
+                rates.append(sess['cost_usd'] / (sess['seconds'] / 60.0))
+    if not rates:
+        return None
+    rates.sort()
+    return rates[len(rates) // 2]
+
+
+def write_candidates(ctx, assignments, log, rate=None):
     """Run one coding session per assignment, all at once.
 
     assignments = [{'label': ..., 'worktree': path, 'direction': {...}}]
@@ -814,7 +860,7 @@ def write_candidates(ctx, assignments, log):
         jobs.append(dict(
             prompt=build_user_prompt(ctx, asg['direction'], others,
                                      resumed=bool(asg.get('resumed'))),
-            meter=True,
+            meter=True, burn_rate=rate,
             system={'type': 'preset', 'preset': 'claude_code',
                     'append': SYSTEM_BRIEF.replace(
                         '@@BUDGET@@', 'about $%.0f and %d minutes'
