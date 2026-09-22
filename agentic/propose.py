@@ -62,11 +62,12 @@ except Exception as exc:                       # pragma: no cover
     SDK_OK = False
     SDK_ERROR = str(exc)
 
-# Every built-in the planning and learning calls never use. They are refused
-# by name because listing no tools does not stop the CLI sending their schemas.
-UNUSED_TOOLS = ('Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,WebSearch,'
-                'TodoWrite,Task,NotebookEdit,BashOutput,KillShell,SlashCommand,'
-                'Skill,ExitPlanMode')
+# Refusing the built-in tools by name was tried and reverted: with two fresh
+# prompts and no shared cache, passing --disallowed-tools ADDED about 29,000
+# tokens to a call (35,847 against 6,602 cache-write tokens for the same
+# question), because naming them pulls their schemas in. Passing no tools at
+# all already keeps them out. The first measurement that said otherwise had
+# compared a cold cache against a warm one.
 
 PERMITTED_COMMANDS = (
     'python agentic/check.py',
@@ -215,11 +216,6 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
         can_use_tool=gate, setting_sources=[], env=child_env(),
         extra_args={'no-session-persistence': None},
     )
-    if not tools:
-        # A call with no tools still ships the CLI's whole built-in tool set
-        # unless they are refused by name: measured at 30,126 tokens and $0.12
-        # against 1,822 tokens and $0.014 for the same one-line answer.
-        opts_kwargs['extra_args']['disallowed-tools'] = UNUSED_TOOLS
     if cwd:
         opts_kwargs['cwd'] = cwd
         if restricted:
