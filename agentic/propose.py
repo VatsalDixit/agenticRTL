@@ -289,6 +289,11 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                     elif isinstance(block, ToolUseBlock):
                         out['tools_used'].append(block.name)
                         out['tool_counts'][block.name] =                             out['tool_counts'].get(block.name, 0) + 1
+                        if block.name == 'Read':
+                            ranged = bool((block.input or {}).get('offset')
+                                          or (block.input or {}).get('limit'))
+                            key = 'Read(range)' if ranged else 'Read(whole file)'
+                            out['tool_counts'][key] = out['tool_counts'].get(key, 0) + 1
                         if block.name in ('Edit', 'Write', 'MultiEdit')                                 and out['first_edit_s'] is None:
                             out['first_edit_s'] = round(time.time() - start, 1)
             elif RateLimitEvent and isinstance(msg, RateLimitEvent):
@@ -524,9 +529,13 @@ THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
 HOW TO WORK
   * A map of the design, generated from this worktree's RTL, is in the brief
     below: sizes, the records passed between stages, the module tree, and the
-    line ranges of every process. Start from it and read the lines that matter
-    rather than whole files. It can be stale about anything you change, and the
-    code always wins over the map.
+    line ranges of every process. Start from it. When it tells you a process
+    runs from line 455 to 733, read those lines with Read's offset and limit
+    instead of pulling in the whole 900-line file: a file you read stays in
+    front of you for the rest of the session and is paid for again every turn,
+    so reading four whole files to find one process is most of what a session
+    wastes. Read wider when you need to; just start narrow. The map can be
+    stale about anything you change, and the code always wins over the map.
   * Read the RTL before changing it. Understand the stage the profile names.
   * Make the change in small verified steps. Run the check after each step.
     An earlier attempt elaborated cleanly and drove X on undriven byte lanes;

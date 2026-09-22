@@ -203,7 +203,9 @@ def build_guide(rtl_dir, widths=None, notes=None, facts=None):
     out.append('')
     out.append('Generated from rtl/ by agentic/guide.py. It is a map, not advice: '
                'it says what exists and where, not what to change. If it disagrees '
-               'with the code, the code is right and the guide is stale.')
+               'with the code, the code is right and the guide is stale. The line '
+               'ranges below are meant to be read with Read offset and limit, so '
+               'you pull in one process rather than a whole file.')
     out.append('')
 
     out.append('## Sizes, read from the RTL')
