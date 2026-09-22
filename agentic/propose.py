@@ -157,15 +157,17 @@ def _looks_like_limit(text):
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens',
               'cache_read_input_tokens')
 
-# Dollars per million tokens: input, output, cache write, cache read. Used
-# only to tell a session roughly where it stands; the real figure comes from
-# the CLI at the end. Reading is 4 to 200 times cheaper than writing, which is
-# why the meter warns about thinking, not about how much has been read.
+# Dollars per million tokens: input, output, cache write, cache read. The
+# write rate is the one-hour rate, twice the five-minute rate, because that is
+# what the sessions actually use: every cache_creation figure they report is
+# ephemeral_1h. With the five-minute rate the estimate came out 30% under the
+# bill. Reading still costs a fraction of writing, which is why the loop
+# attacks thinking rather than prompt size.
 PRICES = {
-    'fable': (10.0, 50.0, 12.5, 0.25),
-    'opus': (5.0, 25.0, 6.25, 0.50),
-    'sonnet': (2.0, 10.0, 2.50, 0.20),
-    'haiku': (1.0, 5.0, 1.25, 0.10),
+    'fable': (10.0, 50.0, 25.0, 0.25),
+    'opus': (5.0, 25.0, 12.5, 0.50),
+    'sonnet': (2.0, 10.0, 5.0, 0.20),
+    'haiku': (1.0, 5.0, 2.5, 0.10),
 }
 
 
