@@ -204,6 +204,36 @@ checkout is never modified by the loop.
 4. Among adoptable candidates the lowest score wins and the run branch
    moves to its commit.
 
+## What a session costs, measured
+
+`python agentic/compare.py --breakdown <run>` prices a run's tokens at the
+model it ran on. A real Fable iteration came out like this:
+
+| | share of the bill |
+|---|---|
+| writing and thinking | 43% |
+| reading something for the first time | 52% |
+| re-reading what is already in context | 6% |
+
+Two things follow. A thing read is charged once at the cache-write rate and
+again, at a fraction of it, on every later turn, so **how much a session reads
+matters more than how long its prompt is**: the whole brief, map included, is
+about a tenth of what a session's file reading costs. And a fixed block that
+every session carries is expensive even when nobody uses it.
+
+That is how the MCP finding turned up. Whatever connectors the machine has
+(mail, drive, calendar) were being sent to every candidate session, which may
+only edit `rtl/` and run one command. Measured with two fresh prompts sharing
+no cache: 41,862 cache-write tokens without `--strict-mcp-config`, 12,971 with
+it. On the Fable run that block was costing about 12% of every iteration, so
+the loop now always passes it.
+
+Tried and rejected, each measured the same careful way:
+`--exclude-dynamic-system-prompt-sections` changed nothing; running sessions
+from different worktrees does not break the cached prefix; and naming the
+unused built-in tools in `--disallowed-tools` made calls *worse*, adding about
+29,000 tokens, because naming a tool pulls its schema in.
+
 ## The skill library
 
 `agentic/skills.json` holds two kinds of entry:
