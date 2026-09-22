@@ -214,7 +214,15 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
         tools=list(tools), allowed_tools=list(allowed),
         permission_mode='default' if gate else 'dontAsk',
         can_use_tool=gate, setting_sources=[], env=child_env(),
-        extra_args={'no-session-persistence': None},
+        # strict-mcp-config keeps the machine's MCP servers out of the child.
+        # Whatever connectors the user has (mail, drive, calendar) are useless
+        # to a session that may only edit rtl/ and run one command, but their
+        # schemas were being sent with every call: measured at 28,891 tokens,
+        # which on the expensive model is about $0.72 of cache write per
+        # session before a single turn of work, plus the per-turn re-reads.
+        # Same question, same tools: 41,862 cache-write tokens without it,
+        # 12,971 with it.
+        extra_args={'no-session-persistence': None, 'strict-mcp-config': None},
     )
     if cwd:
         opts_kwargs['cwd'] = cwd
