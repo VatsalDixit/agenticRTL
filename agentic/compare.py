@@ -120,11 +120,61 @@ def cell(value, fmt):
         return str(value)
 
 
+def breakdown(name):
+    """Where one run's tokens went, priced at the model it ran on."""
+    import propose
+    state = load(name)
+    print()
+    print('%s: where the tokens went' % name)
+    print()
+    print('%-6s %-10s %12s %12s %12s %10s %10s'
+          % ('iter', 'model', 'written', 'first read', 're-read', 'estimate', 'billed'))
+    totals = {}
+    for it in state.get('iterations', []):
+        tok = {}
+        model = it.get('model') or state.get('model') or 'sonnet'
+        for cand in it.get('candidates', []):
+            for key, val in ((cand.get('session') or {}).get('usage') or {}).items():
+                if isinstance(val, int):
+                    tok[key] = tok.get(key, 0) + val
+                    totals[key] = totals.get(key, 0) + val
+        if not tok:
+            continue
+        print('%-6s %-10s %12s %12s %12s %9.2f$ %9.2f$'
+              % (it['iteration'], model, tok.get('output_tokens', 0),
+                 tok.get('cache_creation_input_tokens', 0),
+                 tok.get('cache_read_input_tokens', 0),
+                 propose.estimate_cost(tok, model), it.get('cost_usd') or 0))
+    if not totals:
+        print('  this run recorded no token usage; it predates the measurement')
+        return 0
+    model = state.get('model') or 'sonnet'
+    prices = propose.PRICES[next((k for k in propose.PRICES if k in model.lower()), 'sonnet')]
+    parts = [('writing and thinking', totals.get('output_tokens', 0) * prices[1] / 1e6),
+             ('reading for the first time',
+              totals.get('cache_creation_input_tokens', 0) * prices[2] / 1e6),
+             ('re-reading what is already in context',
+              totals.get('cache_read_input_tokens', 0) * prices[3] / 1e6)]
+    whole = sum(p[1] for p in parts) or 1.0
+    print()
+    for label, cost in parts:
+        print('  %-40s $%6.2f  %3.0f%%' % (label, cost, 100 * cost / whole))
+    print()
+    print('  A thing read is charged once at the cache-write rate and again, at a')
+    print('  fraction of it, on every later turn. The levers are how much a session')
+    print('  reads and how much it thinks, not how long the prompt is.')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     ap.add_argument('runs', nargs='*', help='two run names, older first')
     ap.add_argument('--list', action='store_true', help='what runs exist')
+    ap.add_argument('--breakdown', metavar='RUN', default=None,
+                    help='where one run spent its tokens')
     args = ap.parse_args()
+    if args.breakdown:
+        return breakdown(args.breakdown)
 
     base = report.runs_dir()
     if args.list or not args.runs:
