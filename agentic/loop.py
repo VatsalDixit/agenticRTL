@@ -576,6 +576,10 @@ def log_session(log, label, sess):
         label, sess.get('status'), sess.get('turns') or 0,
         sess.get('cost_usd') or 0, sess.get('seconds') or 0,
         (' (' + (sess.get('error') or '')[:100] + ')') if sess.get('error') else ''))
+    if sess.get('first_edit_s'):
+        reads = (sess.get('tool_counts') or {}).get('Read', 0)
+        log('       spent %.1f min and %d read(s) before its first edit'
+            % (sess['first_edit_s'] / 60.0, reads))
     use = sess.get('usage') or {}
     if use.get('output_tokens'):
         thinking = (use.get('output_tokens_details') or {}).get('thinking_tokens')

@@ -231,7 +231,11 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
     out = {'status': 'ok', 'text': '', 'cost_usd': 0.0, 'turns': 0,
            'error': '', 'tools_used': [], 'seconds': 0.0, 'subtype': '',
            'usage': None, 'model_usage': None, 'turn_usage': {},
-           'rate_limit': None, 'session_id': ''}
+           'rate_limit': None, 'session_id': '',
+           # How long the session spent working the design out before it
+           # changed anything. This is the number the design map and the
+           # handed-over notes are meant to move, so it is measured.
+           'first_edit_s': None, 'tool_counts': {}}
     texts = []
     start = time.time()
 
@@ -278,6 +282,9 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
                             on_text(block.text)
                     elif isinstance(block, ToolUseBlock):
                         out['tools_used'].append(block.name)
+                        out['tool_counts'][block.name] =                             out['tool_counts'].get(block.name, 0) + 1
+                        if block.name in ('Edit', 'Write', 'MultiEdit')                                 and out['first_edit_s'] is None:
+                            out['first_edit_s'] = round(time.time() - start, 1)
             elif RateLimitEvent and isinstance(msg, RateLimitEvent):
                 info = msg.rate_limit_info
                 out['rate_limit'] = {'status': info.status,
@@ -887,6 +894,6 @@ def write_candidates(ctx, assignments, log, rate=None):
                                 ('status', 'cost_usd', 'turns', 'seconds',
                                  'error', 'subtype', 'stopped_by', 'usage',
                                  'turn_usage', 'model_usage', 'rate_limit',
-                                 'session_id')},
+                                 'session_id', 'first_edit_s', 'tool_counts')},
                     'proposal': proposal})
     return out
