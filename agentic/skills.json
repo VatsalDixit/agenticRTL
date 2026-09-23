@@ -1,5 +1,10 @@
 {
  "about": "Pattern -> strategy skills for optimising the vhsnunzip Snappy decompressor. Seeded from an earlier optimisation campaign on this design (flow/LESSONS.md in the agenticRTL_test2 repo) and from the Dr. RTL paper (arXiv 2604.14989). learn.py updates this file after every iteration.",
+ "design_facts": [
+  "Widening the core line from 16 to 32 bytes was measured three times from the same design state and paid every time: +29.2%, +33.6% and +33.6% throughput, for about +83% to +102% area. It paid even though no draw came close to filling the 16-byte line.",
+  "Raising copy elements per cycle was measured twice in that same state and paid neither time: a second copy slot regressed -5.06% throughput, and a fused copy pair broke correctness on real Parquet pages.",
+  "The decoder carries one copy slot and one literal slot per transfer, so copies and literals have separate ceilings. On copy-heavy tables the copy slot runs at 82-93% of its ceiling while the literal slot sits near 40%."
+ ],
  "skills": [
   {
    "caveats": [],

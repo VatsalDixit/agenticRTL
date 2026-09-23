@@ -714,10 +714,12 @@ Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
   steps: which records, which stages, which files, in what order.
 - A stage can usually be relieved two ways: more BYTES PER COMMAND (a wider
   line or port) or more ELEMENTS PER CYCLE (another slot, dual issue). They
-  are different mechanisms and they do not have the same track record. Pick
-  the one the library shows paying AT THE CURRENT DESIGN STATE, and never
-  assign both directions to the same mechanism family: one measurement per
-  family per iteration is what makes the library worth reading.
+  are different mechanisms and they do not have the same track record. Read
+  the FACTS section before choosing: if it records a mechanism that has been
+  measured to pay from this design state, one direction MUST be that
+  mechanism, even when the profile names a stage the other one would relieve.
+  A stage being tightest says where the limit is, not which mechanism moves
+  it. Never spend both directions on the same mechanism family.
 - Do not repeat a direction that failed in the history unless you say what
   is different this time. Never choose an AVOID skill.
 - Diversify: different mechanisms, not three flavours of one idea. Include
