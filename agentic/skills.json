@@ -38,8 +38,10 @@
    "strategy": "Widen de_data to the core line width. Reframing which bytes land in which transfer is allowed; the score compares bytes, not transfers."
   },
   {
-   "caveats": [],
-   "confidence": "high",
+   "caveats": [
+    "Measured WRONG at the 16-byte line on this design three times: widening the core line 16 to 32 paid +29.2%, +33.6% and +33.6% although no draw came near filling 16 bytes. Draws sit below the line because commands are inefficient, not because the line is wide enough. The rule held at 64 bytes; check the current width before applying it."
+   ],
+   "confidence": "low",
    "id": "widening-is-done-when-no-draw-fills-the-line",
    "kind": "mechanism",
    "pattern": "Every real draw's bytes/cycle sits well below the core line width and the output is idle a large share of cycles. Widening has converged.",
@@ -181,7 +183,8 @@
    "adopted": 0,
    "advantages": [],
    "caveats": [
-    "Earlier failures under retire-more-elements-per-cycle were literal-pair and copy+copy fusion diagnosed from a POOLED element rate; the copy slot alone had not been measured then."
+    "Earlier failures under retire-more-elements-per-cycle were literal-pair and copy+copy fusion diagnosed from a POOLED element rate; the copy slot alone had not been measured then.",
+    "Measured twice at the 16 and 32-byte line: a second copy slot regressed -5.06% throughput, and a fused copy pair broke correctness. Raising bytes per command paid every time it was tried in the same state. Prefer that first; come back to this once the line stops paying."
    ],
    "confidence": "medium",
    "id": "raise-copy-elements-per-cycle",

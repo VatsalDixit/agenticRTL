@@ -712,6 +712,12 @@ Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
   not a timing tweak, unless the history shows that exact change failing
   three times. Timing tweaks are for the other directions. Spell out the
   steps: which records, which stages, which files, in what order.
+- A stage can usually be relieved two ways: more BYTES PER COMMAND (a wider
+  line or port) or more ELEMENTS PER CYCLE (another slot, dual issue). They
+  are different mechanisms and they do not have the same track record. Pick
+  the one the library shows paying AT THE CURRENT DESIGN STATE, and never
+  assign both directions to the same mechanism family: one measurement per
+  family per iteration is what makes the library worth reading.
 - Do not repeat a direction that failed in the history unless you say what
   is different this time. Never choose an AVOID skill.
 - Diversify: different mechanisms, not three flavours of one idea. Include
