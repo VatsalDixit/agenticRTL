@@ -125,6 +125,33 @@ def pid_alive(pid):
         return False
 
 
+def _with_area(state):
+    """Give every record an `area` and `area_unit`, the way new runs write them.
+
+    Runs recorded before the Vivado backend existed carry only `area_um2`.
+    Idempotent, so it is safe on a cached copy that has already been through.
+    """
+    def fix(rec):
+        if isinstance(rec, dict) and rec.get('area') is None \
+                and rec.get('area_um2') is not None:
+            rec['area'] = rec['area_um2']
+            rec.setdefault('area_unit', 'um2')
+    fix(state.get('baseline'))
+    fix((state.get('best') or {}).get('metrics'))
+    for it in state.get('iterations', []):
+        fix(it.get('best_after'))
+        for c in it.get('candidates', []):
+            fix(c.get('absolute'))
+    return state
+
+
+def area_label(state):
+    """The unit a run's area is in, for axis and card labels."""
+    unit = (state.get('baseline') or {}).get('area_unit') or 'um2'
+    return {'um2': 'square micrometres (Yosys, 45nm)',
+            'LUTs': 'LUTs (Vivado)'}.get(unit, unit)
+
+
 class Store(object):
     """Everything the window draws, re-read from disk when it changes."""
 
@@ -145,7 +172,7 @@ class Store(object):
 
     @property
     def state(self):
-        return self._state or {}
+        return _with_area(self._state or {})
 
     @property
     def status(self):
@@ -172,7 +199,7 @@ class Store(object):
         """
         state = self.state
         base = state.get('baseline') or {}
-        keys = ('area_um2', 'f_max_mhz', 'throughput_gbps', 'bytes_per_cycle')
+        keys = ('area', 'f_max_mhz', 'throughput_gbps', 'bytes_per_cycle')
         best = [{'i': 0, **{k: base.get(k) for k in keys}}] if base else []
         cands = []
         parent = base
@@ -187,7 +214,7 @@ class Store(object):
                 # Absolutes were recorded from the campaign after this was
                 # written; for older runs rebuild them from the percentages
                 # against the design this candidate started from.
-                for key, pct in (('area_um2', 'area_gain_pct'),
+                for key, pct in (('area', 'area_gain_pct'),
                                  ('f_max_mhz', 'fmax_gain_pct'),
                                  ('throughput_gbps', 'throughput_gain_pct'),
                                  ('bytes_per_cycle', 'bpc_gain_pct')):
@@ -197,7 +224,7 @@ class Store(object):
                         point[key] = parent[key] * (1.0 + m[pct] / 100.0)
                     else:
                         point[key] = None
-                if point['area_um2'] is not None:
+                if point['area'] is not None:
                     cands.append(point)
             after = it.get('best_after') or {}
             if any(after.get(k) is not None for k in keys):
@@ -604,7 +631,7 @@ class Dashboard(tk.Tk):
         self.cards = {}
         for key, title, unit in (('throughput_gbps', 'throughput', 'GB/s'),
                                  ('f_max_mhz', 'clock frequency', 'MHz'),
-                                 ('area_um2', 'area', 'um2'),
+                                 ('area', 'area', 'um2'),
                                  ('bytes_per_cycle', 'bytes / cycle', 'real pages')):
             card = tk.Frame(cards, bg=C['panel'], highlightbackground=C['rule'],
                             highlightthickness=1)
@@ -644,7 +671,7 @@ class Dashboard(tk.Tk):
         self.charts = []
         # grid, not pack: the three charts must share the height in fixed
         # proportions. Packed, the last one was squeezed to nothing.
-        specs = (('area per iteration', 'square micrometres', 'area_um2', C['area'], 3),
+        specs = (('area per iteration', 'square micrometres', 'area', C['area'], 3),
                  ('clock frequency per iteration', 'MHz', 'f_max_mhz', C['fmax'], 3),
                  ('throughput per iteration', 'GB/s = bytes/cycle x f_max',
                   'throughput_gbps', C['thru'], 2))
@@ -772,11 +799,13 @@ class Dashboard(tk.Tk):
         base = state.get('baseline') or {}
         best = (state.get('best') or {}).get('metrics') or {}
         for key, (val, sub, unit) in self.cards.items():
+            if key == 'area':
+                unit = base.get('area_unit') or unit
             now, was = best.get(key), base.get(key)
             val.configure(text=fmt(now) if now is not None else '-')
             if now is not None and was:
                 change = 100.0 * (now - was) / was
-                good = change < 0 if key == 'area_um2' else change > 0
+                good = change < 0 if key == 'area' else change > 0
                 sub.configure(text='%s   %+.2f%% vs baseline' % (unit, change),
                               fg=C['accent'] if good and abs(change) > 0.05
                               else (C['warn'] if abs(change) > 0.05 else C['muted']))
@@ -786,6 +815,8 @@ class Dashboard(tk.Tk):
         self.flow.redraw()
         best_pts, cands = self.store.series()
         for chart in self.charts:
+            if chart.key == 'area':
+                chart.unit = area_label(state)
             chart.set_data(best_pts, cands)
 
         for row in self.table.get_children():
@@ -802,7 +833,7 @@ class Dashboard(tk.Tk):
                 (win.get('id') if win else 'nothing adopted'),
                 fmt(after.get('throughput_gbps')),
                 fmt(after.get('f_max_mhz')),
-                fmt(after.get('area_um2')),
+                fmt(after.get('area')),
                 ' '.join(cs)[:80],
                 (it.get('at') or '').replace('T', ' ')))
 

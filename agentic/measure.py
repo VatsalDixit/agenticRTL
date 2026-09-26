@@ -7,11 +7,14 @@ Measure one design: correct or not, bytes per cycle, f_max, area, throughput.
   * bytes/cycle comes from the throughput testbench under GHDL, on every draw
     in the corpus, all at once. Correctness is decided on every draw by
     agentic/oracle.py against the frozen reference decompressor.
-  * f_max and area come from GHDL -> Yosys -> ABC on the Nangate 45nm library.
+  * f_max and area come from the synthesis backend named in the config:
+    GHDL -> Yosys -> ABC on the Nangate 45nm library (area in um2), or
+    Vivado place-and-route for an FPGA part on the HACC host (agentic/hacc.py,
+    area in LUTs).
 
-The loop always measures with ITS OWN copy of the testbench, the stub and the
-scripts (this folder), never with copies inside a candidate's worktree. Only
-the candidate's rtl/ folder is taken from the worktree.
+The loop always measures with ITS OWN copy of the testbench, the RAM stand-in
+and the scripts (this folder), never with copies inside a candidate's
+worktree. Only the candidate's rtl/ folder is taken from the worktree.
 
 Usage:
     python agentic/measure.py [--rtl DIR] [--no-synth] [--json FILE]
@@ -28,6 +31,7 @@ KIT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, KIT)
 
 import analyse                                   # noqa: E402
+import hacc                                      # noqa: E402
 import oracle                                    # noqa: E402
 import stim                                      # noqa: E402
 from tools import (CONFIG, ROOT, eda_shell, geomean, read_json,  # noqa: E402
@@ -266,7 +270,25 @@ def critical_path(out_dir, text):
 
 
 def synthesize(rtl_dir, out_dir, timeout=None):
-    """Area and timing for one rtl/ folder. Raises MeasureError."""
+    """Area and timing for one rtl/ folder, from the configured backend.
+
+    Raises MeasureError. Every result carries `area`, `area_unit` and
+    `synth_backend`, so a comparison across backends can be refused rather
+    than made.
+    """
+    backend = CONFIG['synth_backend']
+    if backend == 'hacc':
+        try:
+            return hacc.synthesize(rtl_dir, out_dir, TOP)
+        except hacc.HaccError as exc:
+            raise MeasureError(str(exc))
+    if backend != 'yosys':
+        raise MeasureError('unknown synth_backend %r in the config (yosys or hacc)'
+                           % backend)
+    return _synthesize_yosys(rtl_dir, out_dir, timeout)
+
+
+def _synthesize_yosys(rtl_dir, out_dir, timeout=None):
     if not os.path.exists(LIB_FILE):
         raise MeasureError('no liberty file at %s (run agentic/syn/get_lib.sh)'
                            % LIB_FILE)
@@ -303,6 +325,7 @@ def synthesize(rtl_dir, out_dir, timeout=None):
             metrics['regs'] = regs
         if cells:
             metrics['cells'] = sum(cells.values())
+    metrics.update(area=metrics['area_um2'], area_unit='um2', synth_backend='yosys')
     return metrics
 
 

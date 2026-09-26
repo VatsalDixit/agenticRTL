@@ -460,6 +460,15 @@ async def bash_gate(tool_name, tool_input, _ctx):
 # ---------------------------------------------------------------------------
 # Prompts
 
+def synth_phrase():
+    """What f_max and area come from, as the brief tells a session."""
+    if CONFIG['synth_backend'] == 'hacc':
+        return ('Vivado synthesis, place and route on an FPGA, part %s; area\n'
+                '     is counted in LUTs, and the history RAM is real URAM, so\n'
+                '     paths through it are timed' % CONFIG['hacc_part'])
+    return 'Yosys/ABC synthesis on a 45 nm library'
+
+
 SYSTEM_BRIEF = """\
 You are an expert digital designer improving the RTL of vhsnunzip, a VHDL-2008
 hardware Snappy decompressor, inside a git worktree. Your job this session is
@@ -501,8 +510,8 @@ HOW YOU ARE JUDGED
   1. Correctness: compressed Snappy chunks in, and every output byte must
      equal a frozen reference decompressor, on real Parquet pages and on
      synthetic chunks. A deadlock or one wrong byte rejects the candidate.
-  2. Throughput = bytes per cycle (real Parquet pages) x f_max (from Yosys/ABC
-     synthesis on a 45 nm library). Both halves count. A change that raises
+  2. Throughput = bytes per cycle (real Parquet pages) x f_max (from
+     @@SYNTH@@). Both halves count. A change that raises
      bytes/cycle a little and lowers f_max more is a loss.
   3. Area is priced: score = -gain% + 0.15 x area_growth% (more above 10%
      area growth). Area is not capped, but silicon must buy throughput.
@@ -895,7 +904,8 @@ def write_candidates(ctx, assignments, log, rate=None):
                     'append': SYSTEM_BRIEF.replace(
                         '@@BUDGET@@', 'about $%.0f and %d minutes'
                         % (float(CONFIG['session_budget_usd']),
-                           int(CONFIG['session_timeout_min'])))},
+                           int(CONFIG['session_timeout_min']))).replace(
+                        '@@SYNTH@@', synth_phrase())},
             cwd=asg['worktree'], model=CONFIG['model'],
             max_turns=int(CONFIG['session_max_turns']),
             budget=float(CONFIG['session_budget_usd']),

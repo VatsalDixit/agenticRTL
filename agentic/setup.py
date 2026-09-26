@@ -9,7 +9,8 @@ Check the machine and prepare the repo for the loop. Safe to run again.
 What it checks and prepares:
   1. the repo: git, a path without spaces, rtl/vhsnunzip_unbuffered.vhd
   2. the EDA shell: ghdl and yosys with the ghdl plugin (WSL on Windows)
-  3. the 45 nm liberty file (fetched if missing)
+  3. synthesis: the 45 nm liberty file (fetched if missing), or with
+     synth_backend "hacc", ssh to the HACC host and its Vivado
   4. the Claude Agent SDK and the claude login
   5. the stimulus corpus under .agentic/corpus
   6. the frozen hashes of the measuring instrument
@@ -86,8 +87,19 @@ def main():
         print('        and unpack it to %s (or set eda_suite in agentic/config.json)' % CONFIG['eda_suite'])
         failures += 1
 
-    print('3. liberty file')
-    if os.path.exists(LIB_PATH):
+    print('3. synthesis (%s)' % CONFIG['synth_backend'])
+    if CONFIG['synth_backend'] == 'hacc':
+        import hacc
+        good, why = hacc.available()
+        if good:
+            ok(why)
+        else:
+            bad(why)
+            print('        needs key-based ssh: ssh -o BatchMode=yes %s true must succeed'
+                  % CONFIG['hacc_host'])
+            print('        (or set "synth_backend": "yosys" in agentic/config.json)')
+            failures += 1
+    elif os.path.exists(LIB_PATH):
         ok('%s (%.1f MB)' % (LIB_PATH, os.path.getsize(LIB_PATH) / 1e6))
     elif fix:
         try:

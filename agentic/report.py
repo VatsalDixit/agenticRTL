@@ -18,7 +18,8 @@ import time
 KIT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, KIT)
 
-from tools import ROOT, now_iso, read_json, write_json   # noqa: E402
+from tools import (ROOT, area_of, area_unit, now_iso, read_json,  # noqa: E402
+                   write_json)
 
 
 def runs_dir():
@@ -144,11 +145,13 @@ def render_html(state):
                '<tr><td>throughput</td><td>%s GB/s</td><td>%s GB/s</td><td>%s</td></tr>'
                '<tr><td>bytes/cycle (real data)</td><td>%s</td><td>%s</td><td>%s</td></tr>'
                '<tr><td>f_max</td><td>%s MHz</td><td>%s MHz</td><td>%s</td></tr>'
-               '<tr><td>area</td><td>%s um2</td><td>%s um2</td><td>%s</td></tr></table>'
+               '<tr><td>area</td><td>%s %s</td><td>%s %s</td><td>%s</td></tr></table>'
                % (_num(base.get('throughput_gbps')), _num(best.get('throughput_gbps')), _pct(prog.get('throughput_gain_pct')),
                   _num(base.get('bytes_per_cycle')), _num(best.get('bytes_per_cycle')), _pct(prog.get('bpc_gain_pct')),
                   _num(base.get('f_max_mhz'), '%.1f'), _num(best.get('f_max_mhz'), '%.1f'), _pct(prog.get('fmax_gain_pct')),
-                  _num(base.get('area_um2'), '%.0f'), _num(best.get('area_um2'), '%.0f'), _pct(prog.get('area_gain_pct'))))
+                  _num(area_of(base), '%.0f'), html.escape(area_unit(base)),
+                  _num(area_of(best), '%.0f'), html.escape(area_unit(best)),
+                  _pct(prog.get('area_gain_pct'))))
     stopped = state.get('stopped')
     status_line = ('<p><b>Status:</b> %s. Best design: branch <code>%s</code> at commit <code>%s</code>.</p>' % (
         html.escape(stopped or 'running'), html.escape(state.get('branch', '')),

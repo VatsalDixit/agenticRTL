@@ -32,6 +32,8 @@ FROZEN = [
     'syn/sim_draws.sh',
     'syn/synth.sh',
     'syn/ram_stub.vhd',
+    'syn/vivado.tcl',
+    'syn/ram_xilinx.vhd',
 ]
 HASHES = os.path.join(KIT, 'frozen.json')
 

@@ -99,7 +99,7 @@ again next iteration. So the loop hands over what it already knows:
 | plan | ~25 s | one model call, no tools |
 | starting check | ~10 s | GHDL in WSL, once for every session |
 | write N candidates | 10-30 min (in parallel) | N Claude coding sessions |
-| measure N candidates | ~1 min (in parallel) | GHDL + Yosys in WSL |
+| measure N candidates | ~1 min with Yosys, ~20 min with Vivado (in parallel) | GHDL in WSL + the synthesis backend |
 | learn | ~50 s | one model call, no tools |
 
 So an iteration is the slowest session plus about two minutes, and it ends
@@ -136,7 +136,8 @@ limit entirely.
    CLI (`npm i -g @anthropic-ai/claude-code`) logged in with a subscription,
    or a real `ANTHROPIC_API_KEY`. A short placeholder key is ignored.
 4. `python agentic/setup.py` checks all of that, fetches the 45 nm liberty
-   file if it is missing, builds the stimulus corpus, freezes the measuring
+   file if it is missing (or, with `synth_backend` `hacc`, checks ssh to the
+   host and its Vivado), builds the stimulus corpus, freezes the measuring
    instrument, and self-tests the starting design. Then
    `python agentic/setup.py --commit` commits the kit (candidates start from
    HEAD, so it must be in git).
@@ -192,17 +193,55 @@ checkout is never modified by the loop.
 1. Correct: every output byte equals the frozen reference decompressor on
    all 10 draws (8 sets of real Parquet pages from TPC-H tables, 2 synthetic
    chunk sizes). A deadlock or one wrong byte rejects it.
-2. Throughput = geomean bytes/cycle over the 8 real draws x f_max from
-   Yosys/ABC on Nangate 45 nm. Synthetic draws must pass but do not enter
+2. Throughput = geomean bytes/cycle over the 8 real draws x f_max from the
+   synthesis backend (below). Synthetic draws must pass but do not enter
    the score (an earlier loop let one synthetic draw outvote every real one).
 3. Score = -gain% + 0.15 x area growth%. Area is priced, not capped:
-   adopted only if gain >= 0.2%, and when area grows more than 25% the
+   adopted only if gain >= 0.2% (under Vivado, a gain below 1% counts only
+   if bytes/cycle carries it: re-placing a design moves f_max by about a
+   megahertz on its own), and when area grows more than 25% the
    efficiency (gain per percent of area) must be at least 0.2. A first
    version added a heavy penalty above 10% area growth; it rejected a +28.9%
    throughput widening at +91% area in favour of +3% at +10%, which is the
    wrong trade for a throughput goal.
 4. Among adoptable candidates the lowest score wins and the run branch
    moves to its commit.
+
+## Synthesis backends
+
+`synth_backend` in `agentic/config.json` (or `AGENTIC_SYNTH_BACKEND`) picks
+what measures f_max and area:
+
+| | `yosys` | `hacc` |
+|---|---|---|
+| tool | GHDL + Yosys + ABC, in WSL | Vivado 2024.2 synthesis, place and route |
+| target | Nangate 45 nm standard cells | FPGA part `hacc_part` (Alveo U55C) |
+| where | this machine | the ETH HACC build host, over ssh (`hacc.py`) |
+| area | um2, history RAM left out | LUTs (registers, BRAM, URAM recorded too) |
+| history RAM | `syn/ram_stub.vhd`, paths through it untimed | `syn/ram_xilinx.vhd`, real URAM, timed |
+| time per candidate | ~1 min, deterministic | 15-20 min, ~1 MHz place-and-route jitter |
+
+They are different instruments on different targets and their numbers are
+never compared: every result is tagged with `synth_backend`, a candidate
+measured by one is refused against a parent measured by the other, and a run
+will not resume under a backend other than the one that measured its
+baseline. The same design reads very differently on the two. campaign1's
+final design measured 641.8 MHz, 111,702 um2 and 5.626 GB/s under Yosys, and
+263.0 MHz (+0.198 ns at 250 MHz), 6,698 LUTs, 4 URAM and 2.305 GB/s under
+Vivado on the U55C, with its worst path inside the long decoder. An older,
+larger revision of the design missed 250 MHz under Vivado with half of its
+ten worst paths starting at a URAM output, which the Yosys flow cannot see.
+
+The `hacc` backend needs key-based ssh to `hacc_host`
+(`ssh -o BatchMode=yes <host> true` must succeed). Each candidate is synthesised
+in its own scratch directory under `/tmp` on the host, so a round of N
+candidates runs side by side. `vivado_timeout_s` (3 h) is enforced on the host
+itself: Vivado and a watchdog share one session there, and the session is
+killed at the deadline even if the ssh connection has gone. A candidate that
+widens the `ram_command`/`ram_response` records, or declares its own
+`vhsnunzip_ram`, is refused, because the fixed Xilinx RAM would silently drop
+the extra bytes and the candidate would measure smaller and faster for having
+broken its memory.
 
 ## What a session costs, measured
 
@@ -284,6 +323,7 @@ resets.
 | `check.py` | the one command a candidate session may run |
 | `tb/vhsnunzip_perf_tc.sim.08.vhd` | width-generic throughput testbench |
 | `syn/sim_draws.sh`, `syn/synth.sh`, `syn/ram_stub.vhd` | tool scripts (run in WSL/bash) |
+| `hacc.py`, `syn/vivado.tcl`, `syn/ram_xilinx.vhd` | the Vivado backend on the HACC host |
 | `report.py` | status.json and report.html |
 | `gui.py` | the live dashboard window (Tkinter) |
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |

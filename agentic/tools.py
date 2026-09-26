@@ -52,9 +52,30 @@ DEFAULT_CONFIG = {
     "train_pages": 12,
     # Synthesis clock target in picoseconds (4000 ps = 250 MHz).
     "clock_period_ps": 4000,
+    # Which synthesis measures f_max and area:
+    #   "yosys"  GHDL + Yosys + ABC on Nangate 45nm, in the EDA shell. Area in
+    #            um2. Deterministic, about a minute.
+    #   "hacc"   Vivado synthesis, place and route for an FPGA part, on the ETH
+    #            HACC build host over ssh (agentic/hacc.py). Area in LUTs.
+    #            Place-and-route jitter, 15-20 minutes.
+    # The two are separate series: a run is measured by one of them from its
+    # baseline to its end, and the loop refuses to resume under the other.
+    "synth_backend": "yosys",
+    "hacc_host": "vdixit@hacc-build-02",
+    "hacc_vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh",
+    "hacc_part": "xcu55c-fsvh2892-2L-e",
+    # How much of a gain place-and-route jitter alone can produce. Re-placing
+    # a design after an unrelated edit moves f_max by about a megahertz, so on
+    # a place-and-route backend a gain under this is not evidence of anything.
+    # Yosys has no placer and no seed, and uses min_gain_pct alone.
+    "pnr_noise_pct": 1.0,
     # Tool timeouts.
     "sim_timeout_s": 1200,
     "synth_timeout_s": 2400,
+    # Vivado's own. Three hours, from the earlier flow: at 20k LUTs one
+    # place-and-route ran past an hour and was still converging, and two
+    # candidates were lost to a limit that measured the tool, not the design.
+    "vivado_timeout_s": 10800,
     # Scoring.
     # Scoring: score = -gain% + area_weight x area_growth%. Above
     # max_area_growth_pct a candidate also needs gain/area >= ei_floor.
@@ -147,8 +168,13 @@ def kill_all():
         _kill_tree(proc)
 
 
-def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None):
-    """Run a command. Bytes in, bytes out, hard timeout, children killed too."""
+def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None, binary=False):
+    """Run a command. Bytes in, bytes out, hard timeout, children killed too.
+
+    Output is decoded to text unless ``binary``, which keeps it as bytes for
+    anything that is not text (a tar stream from the synthesis host).
+    """
+    dec = (lambda data: data or b'') if binary else _dec
     start = time.time()
     kwargs = {}
     if not is_windows():
@@ -168,11 +194,11 @@ def run(cmd, timeout, cwd=None, env=None, stdin_bytes=None):
         except Exception:
             out, err = b'', b''
         _LIVE.discard(proc)
-        return Result(-1, _dec(out), _dec(err), timed_out=True,
+        return Result(-1, dec(out), dec(err), timed_out=True,
                       seconds=time.time() - start)
     finally:
         _LIVE.discard(proc)
-    return Result(proc.returncode, _dec(out), _dec(err),
+    return Result(proc.returncode, dec(out), dec(err),
                   seconds=time.time() - start)
 
 
@@ -326,6 +352,35 @@ def pct(new, old):
     if new is None or old is None or old == 0:
         return None
     return 100.0 * (new - old) / old
+
+
+# --------------------------------------------------------------------------
+# area, in whatever unit the synthesis backend measured it
+
+def area_of(metrics):
+    """The design's area: um2 from Yosys, LUTs from Vivado.
+
+    Runs recorded before `area` existed carry only `area_um2`, so that is the
+    fallback. Only ratios of this are ever taken, and only between two
+    measurements from the same backend (see same_backend), so the unit cancels.
+    """
+    metrics = metrics or {}
+    if metrics.get('area') is not None:
+        return metrics['area']
+    return metrics.get('area_um2')
+
+
+def area_unit(metrics):
+    metrics = metrics or {}
+    if metrics.get('area_unit'):
+        return metrics['area_unit']
+    return 'um2' if metrics.get('area_um2') is not None else ''
+
+
+def backend_of(metrics):
+    """Which synthesis produced these numbers. Unmarked means Yosys, the only
+    backend that existed before the field did."""
+    return (metrics or {}).get('synth_backend') or 'yosys'
 
 
 def rmtree(path):

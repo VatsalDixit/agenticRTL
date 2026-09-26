@@ -51,7 +51,8 @@ import propose                         # noqa: E402
 import report                          # noqa: E402
 import skills as skills_mod            # noqa: E402
 from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: E402
-                   git_ok, now_iso, pct, read_json, rmtree, write_json)
+                   git_ok, now_iso, pct, read_json, rmtree, write_json,
+                   area_of, area_unit, backend_of)
 from tools import run as tools_run                                    # noqa: E402
 from tools import kill_all as tools_kill_all                          # noqa: E402
 
@@ -63,7 +64,12 @@ from tools import kill_all as tools_kill_all                          # noqa: E4
 BLIND_DIRS = ('test_data', os.path.join('agentic', 'data'))
 BLIND_SUFFIXES = ('.parquet',)
 METRIC_KEYS = {'throughput': 'throughput_gbps', 'bytes_per_cycle': 'bytes_per_cycle',
-               'fmax': 'f_max_mhz', 'area': 'area_um2'}
+               'fmax': 'f_max_mhz', 'area': 'area'}
+
+# Extra fields recorded per candidate and per iteration so the dashboard can
+# plot real numbers; `area_um2` stays so older readers still find it.
+ABSOLUTE_KEYS = ('area', 'area_unit', 'area_um2', 'f_max_mhz', 'throughput_gbps',
+                 'bytes_per_cycle', 'wns_ns', 'regs', 'luts', 'bram', 'uram')
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +103,11 @@ def parse_goal(text):
 
 def goal_gain(metrics, base, goal):
     """Improvement on the goal metric in percent (positive = better)."""
-    key = METRIC_KEYS[goal['metric']]
-    val = pct(metrics.get(key), base.get(key))
+    if goal['metric'] == 'area':
+        val = pct(area_of(metrics), area_of(base))
+    else:
+        key = METRIC_KEYS[goal['metric']]
+        val = pct(metrics.get(key), base.get(key))
     if val is None:
         return None
     return -val if goal['metric'] == 'area' else val
@@ -311,7 +320,7 @@ def evaluate(metrics, parent, goal):
         'throughput_gain_pct': pct(metrics.get('throughput_gbps'), parent.get('throughput_gbps')),
         'bpc_gain_pct': pct(metrics.get('bytes_per_cycle'), parent.get('bytes_per_cycle')),
         'fmax_gain_pct': pct(metrics.get('f_max_mhz'), parent.get('f_max_mhz')),
-        'area_gain_pct': pct(metrics.get('area_um2'), parent.get('area_um2')),
+        'area_gain_pct': pct(area_of(metrics), area_of(parent)),
         'gain_pct': goal_gain(metrics, parent, goal),
     }
     meas = {k: (round(v, 3) if v is not None else None) for k, v in meas.items()}
@@ -319,6 +328,16 @@ def evaluate(metrics, parent, goal):
     if metrics.get('synth_error') or meas['gain_pct'] is None:
         out['outcome'] = 'failed_synth'
         out['reason'] = metrics.get('synth_error') or 'no synthesis numbers'
+        return out
+    if backend_of(metrics) != backend_of(parent):
+        # LUTs against square micrometres, an FPGA clock against an ASIC one:
+        # any percentage taken across the two would be a number about the
+        # instruments, not the design.
+        out['measured'] = {}
+        out['outcome'] = 'failed_synth'
+        out['reason'] = ('measured with %s synthesis but the design it is compared '
+                         'with was measured with %s' % (backend_of(metrics),
+                                                         backend_of(parent)))
         return out
     gain = meas['gain_pct']
     area = meas['area_gain_pct'] or 0.0
@@ -334,6 +353,18 @@ def evaluate(metrics, parent, goal):
         out['outcome'] = 'no_gain' if gain > -float(CONFIG['min_gain_pct']) else 'regressed'
         out['reason'] = 'goal metric %+.2f%% (needs at least +%.2f%%)' % (
             gain, float(CONFIG['min_gain_pct']))
+        return out
+    # Place-and-route moves f_max by about a megahertz on any edit, so a small
+    # clock-carried gain is indistinguishable from re-placement. Bytes/cycle
+    # comes from simulation and has no such noise: a gain it carries counts.
+    noise = float(CONFIG['pnr_noise_pct'])
+    if (backend_of(metrics) != 'yosys' and goal['metric'] in ('throughput', 'fmax')
+            and gain < noise
+            and not (goal['metric'] == 'throughput'
+                     and (meas['bpc_gain_pct'] or 0) >= float(CONFIG['min_gain_pct']))):
+        out['outcome'] = 'no_gain'
+        out['reason'] = ('goal metric %+.2f%% comes from f_max alone and is inside '
+                         'the %.1f%% place-and-route noise' % (gain, noise))
         return out
     ei = gain / area if area > 0 else float('inf')
     meas['efficiency'] = round(ei, 3) if ei != float('inf') else None
@@ -366,18 +397,29 @@ def advantages(cands):
 
 def state_text(metrics, base):
     w = metrics.get('widths') or {}
-    lines = ['bytes/cycle %.3f on real Parquet data (geomean), f_max %.1f MHz, area %.0f um2, '
+    lines = ['bytes/cycle %.3f on real Parquet data (geomean), f_max %.1f MHz, area %.0f %s, '
              'throughput %.3f GB/s, worst slack %+.3f ns at a %d ps clock target'
              % (metrics.get('bytes_per_cycle') or 0, metrics.get('f_max_mhz') or 0,
-                metrics.get('area_um2') or 0, metrics.get('throughput_gbps') or 0,
+                area_of(metrics) or 0, area_unit(metrics) or 'um2',
+                metrics.get('throughput_gbps') or 0,
                 metrics.get('wns_ns') or 0, int(CONFIG['clock_period_ps']))]
+    if metrics.get('luts') is not None:
+        lines.append('measured by Vivado place-and-route on %s: %d LUTs, %d registers, '
+                     '%s BRAM tiles, %s URAM'
+                     % (metrics.get('part'), metrics['luts'], metrics.get('regs') or 0,
+                        metrics.get('bram', 'n/a'), metrics.get('uram', 'n/a')))
     lines.append('ports: co_data %d bytes (cnt %d bits), de_data %d bytes (cnt %d bits); '
                  'cores %d; core line %d bytes; registers %s'
                  % (w.get('in_bytes', 0), w.get('in_cnt_bits', 0), w.get('out_bytes', 0),
                     w.get('out_cnt_bits', 0), w.get('cores', 1),
                     int(w.get('core_line_bytes', 0)), metrics.get('regs', 'n/a')))
     worst = metrics.get('critical_path')
-    if worst:
+    if worst and metrics.get('failing_endpoints') is not None:
+        lines.append('worst timing path from place-and-route: %s -> %s '
+                     '(%d of %d timing endpoints miss the clock target)'
+                     % (worst.get('from'), worst.get('to'),
+                        metrics['failing_endpoints'], metrics.get('total_endpoints') or 0))
+    elif worst:
         lines.append('worst timing path from synthesis: %s -> %s '
                      '(the clock is what this path costs; everything else has slack)'
                      % (worst.get('from'), worst.get('to')))
@@ -535,7 +577,7 @@ class Run(object):
             'throughput_gain_pct': pct(best.get('throughput_gbps'), base.get('throughput_gbps')),
             'bpc_gain_pct': pct(best.get('bytes_per_cycle'), base.get('bytes_per_cycle')),
             'fmax_gain_pct': pct(best.get('f_max_mhz'), base.get('f_max_mhz')),
-            'area_gain_pct': pct(best.get('area_um2'), base.get('area_um2')),
+            'area_gain_pct': pct(area_of(best), area_of(base)),
         }
         self.status.set(best=self.state['progress'])
 
@@ -552,7 +594,13 @@ def preflight(log, need_model=True):
         problems.append(why)
     else:
         log('EDA tools: %s' % why)
-    if not os.path.exists(measure.LIB_FILE):
+    if CONFIG['synth_backend'] == 'hacc':
+        ok, why = measure.hacc.available()
+        if not ok:
+            problems.append('synth_backend is hacc but the host is not usable: %s' % why)
+        else:
+            log('synthesis: %s' % why)
+    elif not os.path.exists(measure.LIB_FILE):
         problems.append('missing liberty file %s (run bash agentic/syn/get_lib.sh)' % measure.LIB_FILE)
     fz = freeze.check()
     if fz:
@@ -926,9 +974,7 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                       # Kept in the saved record (unlike 'metrics', which is
                       # stripped) so the dashboard can plot a candidate's real
                       # numbers instead of rebuilding them from percentages.
-                      'absolute': {kk: metrics.get(kk) for kk in
-                                   ('area_um2', 'f_max_mhz', 'throughput_gbps',
-                                    'bytes_per_cycle', 'wns_ns', 'regs')},
+                      'absolute': {kk: metrics.get(kk) for kk in ABSOLUTE_KEYS},
                       'metrics': {kk: vv for kk, vv in metrics.items() if kk != 'draws'},
                       'draws': [{kk: vv for kk, vv in r.items() if kk not in ('analysis', 'counters')}
                                 for r in metrics.get('draws', [])]})
@@ -1032,7 +1078,8 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                           'commit': winner['commit'], 'measured': winner['measured']}
                          if winner else None),
               'best_after': {kk: state['best']['metrics'].get(kk) for kk in
-                             ('throughput_gbps', 'bytes_per_cycle', 'f_max_mhz', 'area_um2')},
+                             ('throughput_gbps', 'bytes_per_cycle', 'f_max_mhz', 'area_um2',
+                              'area', 'area_unit')},
               'skills_changed': changed, 'lessons': lessons,
               'model': CONFIG['model'], 'effort': CONFIG.get('effort'),
               'tokens': sum_usage(cands),
@@ -1136,6 +1183,18 @@ def main():
             goal['text'], goal['metric'],
             '%+.0f%%' % goal['target_pct'] if goal['target_pct'] else 'as far as possible'))
     else:
+        measured_by = backend_of(run.state.get('baseline'))
+        if run.state.get('baseline') and measured_by != CONFIG['synth_backend']:
+            # Every candidate from here would be scored against a baseline in
+            # another unit on another target. The kit also restarts itself
+            # into a resume whenever config.json changes, so this is exactly
+            # where a mid-run backend switch would otherwise slip through.
+            log('PROBLEM: run %s was measured with %s synthesis and the config now '
+                'says %s. Resume it with AGENTIC_SYNTH_BACKEND=%s, or start a new run.'
+                % (name, measured_by, CONFIG['synth_backend'], measured_by))
+            run.status.set(phase='failed', detail='synthesis backend changed',
+                           finished=now_iso())
+            return 1
         run.state['stopped'] = None
         if args.goal:
             log('note: --goal ignored on resume; the run keeps its goal')
