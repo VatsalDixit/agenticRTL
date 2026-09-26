@@ -162,8 +162,16 @@ def _kill_tree(proc):
 # Every process this module starts, so a Ctrl-C can kill them all.
 _LIVE = set()
 
+# Set once the loop is being stopped. A measurement running in a background
+# thread checks it before starting anything new (a retried synthesis would
+# otherwise begin a fresh place-and-route after the Ctrl-C that killed the
+# last one, and the process would not exit until it finished).
+STOPPING = False
+
 
 def kill_all():
+    global STOPPING
+    STOPPING = True
     for proc in list(_LIVE):
         _kill_tree(proc)
 

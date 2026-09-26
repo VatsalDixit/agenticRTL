@@ -42,6 +42,7 @@ import shlex
 import tarfile
 import time
 
+import tools
 from tools import CONFIG, run as tools_run
 
 KIT = os.path.dirname(os.path.abspath(__file__))
@@ -369,17 +370,18 @@ def synthesize(rtl_dir, out_dir, top):
     problem = ram_interface_problem(rtl_dir)
     if problem:
         raise HaccError(problem)
-    start = time.time()
     for attempt in range(1, ATTEMPTS + 1):
+        if tools.STOPPING:
+            raise HaccError('the loop is stopping; synthesis not started')
         try:
             run_remote(rtl_dir, out_dir, top, int(CONFIG['vivado_timeout_s']))
             break
         except Transient:
-            if attempt == ATTEMPTS:
+            if attempt == ATTEMPTS or tools.STOPPING:
                 raise
             time.sleep(30 * attempt)
     metrics = parse_reports(out_dir)
-    metrics['synth_seconds'] = int(time.time() - start)
+    metrics['synth_attempts'] = attempt
     return metrics
 
 

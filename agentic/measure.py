@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+import time
 
 KIT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, KIT)
@@ -360,13 +361,16 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
     design; returns a dict with 'error' set when the tools could not run."""
     os.makedirs(work_dir, exist_ok=True)
     widths = analyse.rtl_widths(rtl_dir)
+    t_sim = time.time()
     try:
         sims = simulate(rtl_dir, os.path.join(work_dir, 'sim'), draws, widths)
     except MeasureError as exc:
         return {'oracle_pass': False, 'error': str(exc), 'widths': widths,
-                'draws': []}
+                'draws': [], 'sim_seconds': round(time.time() - t_sim, 1)}
+    sim_seconds = round(time.time() - t_sim, 1)
     synth_metrics = None
     synth_error = None
+    t_synth = time.time()
     if synth and all(r['oracle_pass'] for r in sims):
         try:
             synth_metrics = synthesize(rtl_dir, os.path.join(work_dir, 'synth'))
@@ -374,6 +378,11 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
             synth_error = str(exc)
     out = summarize(sims, synth_metrics)
     out['widths'] = widths
+    out['sim_seconds'] = sim_seconds
+    if synth_metrics is not None or synth_error:
+        # Wall time including the transfer to and from the host, which is
+        # what the loop waits for; hacc's own synth_seconds is the same span.
+        out['synth_seconds'] = round(time.time() - t_synth, 1)
     if synth_error:
         out['synth_error'] = synth_error
     return out

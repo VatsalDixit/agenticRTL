@@ -106,6 +106,24 @@ def _svg_chart(points, base_value, title, unit):
                width // 2, height - 8))
 
 
+_TIMING_CELL = (('plan_s', 'plan'), ('check_s', 'check'), ('write_s', 'write'),
+                ('stall_s', 'waited'), ('rebase_s', 'merge'), ('measure_s', 'measure'),
+                ('synth_s', 'synth'), ('learn_s', 'learn'))
+
+
+def _timing_cell(timing):
+    """One iteration's steps, e.g. 'write 14.2 min, measure 6.1 min'."""
+    if not timing:
+        return '-'
+    bits = []
+    for key, name in _TIMING_CELL:
+        sec = timing.get(key)
+        if isinstance(sec, (int, float)):
+            bits.append('%s&nbsp;%s' % (name, '%.0f&nbsp;s' % sec if sec < 120
+                                        else '%.1f&nbsp;min' % (sec / 60.0)))
+    return '<br>'.join(bits) or '-'
+
+
 def render_html(state):
     base = state.get('baseline') or {}
     best = (state.get('best') or {}).get('metrics') or {}
@@ -131,12 +149,12 @@ def render_html(state):
                     _pct(c.get('expected_gain_pct')))) if m else
                 (': ' + html.escape((c.get('reason') or c.get('problem') or '')[:160])
                  if (c.get('reason') or c.get('problem')) else '')))
-        rows.append('<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+        rows.append('<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
             it['iteration'], html.escape(it.get('at', '')),
             html.escape((win.get('id') if win else '-') or '-'),
             _pct(win.get('measured', {}).get('throughput_gain_pct')) if win else '-',
             _num(cur.get('throughput_gbps')) + ' GB/s' if cur else '-',
-            ''.join(cands)))
+            ''.join(cands), _timing_cell(it.get('timing'))))
 
     prog = state.get('progress') or {}
     head = ('<h1>Agentic RTL loop: %s</h1><p>%s</p>' % (
@@ -158,7 +176,7 @@ def render_html(state):
         html.escape(((state.get('best') or {}).get('commit') or '')[:12])))
     charts = _svg_chart(points_tp, base.get('throughput_gbps') or 0, 'throughput of the best design', 'GB/s') + \
         _svg_chart(points_bpc, base.get('bytes_per_cycle') or 0, 'bytes per cycle on real data', 'B/cycle')
-    table = ('<table class="it"><tr><th>#</th><th>when</th><th>winner</th><th>gain</th><th>best after</th><th>candidates</th></tr>%s</table>'
+    table = ('<table class="it"><tr><th>#</th><th>when</th><th>winner</th><th>gain</th><th>best after</th><th>candidates</th><th>time</th></tr>%s</table>'
              % ''.join(rows))
     css = ('<style>body{font-family:system-ui,sans-serif;margin:24px;max-width:1100px}'
            'table{border-collapse:collapse;margin:12px 0}td,th{border:1px solid #ccc;padding:4px 8px;font-size:13px;vertical-align:top}'
