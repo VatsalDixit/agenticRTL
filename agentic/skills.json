@@ -1,10 +1,6 @@
 {
- "about": "Pattern -> strategy skills for optimising the vhsnunzip Snappy decompressor. Seeded from an earlier optimisation campaign on this design (flow/LESSONS.md in the agenticRTL_test2 repo) and from the Dr. RTL paper (arXiv 2604.14989). learn.py updates this file after every iteration.",
- "design_facts": [
-  "Widening the core line from 16 to 32 bytes was measured three times from the same design state and paid every time: +29.2%, +33.6% and +33.6% throughput, for about +83% to +102% area. It paid even though no draw came close to filling the 16-byte line.",
-  "Raising copy elements per cycle was measured twice in that same state and paid neither time: a second copy slot regressed -5.06% throughput, and a fused copy pair broke correctness on real Parquet pages.",
-  "The decoder carries one copy slot and one literal slot per transfer, so copies and literals have separate ceilings. On copy-heavy tables the copy slot runs at 82-93% of its ceiling while the literal slot sits near 40%."
- ],
+ "about": "Pattern -> strategy skills for optimising the vhsnunzip Snappy decompressor. Seeded from an earlier optimisation campaign on this design (flow/LESSONS.md in the agenticRTL_test2 repo) and from the Dr. RTL paper (arXiv 2604.14989). learn.py updates this file after every iteration. Cleaned for the Vivado backend on 2026-09-29: the design facts were dropped (they described campaign1's 16-byte-line design and were measured under Yosys), the clock skill lost its 45nm numbers, and the two ASIC timing skills were rated down.",
+ "design_facts": [],
  "skills": [
   {
    "caveats": [],
@@ -90,7 +86,7 @@
   },
   {
    "caveats": [],
-   "confidence": "high",
+   "confidence": "medium",
    "id": "condition-precompute-and-fanout-split",
    "kind": "mechanism",
    "pattern": "f_max limited by a long control path: a repeated wide comparison or complex condition feeds many muxes, or one control signal fans out to a wide datapath.",
@@ -107,8 +103,10 @@
    "strategy": "Move the select before the arithmetic where the operands allow it, and extract common sub-expressions into shared wires. Dr. RTL medium-confidence skills 2.2 and 2.3. Gains are modest; check that synthesis had not already done it."
   },
   {
-   "caveats": [],
-   "confidence": "medium",
+   "caveats": [
+    "An ASIC result. On the UltraScale+ fabric adders use the dedicated CARRY8 chain, which a LUT-built carry-select or prefix adder rarely beats; check the timing report shows a real carry chain on the worst path first."
+   ],
+   "confidence": "low",
    "id": "carry-select-or-prefix-for-long-carry-chains",
    "kind": "mechanism",
    "pattern": "f_max limited by a long sequential carry chain (address arithmetic, length accumulation) on the critical path.",
@@ -122,7 +120,7 @@
    "kind": "mechanism",
    "pattern": "Deciding whether to spend a candidate on the clock (f_max) or on bytes per cycle.",
    "source": "earlier campaign",
-   "strategy": "Both halves count: throughput = bytes/cycle x f_max from synthesis, and positive slack against the clock target does NOT mean the clock lever is spent -- f_max is what synthesis reports for the worst path, not the target. On this design, measured with Yosys/ABC at 45 nm, three adoptions were pure f_max wins (+3.1%, +5.7%, +12.6%) while worst slack was +2.4 ns; under Vivado on the U55C the design those adoptions produced clocks at 263 MHz, not 642, with +0.2 ns of slack at 250 MHz. Aim at the worst path the synthesis report names, not at a path you guessed by reading the RTL: two attempts chosen that way lost 13-15% of f_max."
+   "strategy": "Both halves count: throughput = bytes/cycle x f_max, and f_max is what place-and-route reports for the worst path, not the clock target. Positive slack does not mean the clock lever is spent, and negative slack does not make it the only one. Aim at the worst path the timing report names, not at a path guessed by reading the RTL."
   },
   {
    "caveats": [],

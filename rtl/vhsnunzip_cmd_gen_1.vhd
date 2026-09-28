@@ -66,10 +66,10 @@ begin
 
         -- Determine how many bytes we can write for the copy element. If there
         -- is no copy element, this becomes 0 automatically.
-        if cp_rem < LB then
-          c1h.cp_len := cp_rem(LB_LOG2 downto 0);
+        if cp_rem < 8 then
+          c1h.cp_len := cp_rem(3 downto 0);
         else
-          c1h.cp_len := to_signed(LB-1, LB_LOG2+1);
+          c1h.cp_len := "0111";
         end if;
 
         if elh.cp_off <= 1 then
@@ -86,17 +86,15 @@ begin
           -- Without run-length=1 acceleration, we can't copy more bytes at
           -- once than the copy offset, because we'd be reading beyond what
           -- we've written already.
-          if unsigned(c1h.cp_len(LB_LOG2-1 downto 0)) >= elh.cp_off
-            and c1h.cp_len(LB_LOG2) = '0' then
-            c1h.cp_len(LB_LOG2-1 downto 0) :=
-              signed(resize(elh.cp_off(LB_LOG2 downto 0) - 1, LB_LOG2));
+          if unsigned(c1h.cp_len(2 downto 0)) >= elh.cp_off and c1h.cp_len(3) = '0' then
+            c1h.cp_len(2 downto 0) := signed(resize(elh.cp_off(3 downto 0) - 1, 3));
 
             -- We can however accelerate subsequent copies; after the first
             -- copy we have two consecutive copies in memory, after the
             -- second we have four, and so on. Note that cp_off bit 3 and above
             -- must be zero here, because len was larger and len can be at most
             -- 8, so we can ignore them in the leftshift.
-            elh.cp_off(LB_LOG2 downto 0) := elh.cp_off(LB_LOG2-1 downto 0) & "0";
+            elh.cp_off(3 downto 0) := elh.cp_off(2 downto 0) & "0";
 
           end if;
 
@@ -105,7 +103,7 @@ begin
         end if;
 
         -- Update state.
-        cp_rem := cp_rem - (resize(c1h.cp_len, LB_LOG2+2) + 1);
+        cp_rem := cp_rem - (resize(c1h.cp_len, 5) + 1);
 
         -- Advance if there are no (more) bytes in the copy.
         if cp_rem(6) = '1' then

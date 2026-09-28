@@ -46,8 +46,8 @@ entity vhsnunzip_unbuffered is
     -- stream library components in vhlib.
     co_valid    : in  std_logic;
     co_ready    : out std_logic;
-    co_data     : in  std_logic_vector(127 downto 0);
-    co_cnt      : in  std_logic_vector(3 downto 0);
+    co_data     : in  std_logic_vector(63 downto 0);
+    co_cnt      : in  std_logic_vector(2 downto 0);
     co_last     : in  std_logic;
 
     -- Decompressed output stream. This stream is almost normalized, with the
@@ -59,8 +59,8 @@ entity vhsnunzip_unbuffered is
     de_valid    : out std_logic;
     de_ready    : in  std_logic;
     de_dvalid   : out std_logic;
-    de_data     : out std_logic_vector(127 downto 0);
-    de_cnt      : out std_logic_vector(4 downto 0);
+    de_data     : out std_logic_vector(63 downto 0);
+    de_cnt      : out std_logic_vector(3 downto 0);
     de_last     : out std_logic
 
   );
@@ -76,23 +76,17 @@ architecture behavior of vhsnunzip_unbuffered is
   signal lt_rd_adev   : unsigned(11 downto 0);
   signal lt_rd_adod   : unsigned(11 downto 0);
   signal lt_rd_next   : std_logic;
-  signal lt_rd_even   : byte_array(0 to LB-1);
-  signal lt_rd_odd    : byte_array(0 to LB-1);
-
-  -- Number of 8-byte RAM banks needed to store one LB-byte history line. The
-  -- history RAM always stores 8 bytes per line (the entity's record types are
-  -- fixed for the synthesis stub), so a wider core line is striped over
-  -- several banks that are read and written together.
-  constant BANKS      : natural := LB / 8;
+  signal lt_rd_even   : byte_array(0 to 7);
+  signal lt_rd_odd    : byte_array(0 to 7);
 
   -- RAM interface signals.
   signal wr_ptr       : unsigned(12 downto 0);
-  signal ev_wr_cmd    : ram_command_array(0 to BANKS-1);
-  signal ev_rd_cmd    : ram_command_array(0 to BANKS-1);
-  signal ev_rd_resp   : ram_response_array(0 to BANKS-1);
-  signal od_wr_cmd    : ram_command_array(0 to BANKS-1);
-  signal od_rd_cmd    : ram_command_array(0 to BANKS-1);
-  signal od_rd_resp   : ram_response_array(0 to BANKS-1);
+  signal ev_wr_cmd    : ram_command;
+  signal ev_rd_cmd    : ram_command;
+  signal ev_rd_resp   : ram_response;
+  signal od_wr_cmd    : ram_command;
+  signal od_rd_cmd    : ram_command;
+  signal od_rd_resp   : ram_response;
 
 begin
 
@@ -121,7 +115,7 @@ begin
   co_connect_proc: process (co_valid, co_data, co_cnt, co_last) is
   begin
     co.valid <= co_valid;
-    for byte in 0 to LB-1 loop
+    for byte in 0 to 7 loop
       co.data(byte) <= co_data(byte*8+7 downto byte*8);
     end loop;
     co.endi <= unsigned(co_cnt) - 1;
@@ -131,7 +125,7 @@ begin
   de_connect_proc: process (de) is
   begin
     de_valid <= de.valid;
-    for byte in 0 to LB-1 loop
+    for byte in 0 to 7 loop
       de_data(byte*8+7 downto byte*8) <= de.data(byte);
     end loop;
     de_cnt <= std_logic_vector(de.cnt);
@@ -144,27 +138,20 @@ begin
   end process;
 
   -- Write the decompressed output to the memory for long-term history
-  -- storage. One LB-byte line is striped over BANKS 8-byte RAM banks, which
-  -- are written and read as one unit; the even/odd split of the LB-byte lines
-  -- is exactly as it was for 8-byte lines.
-  wr_gen: for bank in 0 to BANKS-1 generate
-  begin
+  -- storage.
+  ev_wr_cmd <= (
+    valid => de.valid and de_ready and not wr_ptr(0),
+    addr  => wr_ptr(12 downto 1),
+    wren  => '1',
+    wdat  => de.data,
+    wctrl => "00000000");
 
-    ev_wr_cmd(bank) <= (
-      valid => de.valid and de_ready and not wr_ptr(0),
-      addr  => wr_ptr(12 downto 1),
-      wren  => '1',
-      wdat  => de.data(bank*8 to bank*8+7),
-      wctrl => "00000000");
-
-    od_wr_cmd(bank) <= (
-      valid => de.valid and de_ready and wr_ptr(0),
-      addr  => wr_ptr(12 downto 1),
-      wren  => '1',
-      wdat  => de.data(bank*8 to bank*8+7),
-      wctrl => "00000000");
-
-  end generate;
+  od_wr_cmd <= (
+    valid => de.valid and de_ready and wr_ptr(0),
+    addr  => wr_ptr(12 downto 1),
+    wren  => '1',
+    wdat  => de.data,
+    wctrl => "00000000");
 
   wr_ptr_proc: process (clk) is
   begin
@@ -183,56 +170,50 @@ begin
   end process;
 
   -- Connect the long-term memory read request signals.
-  rd_gen: for bank in 0 to BANKS-1 generate
-  begin
+  ev_rd_cmd <= (
+    valid => lt_rd_valid,
+    addr  => lt_rd_adev,
+    wren  => '0',
+    wdat  => (others => X"00"),
+    wctrl => "00000000");
 
-    ev_rd_cmd(bank) <= (
-      valid => lt_rd_valid,
-      addr  => lt_rd_adev,
-      wren  => '0',
-      wdat  => (others => X"00"),
-      wctrl => "00000000");
+  od_rd_cmd <= (
+    valid => lt_rd_valid,
+    addr  => lt_rd_adod,
+    wren  => '0',
+    wdat  => (others => X"00"),
+    wctrl => "00000000");
 
-    od_rd_cmd(bank) <= (
-      valid => lt_rd_valid,
-      addr  => lt_rd_adod,
-      wren  => '0',
-      wdat  => (others => X"00"),
-      wctrl => "00000000");
+  lt_rd_even <= ev_rd_resp.rdat;
+  lt_rd_odd  <= od_rd_resp.rdat;
+  lt_rd_next <= od_rd_resp.valid_next;
 
-    lt_rd_even(bank*8 to bank*8+7) <= ev_rd_resp(bank).rdat;
-    lt_rd_odd(bank*8 to bank*8+7) <= od_rd_resp(bank).rdat;
+  -- RAM containing the even 8-byte lines of decompression history.
+  ram_even_inst: vhsnunzip_ram
+    generic map (
+      RAM_STYLE => RAM_STYLE
+    )
+    port map (
+      clk       => clk,
+      reset     => reset,
+      a_cmd     => ev_wr_cmd,
+      a_resp    => open,
+      b_cmd     => ev_rd_cmd,
+      b_resp    => ev_rd_resp
+    );
 
-    -- RAM bank containing part of the even LB-byte lines of history.
-    ram_even_inst: vhsnunzip_ram
-      generic map (
-        RAM_STYLE => RAM_STYLE
-      )
-      port map (
-        clk       => clk,
-        reset     => reset,
-        a_cmd     => ev_wr_cmd(bank),
-        a_resp    => open,
-        b_cmd     => ev_rd_cmd(bank),
-        b_resp    => ev_rd_resp(bank)
-      );
-
-    -- RAM bank containing part of the odd LB-byte lines of history.
-    ram_odd_inst: vhsnunzip_ram
-      generic map (
-        RAM_STYLE => RAM_STYLE
-      )
-      port map (
-        clk       => clk,
-        reset     => reset,
-        a_cmd     => od_wr_cmd(bank),
-        a_resp    => open,
-        b_cmd     => od_rd_cmd(bank),
-        b_resp    => od_rd_resp(bank)
-      );
-
-  end generate;
-
-  lt_rd_next <= od_rd_resp(0).valid_next;
+  -- RAM containing the odd 8-byte lines of decompression history.
+  ram_odd_inst: vhsnunzip_ram
+    generic map (
+      RAM_STYLE => RAM_STYLE
+    )
+    port map (
+      clk       => clk,
+      reset     => reset,
+      a_cmd     => od_wr_cmd,
+      a_resp    => open,
+      b_cmd     => od_rd_cmd,
+      b_resp    => od_rd_resp
+    );
 
 end behavior;

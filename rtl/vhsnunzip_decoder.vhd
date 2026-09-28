@@ -34,11 +34,11 @@ begin
 
     -- Next offset, in case the data we're decoding actually consists of
     -- element headers and not literal data/
-    variable offns  : unsigned(LB_LOG2 downto 0) := (others => '0');
+    variable offns  : unsigned(3 downto 0) := (others => '0');
     variable offn   : unsigned(16 downto 0) := (others => '0');
 
     -- Same as `off`, but modulo the line width and converted to integer.
-    variable ofi    : natural range 0 to LB-1 := 0;
+    variable ofi    : natural range 0 to 7 := 0;
 
     -- Output holding register.
     variable elh    : element_stream := ELEMENT_STREAM_INIT;
@@ -66,8 +66,8 @@ begin
         ---------------------------------------------------------------------
         -- Handle copy elements
         ---------------------------------------------------------------------
-        offns := resize(off(LB_LOG2-1 downto 0), LB_LOG2+1);
-        ofi := to_integer(off(LB_LOG2-1 downto 0));
+        offns := resize(off(2 downto 0), 4);
+        ofi := to_integer(off(2 downto 0));
 
         case cdh.data(ofi)(1 downto 0) is
 
@@ -109,7 +109,7 @@ begin
         ---------------------------------------------------------------------
         -- Handle literal elements
         ---------------------------------------------------------------------
-        ofi := to_integer(offns(LB_LOG2-1 downto 0));
+        ofi := to_integer(offns(2 downto 0));
 
         if offns > cdh.endi then
           -- No element (for now); beyond end of stream or starts on the next
@@ -175,7 +175,7 @@ begin
         -- indicate to the datapath that it should pop from the literal line
         -- stream after executing this command to stay in sync.
         if off > cdh.endi then
-          off := off - LB;
+          off := off - 8;
           cdh.valid := '0';
           elh.ld_pop := '1';
           elh.last := cdh.last;

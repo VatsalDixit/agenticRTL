@@ -5,21 +5,7 @@ use ieee.numeric_std.all;
 library work;
 use work.vhsnunzip_int_pkg.all;
 
--- AXI-stream FIFO using byte_array data.
---
--- The storage used to be a shift-on-write shift register (vhsnunzip_srl) read
--- through a combinational address mux driven by the fill level. That mux is
--- DEPTH_LOG2 levels of logic in front of *everything* downstream of the FIFO,
--- and downstream of the command FIFO in particular sits the entire stage-1
--- thermometer/lookahead/short-term-address cloud, while downstream of the
--- decompressed data FIFO sits the toplevel output port and the history RAM
--- write data. So instead we shift on *read*, towards slot 0, and write into a
--- decoded slot index. Slot 0 is then always the oldest entry, and the read
--- port is a plain flip-flop output with no logic in front of it at all.
---
--- The level counter, the empty/full/valid/ready semantics and the write-to-
--- read latency are exactly as they were, so this is cycle-for-cycle identical
--- to the old implementation.
+-- AXI-stream FIFO using byte_array data, derived from SRLs.
 entity vhsnunzip_fifo is
   generic (
 
@@ -29,7 +15,8 @@ entity vhsnunzip_fifo is
     -- Control port width in bits.
     CTRL_WIDTH  : natural := 0;
 
-    -- log2 of the memory depth.
+    -- log2 of the memory depth. Less than 5 does not reduce logic utilization
+    -- on Xilinx architectures; SRL32 primitives will be inferred.
     DEPTH_LOG2  : natural := 5
 
   );
@@ -50,7 +37,8 @@ entity vhsnunzip_fifo is
     rd_ctrl     : out std_logic_vector(CTRL_WIDTH-1 downto 0);
 
     -- FIFO level. This is diminished-one-encoded! That is, -1 is empty, 0 is
-    -- one valid entry, etc.
+    -- one valid entry, etc. This has to do with how Xilinx SRL primitive read
+    -- addresses work.
     level       : out unsigned(DEPTH_LOG2 downto 0);
 
     -- Empty and full status signals, derived from level.
@@ -62,17 +50,8 @@ end vhsnunzip_fifo;
 
 architecture behavior of vhsnunzip_fifo is
 
-  -- Number of storage slots.
-  constant DEPTH  : natural := 2**DEPTH_LOG2;
-
   -- Internal copy of the FIFO level, see level port for more info.
   signal level_s  : unsigned(DEPTH_LOG2 downto 0) := (others => '1');
-
-  -- Registered copy of level_s + 1, which is the number of entries currently
-  -- in the FIFO. Precomputed in a register so that the write slot index below
-  -- is a 2:1 mux between two flip-flop outputs rather than an incrementer in
-  -- front of the write address decoder.
-  signal level_p1 : unsigned(DEPTH_LOG2 downto 0) := (others => '0');
 
   -- Internal copies of the empty and full status signals.
   signal empty_s  : std_logic;
@@ -83,19 +62,10 @@ architecture behavior of vhsnunzip_fifo is
   signal wr_ena   : std_logic;
   signal rd_ena   : std_logic;
 
-  -- Slot index that a new entry is written into. This is the number of entries
-  -- that will still be in the FIFO after the read (if any) of this cycle.
-  signal wr_idx   : unsigned(DEPTH_LOG2-1 downto 0);
-
   -- Concatenated versions of the wr_data and rd_data byte arrays.
   constant WIDTH  : natural := DATA_WIDTH*8 + CTRL_WIDTH;
   signal wr_data_concat : std_logic_vector(WIDTH-1 downto 0);
   signal rd_data_concat : std_logic_vector(WIDTH-1 downto 0);
-
-  -- The storage itself. Slot 0 holds the oldest entry, i.e. the one presented
-  -- on the read port.
-  type slot_array is array (natural range <>) of std_logic_vector(WIDTH-1 downto 0);
-  signal slots    : slot_array(0 to DEPTH-1) := (others => (others => '0'));
 
 begin
 
@@ -113,7 +83,6 @@ begin
         level_v := level_v + 1;
       end if;
       level_s <= level_v;
-      level_p1 <= level_v + 1;
 
       -- Precompute the full signal and store it in a register.
       if level_v = 2**DEPTH_LOG2-1 then
@@ -125,7 +94,6 @@ begin
       -- Handle reset.
       if reset = '1' then
         level_s <= (others => '1');
-        level_p1 <= (others => '0');
         full_s <= '0';
       end if;
 
@@ -142,32 +110,19 @@ begin
   rd_valid <= not empty_s;
   rd_ena <= rd_ready and not empty_s;
 
-  -- Determine which slot a new entry goes into. With N entries in the FIFO
-  -- before this cycle's transfers, the new entry belongs at index N when
-  -- nothing is read and at index N-1 when something is read (because the
-  -- read shifts everything one slot down). N is level_s + 1, which is
-  -- available as a register, and N-1 is level_s itself, so this is a plain
-  -- 2:1 mux between two flip-flop outputs.
-  wr_idx <= level_s(DEPTH_LOG2-1 downto 0) when rd_ena = '1'
-       else level_p1(DEPTH_LOG2-1 downto 0);
-
-  -- Storage. On a read everything shifts one slot towards slot 0; a write
-  -- overrides the shift for the one slot it targets (the shifted-in value
-  -- there would be an invalid entry anyway).
-  slot_proc: process (clk) is
-  begin
-    if rising_edge(clk) then
-      for i in 0 to DEPTH-1 loop
-        if wr_ena = '1' and to_integer(wr_idx) = i then
-          slots(i) <= wr_data_concat;
-        elsif rd_ena = '1' and i < DEPTH-1 then
-          slots(i) <= slots(i+1);
-        end if;
-      end loop;
-    end if;
-  end process;
-
-  rd_data_concat <= slots(0);
+  -- Use an SRL as backing memory for the FIFO.
+  srl_inst: vhsnunzip_srl
+    generic map (
+      WIDTH       => WIDTH,
+      DEPTH_LOG2  => DEPTH_LOG2
+    )
+    port map (
+      clk         => clk,
+      wr_ena      => wr_ena,
+      wr_data     => wr_data_concat,
+      rd_addr     => level_s(DEPTH_LOG2-1 downto 0),
+      rd_data     => rd_data_concat
+    );
 
   -- Pack/unpack the data vectors.
   pack_proc: process (wr_data, wr_ctrl) is
