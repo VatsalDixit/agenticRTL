@@ -107,8 +107,7 @@ def _svg_chart(points, base_value, title, unit):
 
 
 _TIMING_CELL = (('plan_s', 'plan'), ('check_s', 'check'), ('write_s', 'write'),
-                ('stall_s', 'waited'), ('rebase_s', 'merge'), ('measure_s', 'measure'),
-                ('synth_s', 'synth'), ('learn_s', 'learn'))
+                ('measure_s', 'measure'), ('synth_s', 'synth'), ('learn_s', 'learn'))
 
 
 def _timing_cell(timing):

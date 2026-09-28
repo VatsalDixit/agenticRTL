@@ -102,11 +102,26 @@ again next iteration. So the loop hands over what it already knows:
 | measure N candidates | ~1 min with Yosys, ~20 min with Vivado (in parallel) | GHDL in WSL + the synthesis backend |
 | learn | ~50 s | one model call, no tools |
 
-So an iteration is the slowest session plus about two minutes, and it ends
-when that session ends: sessions are capped at `session_timeout_min` (30) and
+So an iteration is the slowest session plus about two minutes (plus the
+synthesis, under Vivado), and it ends when that session ends: sessions are
+capped at `session_timeout_min` (30) and
 are told when three quarters of their budget is gone, because a session that
 is killed mid-change leaves a half-built design that gets measured as if it
 were the change it meant to make.
+
+Every iteration records these times as measured, not estimated: `timing` in
+state.json (plan, check, write, measure with its simulation and synthesis
+parts, learn), a time column in report.html, and a `time iN:` line in
+loop.log. Time spent waiting for the usage window is summed in `wait_s`.
+
+A queued schedule was tried on the HACC backend (one candidate per
+iteration from a ranked list of six, the next written while the last was
+measured; run hacc-q1, 15 iterations, +37.2%). The overlap hid the
+synthesis, but the list went stale as soon as the first direction was
+adopted, and two of fifteen sessions were thrown away because they
+conflicted with a change adopted while they were being written. It was
+removed; a plan made every iteration for N candidates in parallel is the
+schedule.
 
 The loop never stops because a model call failed. On a usage limit it waits
 for the reset time the provider reports (the CLI sends it; the message text is
@@ -151,8 +166,8 @@ python agentic/loop.py --resume --run run-20260915-0300      # continue after a 
 python agentic/loop.py --status --run run-20260915-0300      # live view in the terminal
 ```
 
-Options: `--candidates N` (parallel sessions, default 3), `--queue` and
-`--plan-size N` (the queue schedule below), `--model opus`,
+Options: `--candidates N` (parallel sessions, default 2 from `candidates` in
+config.json; the best adoptable one is kept), `--model opus`,
 `--patience K` (stop after K iterations without a winner; default never),
 `--max-hours H`, `--dry-run` (baseline and plan only, no coding sessions),
 `--skills-from RUN` (start the library from a finished run's verified facts
@@ -207,35 +222,6 @@ checkout is never modified by the loop.
    wrong trade for a throughput goal.
 4. Among adoptable candidates the lowest score wins and the run branch
    moves to its commit.
-
-## The queue schedule (`--queue`)
-
-The default schedule writes N candidates in parallel and then measures them
-all, so the model sits idle while synthesis runs. That was a minute under
-Yosys; under Vivado it is 6 to 20 minutes a round. With `--queue`:
-
-- the planner ranks `--plan-size` directions (default 6) and is asked again
-  only when that queue is used up;
-- each iteration writes ONE candidate, from the front of the queue, on the
-  best design so far;
-- while it is measured in the background, the next one is already being
-  written, so measuring costs no wall-clock time as long as a session takes
-  longer than a synthesis;
-- the one in flight is settled (scored, adopted if it wins) before the next
-  one starts measuring, so every candidate is merged onto and scored against
-  the design it would replace. A candidate written while its predecessor was
-  adopted is merged onto the new best first; if the two conflict, its
-  direction goes back to the front of the queue and is rebuilt.
-
-`--iters` counts candidates under this schedule. The schedule is stored in
-the run, so `--resume` keeps it, and a measurement in flight when the process
-died is measured again on resume. The learning call runs while the next
-measurement does, not on the critical path.
-
-Every iteration records the time of each step (`timing` in state.json, the
-time column in report.html, a `time iN:` line in loop.log): plan, check,
-write, waiting on the previous measurement, merge, measure (with simulation
-and synthesis), learn. Waiting for the usage window is summed in `wait_s`.
 
 ## Synthesis backends
 

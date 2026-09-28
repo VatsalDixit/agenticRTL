@@ -691,21 +691,7 @@ parallel RTL-writing sessions should each attempt this iteration. Reply with
 JSON only."""
 
 
-PARALLEL_ASK = 'Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:'
-
-# Queue mode builds the list one entry at a time, each on the best design so
-# far, and asks again only when the list is used up. So the order is the
-# plan, and an entry must still make sense after the ones before it land.
-SEQUENTIAL_ASK = """\
-Choose %d DIFFERENT directions, RANKED with the most promising first. They are
-built ONE AT A TIME in your order, each on the best design so far: a direction
-that is adopted changes the design every later one starts from, so each must
-still make sense if the ones before it succeed. The rule below about
-direction 1 applies to the FIRST entry. Rules:"""
-
-
-def build_plan_prompt(ctx, n, sequential=False):
-    ask_line = SEQUENTIAL_ASK % n if sequential else PARALLEL_ASK % (n, n)
+def build_plan_prompt(ctx, n):
     return """\
 GOAL: %s
 ITERATION %d of %d. Progress so far: %s
@@ -727,7 +713,7 @@ FACTS SESSIONS HAVE VERIFIED ABOUT THIS DESIGN
 HISTORY (most recent last)
 %s
 
-%s
+Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
 - Each direction targets the measured bottleneck or a credible second one;
   never an idle stage. Prefer high-confidence skills that fit the profile.
 - Direction 1 MUST raise the per-cycle ceiling of the stage the lever names
@@ -764,7 +750,7 @@ Reply with JSON only:
        ctx['state_text'], ctx['profile_text'], ctx['lever']['lever'],
        ctx['lever']['reason'], ctx['skills_text'],
        ctx.get('facts_text') or '(none recorded yet)',
-       ctx['history_text'] or '(nothing tried yet)', ask_line)
+       ctx['history_text'] or '(nothing tried yet)', n, n)
 
 
 FALLBACK_DIRECTIONS = [
@@ -780,10 +766,9 @@ FALLBACK_DIRECTIONS = [
 ]
 
 
-def plan_directions(ctx, n, log, sequential=False):
-    """N directions for this iteration, or with ``sequential`` a ranked queue
-    of N to build one after another. Falls back to fixed ones on failure."""
-    res = ask(build_plan_prompt(ctx, n, sequential), system=PLAN_SYSTEM,
+def plan_directions(ctx, n, log):
+    """N directions for this iteration. Falls back to fixed ones on failure."""
+    res = ask(build_plan_prompt(ctx, n), system=PLAN_SYSTEM,
               model=CONFIG['helper_model'], max_turns=1, budget=2.0,
               timeout_s=600, effort='medium')
     data = extract_json(res.get('text', '')) if res.get('status') == 'ok' else None

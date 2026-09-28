@@ -177,8 +177,8 @@ def fake_write_candidates(assignments, log):
         path = os.path.join(asg['worktree'], rel)
         with open(path, encoding='utf-8', errors='replace') as fil:
             text = fil.read()
-        # Each edit is unique to its candidate, so two written on the same
-        # base conflict when one is merged onto the other, as real ones can.
+        # Each edit is unique to its candidate, so two scripted candidates
+        # are never the same commit.
         with open(path, 'w', encoding='utf-8', newline='\n') as fil:
             fil.write(transform(text).replace(
                 'no functional change', 'no functional change (%s)' % asg['branch'], 1))
@@ -891,13 +891,11 @@ def adopt(run, winner, metrics, k, log):
                      'iteration': k, 'id': winner['id']}
     run.set_progress()
     log('ADOPTED %s: %s' % (winner['id'], progress_text(state)))
-    run.write_guide(notes=propose.notes_section(winner.get('notes') or '',
-                                                'how it works'),
-                    facts=state.get('design_facts'))
+    # Kept so a later refresh of the guide (new facts, same design) still
+    # explains how the design it describes works.
+    state['guide_notes'] = propose.notes_section(winner.get('notes') or '', 'how it works')
+    run.write_guide(notes=state['guide_notes'], facts=state.get('design_facts'))
     run.check_text = ''            # the design changed; the check must too
-
-
-NOT_MEASURED = ('no_proposal', 'stale_conflict')
 
 
 def record_outcomes(skills_data, cands):
@@ -908,7 +906,7 @@ def record_outcomes(skills_data, cands):
     is not the mechanism it set out to build.
     """
     for c in cands:
-        if c['commit'] and c['outcome'] not in NOT_MEASURED and not c.get('truncated'):
+        if c['commit'] and c['outcome'] != 'no_proposal' and not c.get('truncated'):
             primary = (c.get('primary_skill')
                        or (c['direction'].get('skill_ids') or [None])[0])
             if primary:
@@ -989,10 +987,8 @@ def append_record(run, record, log):
 
 
 TIMING_ORDER = (('plan_s', 'plan'), ('check_s', 'check'), ('write_s', 'write'),
-                ('stall_s', 'waiting on the previous measurement'),
-                ('rebase_s', 'merge onto new best'), ('measure_s', 'measure'),
-                ('sim_s', 'of which simulation'), ('synth_s', 'of which synthesis'),
-                ('learn_s', 'learn'))
+                ('measure_s', 'measure'), ('sim_s', 'of which simulation'),
+                ('synth_s', 'of which synthesis'), ('learn_s', 'learn'))
 
 
 def timing_text(timing):
@@ -1127,6 +1123,7 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
 
     cands = [candidate_from_session(asg, res, k, iter_dir, log)
              for asg, res in zip(assignments, results)]
+    facts_before = list(state.get('design_facts') or [])
     keep_facts(state, cands)
 
     # earlier rejected candidates with a big gain, re-merged onto the best
@@ -1175,6 +1172,12 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         adopt(run, winner, raw[winner['label']], k, log)
     else:
         log('nothing adopted this iteration')
+        # The coding sessions read the facts only through the guide, which
+        # adopt() rebuilds. Without this, facts verified in an iteration that
+        # adopted nothing reached the planner but not the next sessions --
+        # and most iterations adopt nothing.
+        if state.get('design_facts') != facts_before:
+            run.write_guide(notes=state.get('guide_notes'), facts=state.get('design_facts'))
 
     # learn
     run.status.set(phase='learn', detail='updating the skill library')
@@ -1192,307 +1195,6 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     return 'adopted' if winner else 'none'
 
 
-# ---------------------------------------------------------------------------
-# the queue schedule
-#
-# One candidate per iteration, taken from a ranked queue of directions that
-# the planner fills only when it runs dry. While a candidate is measured (a
-# Vivado place-and-route is minutes to hours) the next one is already being
-# written. At most one measurement is in flight, and it is settled -- scored,
-# adopted if it wins -- before the next one starts, so every candidate is
-# merged onto and scored against the design it would actually replace.
-
-class Pipe(object):
-    """The one candidate being measured while the next one is written."""
-
-    def __init__(self):
-        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.job = None
-
-    @property
-    def busy(self):
-        return self.job is not None
-
-    def done(self):
-        return self.job is not None and self.job['future'].done()
-
-    def start(self, job, draws):
-        job['t0'] = time.time()
-        rtl = os.path.join(job['asg']['worktree'], 'rtl')
-        fut = self.pool.submit(measure_one, (rtl, job['measure_dir'], draws))
-        fut.add_done_callback(lambda _f, job=job: job.__setitem__('t_done', time.time()))
-        job['future'] = fut
-        self.job = job
-
-
-def in_flight_record(job):
-    """What a restarted loop needs to measure this candidate again."""
-    return {'k': job['k'], 'direction': job['direction'],
-            'cand': {kk: vv for kk, vv in job['cand'].items() if kk != 'metrics'},
-            'asg': {kk: job['asg'].get(kk) for kk in
-                    ('label', 'worktree', 'branch', 'direction', 'start')},
-            'iter_dir': job['iter_dir'], 'measure_dir': job['measure_dir'],
-            'timing': job['timing']}
-
-
-def resume_in_flight(run, pipe, draws, log):
-    """Start again the measurement a stopped loop left unfinished."""
-    rec = run.state.get('in_flight')
-    if not rec:
-        return
-    asg = dict(rec['asg'])
-    if not os.path.isdir(asg['worktree']):
-        remove_worktree(asg['worktree'])
-        git(['worktree', 'add', '--detach', asg['worktree'], rec['cand']['commit']])
-    log('measuring i%d (%s) again: it was being measured when the loop stopped'
-        % (rec['k'], rec['cand'].get('id')))
-    pipe.start({'k': rec['k'], 'direction': rec['direction'], 'cand': dict(rec['cand']),
-                'asg': asg, 'iter_dir': rec['iter_dir'],
-                'measure_dir': rec['measure_dir'], 'timing': dict(rec['timing'])}, draws)
-
-
-def settle(run, pipe, skills_data, log):
-    """Wait for the candidate in flight, score it, adopt it if it wins, record it.
-
-    Returns the job so that learn_settled can run the learning call once the
-    next measurement is under way, instead of on the critical path.
-    """
-    job = pipe.job
-    t0 = time.time()
-    if not job['future'].done():
-        run.status.set(phase='measure', detail='waiting for i%d on %s'
-                       % (job['k'], CONFIG['synth_backend']))
-        log('waiting for i%d to finish measuring...' % job['k'])
-    metrics = job['future'].result()
-    pipe.job = None
-    state = run.state
-    timing = job['timing']
-    timing['stall_s'] = round(time.time() - t0, 1)
-    timing['measure_s'] = round(job.get('t_done', time.time()) - job['t0'], 1)
-    timing['sim_s'] = metrics.get('sim_seconds')
-    timing['synth_s'] = metrics.get('synth_seconds')
-    c = job['cand']
-    score_candidate(c, job['asg'], metrics, state['best']['metrics'], state['goal'],
-                    ram_latency(os.path.join(run.base_dir, 'rtl')),
-                    job['measure_dir'], log)
-    advantages([c])
-    winner = None
-    if c.get('adoptable'):
-        winner = c
-        adopt(run, c, metrics, job['k'], log)
-    else:
-        log('nothing adopted at i%d' % job['k'])
-    record_outcomes(skills_data, [c])
-    skills_mod.save(skills_data, run.skills_path)
-    job['record'] = make_record(state, job['k'], [job['direction']], [c], winner,
-                                [], [], timing)
-    state['in_flight'] = None
-    append_record(run, job['record'], log)
-    try:
-        remove_worktree(job['asg']['worktree'])
-    except GitError as exc:
-        log('  (%s)' % exc)
-    return job
-
-
-def learn_settled(run, job, skills_data, log, fake):
-    if job is None:
-        return
-    t0 = time.time()
-    ctx = build_ctx(run.state, skills_data, job['k'], guide_text=run.guide_text())
-    changed, lessons = learn_step(ctx, [job['cand']], skills_data, job['iter_dir'],
-                                  log, fake)
-    record = job['record']
-    record['skills_changed'], record['lessons'] = changed, lessons
-    if not fake:
-        record['timing']['learn_s'] = round(time.time() - t0, 1)
-    skills_mod.save(skills_data, run.skills_path)
-    run.save()
-
-
-def drain(run, pipe, skills_data, log, fake):
-    """Finish the measurement in flight: before a wait, a restart or a stop."""
-    if pipe is not None and pipe.busy:
-        learn_settled(run, settle(run, pipe, skills_data, log), skills_data, log, fake)
-
-
-def onto_best(path, best, k, label):
-    """Merge the design adopted while this candidate was being written into it.
-
-    Returns the merge commit, or None when the two changes conflict.
-    """
-    if git_ok(['-c', 'user.name=agentic-loop', '-c', 'user.email=agentic@localhost',
-               'merge', '--no-edit', '-m', 'agentic i%d %s: onto the new best'
-               % (k, label), best], cwd=path):
-        return git(['rev-parse', 'HEAD'], cwd=path)
-    git_ok(['merge', '--abort'], cwd=path)
-    return None
-
-
-def trailing_misses(state):
-    """Iterations since the last adoption, counted from the records."""
-    n = 0
-    for it in reversed(state['iterations']):
-        if it.get('winner'):
-            break
-        n += 1
-    return n
-
-
-def run_queue_iteration(run, draws, skills_data, k, pipe, dry_run=False, fake=False):
-    """Write one candidate, settle the one before it, and start measuring this one."""
-    state = run.state
-    log = run.log
-    timing = {}
-    pending = state.get('pending') or {}
-    resuming = pending.get('slots') if pending.get('iteration') == k else None
-    if resuming:
-        resuming = [s for s in resuming if os.path.isdir(s.get('worktree', ''))]
-    state['pending'] = None
-    queue = state.setdefault('queue', [])
-    parent = state['best']['metrics']
-    iter_dir = os.path.join(run.dir, 'iter-%d' % k)
-    os.makedirs(iter_dir, exist_ok=True)
-    log('== iteration %d of %d: one candidate, %d direction(s) queued =='
-        % (k, state['max_iters'], len(queue)))
-    log('best so far: %s' % progress_text(state))
-    log('lever: %s -- %s' % (parent.get('lever', {}).get('lever'),
-                             parent.get('lever', {}).get('reason')))
-    ctx = build_ctx(state, skills_data, k, guide_text=run.guide_text())
-    ctx['check_text'] = run.check_text
-
-    if resuming:
-        asg = dict(resuming[0], resumed=True)
-        direction = asg['direction']
-        log('continuing the session the usage limit interrupted')
-    else:
-        if not queue:
-            run.status.set(phase='plan', iteration=k,
-                           detail='queueing %d directions' % state['plan_size'])
-            t0 = time.time()
-            directions, plan_res = propose.plan_directions(ctx, state['plan_size'], log,
-                                                           sequential=True)
-            timing['plan_s'] = round(time.time() - t0, 1)
-            queue.extend(directions)
-            write_json(os.path.join(iter_dir, 'plan.json'),
-                       {'directions': directions, 'call': call_record(plan_res)})
-            for j, d in enumerate(directions, 1):
-                log('  queued %d: %s' % (j, d['focus'][:140]))
-            run.save()
-        if dry_run:
-            log('dry run: stopping before any coding session')
-            return None
-        direction = queue.pop(0)
-        log('  building: %s' % direction['focus'][:160])
-        start = git(['rev-parse', 'HEAD'], cwd=run.base_dir)
-        try:
-            asg = new_assignment(state, k, 'c1', direction, start, iter_dir)
-        except GitError as exc:
-            queue.insert(0, direction)
-            log('could not prepare the candidate worktree: %s' % exc)
-            return 'error'
-
-    if not run.check_text:
-        run.status.set(phase='check', iteration=k, detail='running the starting check once')
-        t0 = time.time()
-        run.check_text = starting_check(run.base_dir, log)
-        timing['check_s'] = round(time.time() - t0, 1)
-        ctx['check_text'] = run.check_text
-
-    detail = 'writing i%d' % k
-    if pipe.busy:
-        detail += '; measuring i%d on %s' % (pipe.job['k'], CONFIG['synth_backend'])
-    run.status.set(phase='write', iteration=k, detail=detail)
-    log('writing i%d (model %s, up to %d min)%s'
-        % (k, CONFIG['model'], int(CONFIG['session_timeout_min']),
-           '; i%d is measured meanwhile' % pipe.job['k'] if pipe.busy else ''))
-    t0 = time.time()
-    if fake:
-        results = fake_write_candidates([asg], log)
-    else:
-        results = propose.write_candidates(ctx, [asg], log,
-                                           rate=propose.burn_rate(state, CONFIG['model']))
-    timing['write_s'] = round(time.time() - t0, 1)
-    res = results[0]
-    log_session(log, asg['label'], res['session'])
-    window = latest_window(results)
-    if window:
-        state['window'] = window
-        log('  usage window: %s' % window_text(window))
-
-    status = res['session'].get('status')
-    spent = round(res['session'].get('cost_usd') or 0, 2)
-    produced = bool(res['proposal']) and res['proposal'].get('id') not in (None, 'none')
-    if not produced and status == 'limit':
-        run.limit_message = res['session'].get('error') or ''
-        state['discarded_usd'] = round((state.get('discarded_usd') or 0) + spent, 2)
-        state['pending'] = {'iteration': k, 'slots': [
-            {kk: asg.get(kk) for kk in ('label', 'worktree', 'branch', 'direction', 'start')}]}
-        log('  keeping the worktree so the session can be continued after the wait '
-            '($%.2f spent so far on this attempt)' % spent)
-        return 'limit'
-    if not produced and status not in ('ok', 'budget'):
-        err = (res['session'].get('error') or '')[:200]
-        log('the session failed: %s' % err)
-        state['discarded_usd'] = round((state.get('discarded_usd') or 0) + spent, 2)
-        try:
-            remove_worktree(asg['worktree'])
-        except GitError as exc:
-            log('  (%s)' % exc)
-        git_ok(['branch', '-D', asg['branch']])
-        queue.insert(0, direction)          # not lost: it is tried again next time
-        if re.search(r'exit code (?:1073807364|3221225786|3221225794)', err):
-            return 'killed'
-        return 'error'
-
-    cand = candidate_from_session(asg, res, k, iter_dir, log)
-    keep_facts(state, [cand])
-
-    # The one before is settled first: this one is measured on the design
-    # that leaves as the best, and nothing may be adopted while it runs.
-    settled = settle(run, pipe, skills_data, log) if pipe.busy else None
-
-    if cand['commit'] and cand['outcome'] not in NOT_MEASURED:
-        best = state['best']['commit']
-        if asg.get('start') and best != asg['start']:
-            t0 = time.time()
-            sha = onto_best(asg['worktree'], best, k, asg['label'])
-            timing['rebase_s'] = round(time.time() - t0, 1)
-            if sha:
-                cand['commit'] = sha
-                cand['files_changed'] = git(['diff', '--name-only', best, sha],
-                                            cwd=asg['worktree']).splitlines()
-                cand['rebased_onto'] = best
-                log('  merged onto %s, adopted while this one was being written'
-                    % state['best'].get('id'))
-            else:
-                cand['outcome'] = 'stale_conflict'
-                cand['reason'] = ('conflicts with %s, adopted while this one was being '
-                                  'written; its direction goes back to the front of '
-                                  'the queue' % state['best'].get('id'))
-                queue.insert(0, direction)
-                log('  %s' % cand['reason'])
-
-    if cand['commit'] and cand['outcome'] not in NOT_MEASURED:
-        job = {'k': k, 'direction': direction, 'cand': cand, 'asg': asg,
-               'iter_dir': iter_dir, 'measure_dir': os.path.join(iter_dir, 'c1-measure'),
-               'timing': timing}
-        pipe.start(job, draws)
-        state['in_flight'] = in_flight_record(job)
-        run.save()
-        log('measuring i%d on %s in the background' % (k, CONFIG['synth_backend']))
-    else:
-        append_record(run, make_record(state, k, [direction], [cand], None, [], [], timing),
-                      log)
-        try:
-            remove_worktree(asg['worktree'])
-        except GitError as exc:
-            log('  (%s)' % exc)
-
-    learn_settled(run, settled, skills_data, log, fake)
-    return 'queued'
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1501,12 +1203,6 @@ def main():
     ap.add_argument('--iters', type=int, default=None,
                     help='iteration cap (default 100; on --resume keeps the run\'s cap)')
     ap.add_argument('--candidates', type=int, default=None)
-    ap.add_argument('--queue', action='store_true',
-                    help='one candidate per iteration from a ranked queue of '
-                         'directions, the next written while the last is measured')
-    ap.add_argument('--plan-size', dest='plan_size', type=int, default=6,
-                    help='with --queue: directions the planner queues each time '
-                         'the queue runs dry (default 6)')
     ap.add_argument('--skills-from', dest='skills_from', default=None,
                     help='start the skill library from a finished run: its '
                          'verified facts and its avoid entries, counters reset')
@@ -1567,10 +1263,7 @@ def main():
             return 1
         run.state = {
             'run': name, 'goal_text': goal['text'], 'goal': goal,
-            'max_iters': args.iters or 100,
-            'candidates': 1 if args.queue else n_cands,
-            'schedule': 'queue' if args.queue else 'parallel',
-            'plan_size': max(1, args.plan_size), 'queue': [],
+            'max_iters': args.iters or 100, 'candidates': n_cands,
             'synth_backend': CONFIG['synth_backend'],
             'started': now_iso(), 'base_commit': base_commit,
             'branch': branch, 'baseline': None,
@@ -1580,9 +1273,6 @@ def main():
         log('goal: %s  (metric %s, target %s)' % (
             goal['text'], goal['metric'],
             '%+.0f%%' % goal['target_pct'] if goal['target_pct'] else 'as far as possible'))
-        if args.queue:
-            log('schedule: one candidate per iteration from a queue of %d directions, '
-                'the next written while the last is measured' % run.state['plan_size'])
     else:
         measured_by = backend_of(run.state.get('baseline'))
         if run.state.get('baseline') and measured_by != CONFIG['synth_backend']:
@@ -1678,21 +1368,11 @@ def main():
         error_waits = 0
         t_start = time.time()
         k = len(state['iterations']) + 1
-        pipe = Pipe() if state.get('schedule') == 'queue' else None
-        if pipe is not None and state.get('in_flight'):
-            resume_in_flight(run, pipe, draws, log)
-            k = state['in_flight']['k'] + 1
         while k <= state['max_iters']:
-            # A measurement that has already finished is settled before
-            # anything is decided: it may be the one that meets the target.
-            if pipe is not None and pipe.done():
-                drain(run, pipe, skills_data, log, args.fake)
             gain = goal_gain(state['best']['metrics'], state['baseline'], state['goal'])
             if target and gain is not None and gain >= target:
                 state['stopped'] = 'target met: %+.2f%% on %s' % (gain, state['goal']['metric'])
                 break
-            if pipe is not None:
-                since_winner = trailing_misses(state)
             if args.patience and since_winner >= args.patience:
                 state['stopped'] = '%d iterations without a winner' % since_winner
                 break
@@ -1713,7 +1393,6 @@ def main():
                 log('the usage window is %.0f%% gone and resets in %d min; '
                     'waiting rather than starting sessions that would be cut off'
                     % (100.0 * win['utilization'], left // 60))
-                drain(run, pipe, skills_data, log, args.fake)
                 run.status.set(phase='waiting', detail='window nearly spent')
                 t_wait = time.time()
                 time.sleep(max(0, (win.get('resets_at') or 0) - time.time() + 60))
@@ -1721,9 +1400,6 @@ def main():
                 continue
             if kit_mtime() > KIT_MTIME + 0.5 and not args.dry_run:
                 if kit_compiles(log):
-                    # The restarted process cannot see a measurement this
-                    # one started, so it is finished here first.
-                    drain(run, pipe, skills_data, log, args.fake)
                     log('the kit changed on disk; restarting to pick it up '
                         '(resuming run %s at iteration %d)' % (name, k))
                     run.status.set(phase='reloading', detail='kit changed on disk')
@@ -1732,12 +1408,8 @@ def main():
                         globals()['KIT_MTIME'] = kit_mtime()
                 else:
                     globals()['KIT_MTIME'] = kit_mtime()
-            if pipe is not None:
-                outcome = run_queue_iteration(run, draws, skills_data, k, pipe,
-                                              dry_run=args.dry_run, fake=args.fake)
-            else:
-                outcome = run_iteration(run, draws, skills_data, k, n_cands,
-                                        dry_run=args.dry_run, fake=args.fake)
+            outcome = run_iteration(run, draws, skills_data, k, n_cands,
+                                    dry_run=args.dry_run, fake=args.fake)
             if args.dry_run:
                 state['stopped'] = 'dry run'
                 break
@@ -1763,10 +1435,9 @@ def main():
                 log('the model provider reports a usage limit; waiting %d min (wait %d)'
                     % (wait // 60, limit_waits))
                 t_wait = time.time()
-                drain(run, pipe, skills_data, log, args.fake)
                 run.status.set(phase='waiting',
                                detail='usage limit; retrying in %d min' % (wait // 60))
-                time.sleep(max(0, wait - (time.time() - t_wait)))
+                time.sleep(wait)
                 state['wait_s'] = round((state.get('wait_s') or 0) + time.time() - t_wait, 1)
                 continue
             if outcome == 'killed':
@@ -1781,19 +1452,14 @@ def main():
                     break
                 log('every session failed; waiting 5 min then retrying (attempt %d)'
                     % error_waits)
-                t_wait = time.time()
-                drain(run, pipe, skills_data, log, args.fake)
                 run.status.set(phase='waiting', detail='sessions failed; retrying in 5 min')
-                time.sleep(max(0, 300 - (time.time() - t_wait)))
+                time.sleep(300)
                 continue
             limit_waits = error_waits = 0
             since_winner = 0 if outcome == 'adopted' else since_winner + 1
             k += 1
         else:
             state['stopped'] = 'iteration cap of %d reached' % state['max_iters']
-        # Every normal way out passes here; an interrupt or a crash does not,
-        # and leaves `in_flight` in the state for --resume to measure again.
-        drain(run, pipe, skills_data, log, args.fake)
     except KeyboardInterrupt:
         tools_kill_all()
         state['stopped'] = 'interrupted'
@@ -1831,12 +1497,7 @@ def main():
 
 
 def timing_totals(state):
-    """Each step's time summed over the run's iterations.
-
-    Under the queue schedule `measure` overlaps the next candidate's `write`,
-    so the steps add up to more than the wall clock; `waiting on the previous
-    measurement` is the part of measuring that was not hidden that way.
-    """
+    """Each step's time summed over the run's iterations."""
     totals = {}
     for it in state.get('iterations', []):
         for key, val in (it.get('timing') or {}).items():

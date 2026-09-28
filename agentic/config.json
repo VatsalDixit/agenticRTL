@@ -4,7 +4,7 @@
   "model": "sonnet",
   "effort": "high",
   "helper_model": "sonnet",
-  "candidates": 3,
+  "candidates": 2,
   "session_budget_usd": 10.0,
   "session_max_turns": 300,
   "session_timeout_min": 30,
