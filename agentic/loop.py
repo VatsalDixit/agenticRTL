@@ -311,6 +311,12 @@ def evaluate(metrics, parent, goal):
     """Score one measured candidate against the parent design."""
     out = {'measured': {}, 'score': None, 'adoptable': False, 'outcome': '',
            'reason': ''}
+    if metrics.get('measure_error'):
+        # The tools failed, not the design: never a correctness verdict, and
+        # never counted against the skill the candidate used.
+        out['outcome'] = 'measure_error'
+        out['reason'] = metrics['measure_error']
+        return out
     if metrics.get('error'):
         out['outcome'] = 'failed_compile'
         out['reason'] = metrics['error']
@@ -898,6 +904,11 @@ def adopt(run, winner, metrics, k, log):
     run.check_text = ''            # the design changed; the check must too
 
 
+# Outcomes that say nothing about the mechanism a candidate tried: no change
+# was made, or the measurement itself failed.
+NOT_MEASURED = ('no_proposal', 'measure_error')
+
+
 def record_outcomes(skills_data, cands):
     """Move the skill counters for the candidates that were measured.
 
@@ -906,7 +917,7 @@ def record_outcomes(skills_data, cands):
     is not the mechanism it set out to build.
     """
     for c in cands:
-        if c['commit'] and c['outcome'] != 'no_proposal' and not c.get('truncated'):
+        if c['commit'] and c['outcome'] not in NOT_MEASURED and not c.get('truncated'):
             primary = (c.get('primary_skill')
                        or (c['direction'].get('skill_ids') or [None])[0])
             if primary:
@@ -921,9 +932,15 @@ def record_outcomes(skills_data, cands):
 
 
 def learn_step(ctx, cands, skills_data, iter_dir, log, fake=False):
-    """The model call that turns an iteration's outcomes into skill edits."""
+    """The model call that turns an iteration's outcomes into skill edits.
+
+    Candidates whose measurement failed are left out: the learner would read
+    "killed by the operating system" as a broken design, as it did before.
+    """
     group = []
     for c in cands:
+        if c.get('outcome') == 'measure_error':
+            continue
         group.append({'label': c['label'], 'id': c['id'], 'focus': c['direction'].get('focus'),
                       'rationale': c['rationale'], 'outcome': c['outcome'],
                       'problem': c['reason'], 'measured': c['measured'],
@@ -934,7 +951,7 @@ def learn_step(ctx, cands, skills_data, iter_dir, log, fake=False):
                       'truncated': c.get('truncated'), 'turns': (c['session'] or {}).get('turns'),
                       'facts': propose.fact_lines(c.get('notes') or '')})
     changed, lessons = [], []
-    if not fake:
+    if not fake and group:
         try:
             changed, lessons, _res = learn_mod.learn(ctx, group, skills_data, log)
             write_json(os.path.join(iter_dir, 'learn.json'), call_record(_res))

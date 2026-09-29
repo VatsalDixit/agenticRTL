@@ -89,6 +89,42 @@ def _parse_perf(path):
     return out
 
 
+def os_killed(rc, deadlock):
+    """Whether a draw's simulator was killed from outside (SIGKILL, rc 137)
+    rather than finishing, failing or hanging on its own. A design bug makes
+    GHDL exit with an error or run into the stop time, never this."""
+    return rc == 137 and not deadlock
+
+
+def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
+    """Compile once and simulate ``draws``: {draw dir as the shell sees it:
+    (rc, deadlock)}. ``jobs`` overrides how many simulate at once."""
+    specs = ' '.join('"%s:%d"' % (shell_path(d), c) for _draw, d, c in draws)
+    # 5 ms of simulated time is 5 million cycles: 50x the longest real draw,
+    # and a deadlocked draw costs under a minute instead of seven.
+    script = ('%sbash "%s" "%s" "%s" "%s" "%s" 5ms %s'
+              % ('SIM_JOBS=%d ' % jobs if jobs else '',
+                 shell_path(SIM_SCRIPT), shell_path(rtl_dir),
+                 shell_path(TB_FILE), shell_path(build_dir), generics, specs))
+    res = eda_shell(script, timeout=timeout or CONFIG['sim_timeout_s'],
+                    kill_token='sim-' + os.path.basename(os.path.dirname(build_dir)))
+    text = res.text
+    if res.timed_out:
+        raise MeasureError('simulation did not finish within %d s'
+                           % (timeout or CONFIG['sim_timeout_s']))
+    if 'COMPILE_FAIL' in text or 'ELAB_FAIL' in text:
+        tail = [l for l in text.splitlines() if l.strip()]
+        raise MeasureError('the design does not compile:\n' + '\n'.join(tail[-25:]))
+    if 'ELAB_OK' not in text:
+        raise MeasureError('unexpected simulation output:\n' + text[-1500:])
+    status = {}
+    for line in text.splitlines():
+        m = re.match(r'DRAW (\S+) rc=(-?\d+) deadlock=(\d)', line)
+        if m:
+            status[m.group(1)] = (int(m.group(2)), m.group(3) == '1')
+    return status
+
+
 def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
     """Run every draw against one rtl/ folder. Returns per-draw results.
 
@@ -121,29 +157,15 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
         private.append((draw, mine, chunks))
     draws = private
 
-    specs = ' '.join('"%s:%d"' % (shell_path(d), c) for _draw, d, c in draws)
-    # 5 ms of simulated time is 5 million cycles: 50x the longest real draw,
-    # and a deadlocked draw costs under a minute instead of seven.
-    script = ('bash "%s" "%s" "%s" "%s" "%s" 5ms %s'
-              % (shell_path(SIM_SCRIPT), shell_path(rtl_dir),
-                 shell_path(TB_FILE), shell_path(build_dir), generics, specs))
-    res = eda_shell(script, timeout=timeout or CONFIG['sim_timeout_s'],
-                    kill_token='sim-' + os.path.basename(os.path.dirname(build_dir)))
-    text = res.text
-    if res.timed_out:
-        raise MeasureError('simulation did not finish within %d s'
-                           % (timeout or CONFIG['sim_timeout_s']))
-    if 'COMPILE_FAIL' in text or 'ELAB_FAIL' in text:
-        tail = [l for l in text.splitlines() if l.strip()]
-        raise MeasureError('the design does not compile:\n' + '\n'.join(tail[-25:]))
-    if 'ELAB_OK' not in text:
-        raise MeasureError('unexpected simulation output:\n' + text[-1500:])
-
-    status = {}
-    for line in text.splitlines():
-        m = re.match(r'DRAW (\S+) rc=(-?\d+) deadlock=(\d)', line)
-        if m:
-            status[m.group(1)] = (int(m.group(2)), m.group(3) == '1')
+    status = _run_draws(rtl_dir, build_dir, generics, draws, timeout)
+    # A simulator the operating system killed has said nothing about the
+    # design, so those draws are run again, one at a time, before anything is
+    # read into them. It is not hypothetical: with two cores each simulator
+    # needs about a gigabyte, and ten sound candidates were once recorded as
+    # failing correctness because the out-of-memory killer took theirs.
+    killed = [d for d in draws if os_killed(*status.get(shell_path(d[1]), (99, False)))]
+    if killed:
+        status.update(_run_draws(rtl_dir, build_dir, generics, killed, timeout, jobs=1))
 
     results = []
     for draw, ddir, chunks in draws:
@@ -154,7 +176,12 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
         perf = os.path.join(ddir, 'perf.txt')
         out_hex = os.path.join(ddir, 'out.hex')
         cs_tv = os.path.join(ddir, 'cs.tv')
-        if deadlock:
+        if os_killed(rc, deadlock):
+            rec['problem'] = ('the simulator was killed by the operating system (rc 137, '
+                              'most likely out of memory), also when run on its own; '
+                              'this is not a verdict on the design')
+            rec['os_killed'] = True
+        elif deadlock:
             rec['problem'] = 'deadlock: the simulation did not finish (hung waiting for output)'
         elif rc != 0 or not os.path.exists(perf):
             log = os.path.join(ddir, 'sim.log')
@@ -379,6 +406,13 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
     out = summarize(sims, synth_metrics)
     out['widths'] = widths
     out['sim_seconds'] = sim_seconds
+    killed = [r['name'] for r in sims if r.get('os_killed')]
+    if killed:
+        # Not a correctness failure: the measurement itself did not happen.
+        out['measure_error'] = ('the simulator was killed by the operating system '
+                                '(most likely out of memory) on %s, even when run on '
+                                'its own; nothing was learned about the design'
+                                % ', '.join(killed))
     if synth_metrics is not None or synth_error:
         # Wall time including the transfer to and from the host, which is
         # what the loop waits for; hacc's own synth_seconds is the same span.

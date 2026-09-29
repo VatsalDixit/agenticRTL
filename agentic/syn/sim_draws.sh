@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 #
 # Compile one design with the loop's throughput testbench, then simulate it
-# against several stimulus draws in parallel.
+# against several stimulus draws in parallel, at most SIM_JOBS at a time
+# (default 3).
+#
+# The cap exists because every simulator holds its own copy of the design
+# model, about a gigabyte once the design has two cores, and two of these
+# scripts run side by side (two candidates measured, or two sessions checking).
+# Uncapped, twenty simulators ran at once in WSL's 15 GB, the out-of-memory
+# killer took some of them, and the loop recorded ten sound candidates as
+# failing correctness. Results do not depend on the cap; only the wall time.
 #
 # usage: sim_draws.sh RTL_DIR TB_FILE BUILD_DIR "GENERICS" STOP_TIME DRAW_DIR:CHUNKS...
 #
@@ -69,7 +77,11 @@ run_one() {
   )
 }
 
+SIM_JOBS="${SIM_JOBS:-3}"
 for spec in "$@"; do
+  while [ "$(jobs -rp | wc -l)" -ge "$SIM_JOBS" ]; do
+    wait -n
+  done
   run_one "$spec" &
 done
 wait

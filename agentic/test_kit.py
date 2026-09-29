@@ -352,6 +352,36 @@ def test_area_of_reads_old_runs():
           and tools.backend_of({'area_um2': 90188.0}) == 'yosys')
 
 
+# ---------------------------------------------------------------------------
+# a simulator killed by the operating system is not a failing design
+
+def test_os_kill_is_told_apart():
+    check('rc 137 without a deadlock is an outside kill',
+          measure.os_killed(137, False))
+    check('a design error, a hang or a pass is not',
+          not measure.os_killed(1, False) and not measure.os_killed(0, True)
+          and not measure.os_killed(0, False) and not measure.os_killed(137, True))
+
+
+def test_measure_error_is_not_a_correctness_verdict():
+    import loop
+    parent = {'throughput_gbps': 2.0, 'bytes_per_cycle': 8.0, 'f_max_mhz': 250.0,
+              'area': 15000, 'area_unit': 'LUTs', 'synth_backend': 'hacc'}
+    ev = loop.evaluate({'oracle_pass': False, 'measure_error': 'killed on held-part'},
+                       parent, {'metric': 'throughput', 'target_pct': None, 'text': ''})
+    check('a killed measurement scores as measure_error, not failed_correctness',
+          ev['outcome'] == 'measure_error' and not ev['adoptable'], str(ev))
+    data = seed()
+    sk = skills_mod.by_id(data, 'raise-bytes-per-command')
+    before = (sk.get('tried') or 0, sk.get('passed') or 0)
+    loop.record_outcomes(data, [{'commit': 'abc', 'outcome': 'measure_error',
+                                 'truncated': False, 'primary_skill': sk['id'],
+                                 'direction': {}, 'adopted': False, 'advantage': None,
+                                 'score': None}])
+    check('a killed measurement moves no skill counter',
+          (sk.get('tried') or 0, sk.get('passed') or 0) == before)
+
+
 def main():
     for name, func in sorted(globals().items()):
         if name.startswith('test_') and callable(func):
