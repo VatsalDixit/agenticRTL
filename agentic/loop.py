@@ -437,9 +437,10 @@ def state_text(metrics, base):
             lines.append('  draw %-16s %7.3f bytes/cycle, output idle %5.1f%%, input stalled %5.1f%%  (%s)'
                          % (rec['name'], rec['bytes_per_cycle'], rec.get('output_idle_pct', 0),
                             rec.get('input_stall_pct', 0),
-                            'real Parquet pages' if rec['kind'] == 'real' else 'synthetic chunks, not scored'))
+                            'a whole Parquet row group' if rec['kind'] == 'real'
+                            else 'synthetic chunks, not scored'))
     hidden = [r['bytes_per_cycle'] for r in metrics.get('draws', [])
-              if not r.get('visible') and r.get('oracle_pass')]
+              if not r.get('visible') and r.get('scored') and r.get('oracle_pass')]
     if hidden:
         lines.append('  plus %d hidden real-data draws (other tables) at %.3f to %.3f bytes/cycle'
                      % (len(hidden), min(hidden), max(hidden)))
@@ -451,11 +452,12 @@ def profile_text(metrics):
     for rec in metrics.get('draws', []):
         if rec.get('visible') and rec.get('kind') == 'real' and rec.get('analysis'):
             parts.append(analyse.describe(rec['analysis'], rec['name']))
-    # The visible draw is the fastest table and is literal-heavy, so on its own
-    # it hides which stage binds the score. The busiest held-out table's rates
-    # are shown without its name: the numbers are not the stimulus.
+    # One visible table can hide which stage binds the score. The busiest
+    # scored held-out table's rates are shown without its name: the numbers
+    # are not the stimulus.
     hidden = [r for r in metrics.get('draws', [])
-              if not r.get('visible') and r.get('oracle_pass') and r.get('analysis')]
+              if not r.get('visible') and r.get('scored') and r.get('oracle_pass')
+              and r.get('analysis')]
     if hidden:
         worst = max(hidden, key=lambda r: r['analysis'].get('binding_utilisation') or 0)
         parts.append(analyse.describe(worst['analysis'],
@@ -1003,9 +1005,10 @@ def append_record(run, record, log):
     run.save()
 
 
+# Simulation and synthesis overlap inside measure, so they are not its parts.
 TIMING_ORDER = (('plan_s', 'plan'), ('check_s', 'check'), ('write_s', 'write'),
-                ('measure_s', 'measure'), ('sim_s', 'of which simulation'),
-                ('synth_s', 'of which synthesis'), ('learn_s', 'learn'))
+                ('measure_s', 'measure'), ('sim_s', 'simulating'),
+                ('synth_s', 'synthesising alongside'), ('learn_s', 'learn'))
 
 
 def timing_text(timing):

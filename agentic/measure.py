@@ -5,12 +5,17 @@ Measure one design: correct or not, bytes per cycle, f_max, area, throughput.
     throughput (GB/s) = bytes_per_cycle x f_max (MHz) / 1000
 
   * bytes/cycle comes from the throughput testbench under GHDL, on every draw
-    in the corpus, all at once. Correctness is decided on every draw by
-    agentic/oracle.py against the frozen reference decompressor.
+    in the corpus. Correctness is decided on every draw by agentic/oracle.py
+    against the frozen reference decompressor.
   * f_max and area come from the synthesis backend named in the config:
     GHDL -> Yosys -> ABC on the Nangate 45nm library (area in um2), or
     Vivado place-and-route for an FPGA part on the HACC host (agentic/hacc.py,
     area in LUTs).
+
+The small draws run first, and a design that fails one of them gets neither
+the long draws nor a synthesis run. Otherwise synthesis runs while the long
+draws simulate: whole Parquet row groups take a quarter of an hour or more
+to simulate, and neither half needs the other's result.
 
 The loop always measures with ITS OWN copy of the testbench, the RAM stand-in
 and the scripts (this folder), never with copies inside a candidate's
@@ -26,6 +31,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 
 KIT = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +50,14 @@ LIB_FILE = os.path.join(KIT, 'syn', 'lib', 'NangateOpenCellLibrary_typical.lib')
 SIM_SCRIPT = os.path.join(KIT, 'syn', 'sim_draws.sh')
 SYNTH_SCRIPT = os.path.join(KIT, 'syn', 'synth.sh')
 TOP = 'vhsnunzip_unbuffered'
+# Simulated time at which a draw is abandoned, at one cycle per nanosecond.
+# The testbench's own watchdog ends a deadlock after 300,000 cycles without
+# output, so this only stops a design that is alive but hopelessly slow: the
+# longest real draw needs 3.5 million cycles on the original design.
+STOP_TIME = '100ms'
+# A draw whose cs.tv is at most this big simulates in seconds (the synthetic
+# draws, nation, region); it runs before synthesis is started.
+QUICK_DRAW_BYTES = 1 << 20
 
 _DELAY = re.compile(r'Delay\s*=\s*([\d.]+)\s*ps')
 _AREA = re.compile(r'Chip area for module .*?:\s*([\d.]+)')
@@ -67,10 +81,21 @@ def corpus_dir(root=None):
     return os.path.join(root or ROOT, '.agentic', 'corpus')
 
 
-def prepare_corpus(root=None, pages=None, seed=0):
-    """Build every draw's cs.tv. Returns [(draw, dir, chunks), ...]."""
-    return stim.build_all(corpus_dir(root), pages=pages or CONFIG['train_pages'],
-                          seed=seed)
+def prepare_corpus(root=None, seed=0):
+    """Build every draw's cs.tv. Returns [(draw, dir, chunks), ...].
+
+    ``seed`` is accepted for runs that recorded one; whole row groups are
+    not sampled, so nothing depends on it.
+    """
+    return stim.build_all(corpus_dir(root))
+
+
+def draw_bytes(entry):
+    """Size of a draw's stimulus file, which is what its simulation costs."""
+    try:
+        return os.path.getsize(os.path.join(entry[1], 'cs.tv'))
+    except OSError:
+        return 0
 
 
 def _parse_perf(path):
@@ -99,13 +124,15 @@ def os_killed(rc, deadlock):
 def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
     """Compile once and simulate ``draws``: {draw dir as the shell sees it:
     (rc, deadlock)}. ``jobs`` overrides how many simulate at once."""
-    specs = ' '.join('"%s:%d"' % (shell_path(d), c) for _draw, d, c in draws)
-    # 5 ms of simulated time is 5 million cycles: 50x the longest real draw,
-    # and a deadlocked draw costs under a minute instead of seven.
-    script = ('%sbash "%s" "%s" "%s" "%s" "%s" 5ms %s'
+    # Longest first: the round ends when its last simulator does, and a long
+    # draw started last would run on alone after the others had finished.
+    ordered = sorted(draws, key=lambda e: -draw_bytes(e))
+    specs = ' '.join('"%s:%d"' % (shell_path(d), c) for _draw, d, c in ordered)
+    script = ('%sbash "%s" "%s" "%s" "%s" "%s" %s %s'
               % ('SIM_JOBS=%d ' % jobs if jobs else '',
                  shell_path(SIM_SCRIPT), shell_path(rtl_dir),
-                 shell_path(TB_FILE), shell_path(build_dir), generics, specs))
+                 shell_path(TB_FILE), shell_path(build_dir), generics,
+                 STOP_TIME, specs))
     res = eda_shell(script, timeout=timeout or CONFIG['sim_timeout_s'],
                     kill_token='sim-' + os.path.basename(os.path.dirname(build_dir)))
     text = res.text
@@ -211,6 +238,14 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
                     rec['analysis'] = None
                     rec['analysis_error'] = str(exc)[:200]
         results.append(rec)
+        # A row group leaves about 100 MB of text per candidate, and the
+        # counters and the verdict are all that is kept. The stimulus is a
+        # copy; a wrong output stays for whoever wants to look at it.
+        for name in ('cs.tv',) + (('out.hex',) if rec['oracle_pass'] else ()):
+            try:
+                os.remove(os.path.join(ddir, name))
+            except OSError:
+                pass
     return results
 
 
@@ -383,26 +418,60 @@ def summarize(sim_results, synth_metrics):
     return out
 
 
+def _synthesize_into(rtl_dir, out_dir, box):
+    """synthesize() for a thread: the result or the error lands in ``box``."""
+    t0 = time.time()
+    try:
+        box['metrics'] = synthesize(rtl_dir, out_dir)
+    except MeasureError as exc:
+        box['error'] = str(exc)
+    except Exception as exc:               # a thread must not die unheard
+        box['error'] = 'synthesis crashed: %s' % exc
+    # Wall time including the transfer to and from the host, which is what
+    # the loop waits for; hacc's own synth_seconds is the same span.
+    box['seconds'] = round(time.time() - t0, 1)
+
+
 def measure(rtl_dir, work_dir, draws, synth=True, log=None):
     """The whole measurement for one rtl/ folder. Never raises for a bad
-    design; returns a dict with 'error' set when the tools could not run."""
+    design; returns a dict with 'error' set when the tools could not run.
+
+    The small draws go first. If they all pass, synthesis starts in a thread
+    and the long draws simulate meanwhile; if one fails, the design is
+    rejected without either. sim_seconds and synth_seconds overlap, so they
+    add up to more than the measurement took.
+    """
     os.makedirs(work_dir, exist_ok=True)
     widths = analyse.rtl_widths(rtl_dir)
+    sim_dir = os.path.join(work_dir, 'sim')
+    quick = [d for d in draws if draw_bytes(d) <= QUICK_DRAW_BYTES]
+    slow = [d for d in draws if draw_bytes(d) > QUICK_DRAW_BYTES]
     t_sim = time.time()
+    box, worker = {}, None
     try:
-        sims = simulate(rtl_dir, os.path.join(work_dir, 'sim'), draws, widths)
+        sims = simulate(rtl_dir, sim_dir, quick, widths) if quick else []
+        if all(r['oracle_pass'] for r in sims):
+            if synth:
+                worker = threading.Thread(
+                    target=_synthesize_into, daemon=True,
+                    args=(rtl_dir, os.path.join(work_dir, 'synth'), box))
+                worker.start()
+            if slow:
+                sims += simulate(rtl_dir, sim_dir, slow, widths)
     except MeasureError as exc:
+        # A synthesis already started is left to finish on its own; the
+        # design is rejected whatever it reports.
         return {'oracle_pass': False, 'error': str(exc), 'widths': widths,
                 'draws': [], 'sim_seconds': round(time.time() - t_sim, 1)}
     sim_seconds = round(time.time() - t_sim, 1)
+    rank = dict((d.name, i) for i, (d, _p, _c) in enumerate(draws))
+    sims.sort(key=lambda r: rank.get(r['name'], len(rank)))
     synth_metrics = None
     synth_error = None
-    t_synth = time.time()
-    if synth and all(r['oracle_pass'] for r in sims):
-        try:
-            synth_metrics = synthesize(rtl_dir, os.path.join(work_dir, 'synth'))
-        except MeasureError as exc:
-            synth_error = str(exc)
+    if worker is not None:
+        worker.join()
+        if all(r['oracle_pass'] for r in sims):
+            synth_metrics, synth_error = box.get('metrics'), box.get('error')
     out = summarize(sims, synth_metrics)
     out['widths'] = widths
     out['sim_seconds'] = sim_seconds
@@ -414,9 +483,7 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
                                 'its own; nothing was learned about the design'
                                 % ', '.join(killed))
     if synth_metrics is not None or synth_error:
-        # Wall time including the transfer to and from the host, which is
-        # what the loop waits for; hacc's own synth_seconds is the same span.
-        out['synth_seconds'] = round(time.time() - t_synth, 1)
+        out['synth_seconds'] = box.get('seconds')
     if synth_error:
         out['synth_error'] = synth_error
     return out

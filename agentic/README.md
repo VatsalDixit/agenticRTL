@@ -40,7 +40,7 @@ port widths out of the RTL, so the loop can widen ports and lines freely.
 
 ```mermaid
 graph TD
-    G[goal: throughput +X%] --> B[measure baseline<br/>GHDL sim on 10 draws + Yosys/ABC synth]
+    G[goal: throughput +X%] --> B[measure baseline<br/>GHDL sim on 11 draws + synthesis]
     B --> A[1. analyse<br/>stage rates vs ceilings read from RTL, lever]
     A --> P[2. plan<br/>one cheap model call picks N directions]
     P --> W1[3. write candidate 1<br/>Claude session in its own git worktree]
@@ -207,11 +207,26 @@ checkout is never modified by the loop.
 ## How a candidate is judged
 
 1. Correct: every output byte equals the frozen reference decompressor on
-   all 10 draws (8 sets of real Parquet pages from TPC-H tables, 2 synthetic
-   chunk sizes). A deadlock or one wrong byte rejects it.
-2. Throughput = geomean bytes/cycle over the 8 real draws x f_max from the
-   synthesis backend (below). Synthetic draws must pass but do not enter
-   the score (an earlier loop let one synthetic draw outvote every real one).
+   all 11 draws: 9 whole Parquet row groups (every page of row group 0, in
+   file order, one page per chunk) and 2 synthetic chunk sizes. A deadlock
+   or one wrong byte rejects it.
+2. Throughput = geomean bytes/cycle over the 7 scored row groups x f_max
+   from the synthesis backend (below). Scored: NYC taxi trips (the train
+   table, visible to the sessions) and six TPC-H SF1 tables (held out,
+   hidden). nation and region are a few kilobytes each, so their
+   bytes/cycle measures chunk start-up; they must pass but are not scored.
+   Neither are the synthetic draws (an earlier loop let one synthetic draw
+   outvote every real one).
+
+   The files are written by DuckDB with default settings
+   (`python agentic/make_data.py` writes them again), so pages run up to
+   15 MB and 98% of the scored bytes are in pages longer than the 64 KiB
+   history. An earlier corpus of 12 random pages of at most 64 KiB per table
+   rewarded what small chunks reward: a design the loop took to +182% on it
+   measured +67% on the taxi row group, and the second core it paid for
+   added 3.6% there. Simulating whole row groups takes about
+   18 minutes a candidate on the original design, so synthesis runs
+   alongside the long draws, after the small ones have passed.
 3. Score = -gain% + 0.15 x area growth%. Area is priced, not capped:
    adopted only if gain >= 0.2% (under Vivado, a gain below 1% counts only
    if bytes/cycle carries it: re-placing a design moves f_max by about a
@@ -334,7 +349,8 @@ resets.
 | `analyse.py` | stage rates vs ceilings read from the RTL |
 | `guide.py` | the map of the current design, generated from the RTL |
 | `test_kit.py` | checks for the notebook, the analyser, the guide and the timing report |
-| `stim.py` | the stimulus: real Parquet pages + synthetic chunks |
+| `stim.py` | the stimulus: whole Parquet row groups + synthetic chunks |
+| `make_data.py` | writes the Parquet files with DuckDB |
 | `oracle.py`, `ref/snappy.py` | the frozen reference (correctness) |
 | `check.py` | the one command a candidate session may run |
 | `tb/vhsnunzip_perf_tc.sim.08.vhd` | width-generic throughput testbench |
@@ -345,7 +361,7 @@ resets.
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |
 | `setup.py` | doctor + preparation |
 | `tools.py`, `config.json` | shared helpers and settings |
-| `data/*.parquet` | the TPC-H tables the real stimulus is drawn from |
+| `data/*.parquet` | NYC taxi and TPC-H SF1 files the real stimulus is read from (not in git) |
 
 ## Things that were learned the hard way (kept so they stay fixed)
 

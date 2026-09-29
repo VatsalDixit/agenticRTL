@@ -48,8 +48,6 @@ DEFAULT_CONFIG = {
     # wall-clock cap is what bounds a session.
     "session_max_turns": 300,
     "session_timeout_min": 30,
-    # Stimulus: pages per real-data draw.
-    "train_pages": 12,
     # Synthesis clock target in picoseconds (4000 ps = 250 MHz).
     "clock_period_ps": 4000,
     # Which synthesis measures f_max and area:
@@ -69,8 +67,10 @@ DEFAULT_CONFIG = {
     # a place-and-route backend a gain under this is not evidence of anything.
     # Yosys has no placer and no seed, and uses min_gain_pct alone.
     "pnr_noise_pct": 1.0,
-    # Tool timeouts.
-    "sim_timeout_s": 1200,
+    # Tool timeouts. One simulation call covers every long draw of one
+    # candidate, three at a time: whole Parquet row groups take 18 minutes on
+    # the original design and over half an hour on a two-core one.
+    "sim_timeout_s": 10800,
     "synth_timeout_s": 2400,
     # Vivado's own. Three hours, from the earlier flow: at 20k LUTs one
     # place-and-route ran past an hour and was still converging, and two

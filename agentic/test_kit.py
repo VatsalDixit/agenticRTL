@@ -382,6 +382,129 @@ def test_measure_error_is_not_a_correctness_verdict():
           (sk.get('tried') or 0, sk.get('passed') or 0) == before)
 
 
+# ---------------------------------------------------------------------------
+# the stimulus is whole row groups, and the measurement overlaps synthesis
+
+def test_real_draws_are_whole_row_groups():
+    import stim
+    draws = stim.all_draws()
+    scored = [d.name for d in draws if d.scored]
+    check('the score is taxi plus the six held-out TPC-H tables',
+          scored == ['train-taxi'] + ['held-%s' % t for t in stim.HELD_OUT_TABLES]
+          and [d.name for d in draws if d.scored and d.visible] == ['train-taxi'],
+          str(scored))
+    check('nation, region and the synthetic draws must pass but are not scored',
+          all(not d.scored for d in draws
+              if d.kind == 'synthetic' or d.table in stim.SMALL_TABLES))
+    try:
+        stim.table_path('supplier')
+    except IOError:
+        print('skip  no Parquet files here, so the page reader is not exercised')
+        return
+    chunks, info = stim.page_chunks('supplier')
+    check('every page of the row group is fed, long ones included',
+          info['pages'] == len(chunks) == 8 and info['long_pages'] == 6
+          and info['largest_page_bytes'] > stim.HISTORY_BYTES, str(info))
+
+
+def test_usable_cores_count_bytes_not_chunks():
+    shape = {'chunks': 7, 'expanded_bytes': 18225504, 'largest_chunk_bytes': 15668358}
+    check('a row group whose largest page holds 86% of it leaves cores 1.16x',
+          analyse.usable_cores(4, shape) == 1.16, str(analyse.usable_cores(4, shape)))
+    many = {'chunks': 36, 'expanded_bytes': 3588432, 'largest_chunk_bytes': 983048}
+    check('spread-out bytes still cap at the core count, and one core is one',
+          analyse.usable_cores(2, many) == 2.0 and analyse.usable_cores(1, shape) == 1.0)
+
+
+def test_long_selftest_chunk_wraps_the_history():
+    import stim
+    chunks = stim.selftest_chunks('long')
+    plain = stim.decompress_raw(chunks[0])
+    far = 0
+    comp = chunks[0]
+    i = 0
+    while comp[i] & 0x80:
+        i += 1
+    i += 1
+    while i < len(comp):
+        tag = comp[i]
+        if tag & 3 == 0:
+            n = tag >> 2
+            if n < 60:
+                i, n = i + 1, n + 1
+            else:
+                extra = n - 59
+                n = int.from_bytes(comp[i + 1:i + 1 + extra], 'little') + 1
+                i += 1 + extra
+            i += n
+        elif tag & 3 == 1:
+            far, i = max(far, ((tag >> 5) << 8) | comp[i + 1]), i + 2
+        else:
+            far, i = max(far, int.from_bytes(comp[i + 1:i + 3], 'little')), i + 3
+    check('the self-test has one chunk three times the history, copying from its far end',
+          len(chunks) == 1 and len(plain) > 3 * stim.HISTORY_BYTES - 1000
+          and far >= 65000 and stim.check_raw(chunks[0]) is None,
+          'chunks %d, %d bytes, furthest copy %d' % (len(chunks), len(plain), far))
+
+
+def test_synthesis_runs_alongside_the_long_draws():
+    import tempfile
+    import threading
+
+    class Draw(object):
+        kind, scored, visible = 'real', True, True
+
+        def __init__(self, name):
+            self.name = name
+
+    draws = [(Draw('small'), 'quick', 1), (Draw('long'), 'slow', 1)]
+    saved = (measure.simulate, measure.synthesize, measure.draw_bytes,
+             measure.analyse.rtl_widths)
+
+    def run(fail_on):
+        events, started = [], threading.Event()
+
+        def fake_sim(rtl, build, ds, widths, timeout=None):
+            names = [d.name for d, _p, _c in ds]
+            events.append('sim ' + '+'.join(names))
+            if 'long' in names:
+                events.append('synthesis running' if started.wait(10)
+                              else 'synthesis not running')
+            return [{'name': n, 'kind': 'real', 'scored': True, 'visible': True,
+                     'chunks': 1, 'oracle_pass': n != fail_on, 'bytes_per_cycle': 5.0,
+                     'problem': 'wrong output: x' if n == fail_on else None}
+                    for n in names]
+
+        def fake_synth(rtl, out):
+            started.set()
+            events.append('synth')
+            return {'f_max_mhz': 250.0, 'wns_ns': 0.0, 'area': 1000,
+                    'area_unit': 'LUTs', 'synth_backend': 'hacc'}
+
+        measure.simulate, measure.synthesize = fake_sim, fake_synth
+        measure.draw_bytes = lambda e: 10 if e[1] == 'quick' else 10 ** 8
+        measure.analyse.rtl_widths = lambda rtl: {}
+        try:
+            out = measure.measure('rtl', tempfile.mkdtemp(prefix='kit-measure-'), draws)
+        finally:
+            (measure.simulate, measure.synthesize, measure.draw_bytes,
+             measure.analyse.rtl_widths) = saved
+        return out, events
+
+    out, events = run(None)
+    check('small draws first, then synthesis runs while the long draws simulate',
+          events[0] == 'sim small' and 'synthesis running' in events
+          and out.get('throughput_gbps') == 1.25, '%s %s' % (events, out.get('throughput_gbps')))
+    out, events = run('small')
+    check('a design failing a small draw gets no synthesis and no long draws',
+          events == ['sim small'] and 'f_max_mhz' not in out and not out['oracle_pass'],
+          str(events))
+    out, events = run('long')
+    check('a design failing a long draw keeps no synthesis numbers',
+          'synth' in events and 'f_max_mhz' not in out and not out['oracle_pass'],
+          str(events))
+
+
 def main():
     for name, func in sorted(globals().items()):
         if name.startswith('test_') and callable(func):

@@ -141,20 +141,20 @@ def main():
 
     print('5. stimulus corpus')
     import stim
+    tables = stim.TRAIN_TABLES + stim.HELD_OUT_TABLES + stim.SMALL_TABLES
     missing = []
-    for table in stim.TRAIN_TABLES + stim.HELD_OUT_TABLES:
+    for table in tables:
         try:
             stim.table_path(table)
         except IOError:
             missing.append(table)
     if missing:
         bad('Parquet tables missing: %s. They travel with the agentic/data folder '
-            '(not with git); copy the whole agentic/ folder from the source repo, '
-            'or generate them with the old flow/make_test_parquet.py --table all '
-            'into test_data/.' % ', '.join(missing))
+            '(not with git); copy it from the source machine, or write them with '
+            '`python agentic/make_data.py` (DuckDB, about 400 MB).' % ', '.join(missing))
         failures += 1
     else:
-        ok('all %d Parquet tables present' % len(stim.TRAIN_TABLES + stim.HELD_OUT_TABLES))
+        ok('all %d Parquet tables present' % len(tables))
         try:
             import measure
             draws = measure.prepare_corpus()

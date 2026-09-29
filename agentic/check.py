@@ -4,7 +4,8 @@ The one command a candidate-writing agent may run: does my design work?
 
 It compiles the RTL in this worktree with the throughput testbench, simulates
 it on stimulus it INVENTS here (chunk sizes that straddle line widths,
-overlapping copies, one big chunk), and compares every output byte against
+overlapping copies, one big chunk, and one 192 KiB chunk that wraps the
+64 KiB history the way real pages do), and compares every output byte against
 the frozen reference decompressor. It also reports bytes per cycle on those
 shapes and where the pipeline is idle.
 

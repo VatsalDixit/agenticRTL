@@ -66,8 +66,8 @@ C = {
 # loop.py writes into status.json; keeping them equal is what makes the
 # highlight honest rather than guessed.
 SETUP_STEPS = [
-    ('corpus',   'build stimulus',    'ten draws: 8 real Parquet page sets, 2 synthetic'),
-    ('baseline', 'measure baseline',  'simulate every draw, then synthesise'),
+    ('corpus',   'build stimulus',    '9 whole Parquet row groups (7 scored), 2 synthetic'),
+    ('baseline', 'measure baseline',  'simulate every draw, synthesise alongside'),
 ]
 LOOP_STEPS = [
     ('plan',    '1. analyse & plan',  'stage rates vs ceilings, then pick {n} direction{s}'),

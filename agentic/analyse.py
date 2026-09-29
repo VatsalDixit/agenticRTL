@@ -16,6 +16,9 @@ Stages (for this Snappy decompressor):
     core datapath   output bytes per cycle       vs  core line width x usable cores
     output port     output bytes per cycle       vs  de_data width
 
+Usable cores is the core count, capped by the draw's chunk count and by its
+bytes over its largest chunk (usable_cores below).
+
 A transfer carries one copy and one literal, so the two element kinds have
 SEPARATE ceilings. Pooling them hides a saturated copy slot behind an idle
 literal slot: on the 32-byte design the copy slot ran at 82-93% of its ceiling
@@ -33,6 +36,8 @@ import oracle
 
 SATURATED = 0.90
 IMPOSSIBLE = 1.25
+# What the decompression history holds; a longer chunk wraps it.
+HISTORY_BYTES = 65536
 
 # One element_stream transfer per cycle carries one copy slot and one literal
 # slot. Read from the RTL when the record is recognisable, else these defaults.
@@ -175,23 +180,41 @@ def count_elements(compressed):
 def stimulus_shape(cs_tv):
     chunks = oracle.read_stimulus(cs_tv)
     compressed = sum(len(c) for c in chunks)
-    literals = copies = expanded = 0
+    literals = copies = expanded = largest = long_chunks = 0
     for chunk in chunks:
         lits, cps, total = count_elements(chunk)
         literals += lits
         copies += cps
         expanded += total
+        largest = max(largest, total)
+        long_chunks += total > HISTORY_BYTES
     elements = literals + copies
     return {
         'chunks': len(chunks),
         'compressed_bytes': compressed,
         'expanded_bytes': expanded,
+        'largest_chunk_bytes': largest,
+        'long_chunks': long_chunks,
         'elements': elements,
         'literals': literals,
         'copies': copies,
         'compression_pct': round(100.0 * compressed / max(1, expanded), 1),
         'bytes_per_element': round(expanded / max(1, elements), 2),
     }
+
+
+def usable_cores(cores, shape):
+    """How many cores one draw can keep busy at once, at most.
+
+    A chunk runs on one core from its first byte to its last, so the other
+    cores can only take the bytes outside the largest chunk: the bound is
+    total bytes / largest chunk, as well as the chunk count. On whole Parquet
+    row groups the byte bound is the tight one. A 15.7 MB page in a 20 MB row
+    group leaves a second core 1.3x at most, however many pages there are.
+    """
+    by_bytes = shape['expanded_bytes'] / float(max(1, shape.get('largest_chunk_bytes')
+                                                   or shape['expanded_bytes']))
+    return round(max(1.0, min(float(cores), float(max(1, shape['chunks'])), by_bytes)), 2)
 
 
 def analyse(counters, cs_tv, widths):
@@ -202,19 +225,19 @@ def analyse(counters, cs_tv, widths):
     in_rate = shape['compressed_bytes'] / cycles
     copy_rate = shape['copies'] / cycles
     literal_rate = shape['literals'] / cycles
-    usable_cores = min(widths['cores'], max(1, shape['chunks']))
+    usable = usable_cores(widths['cores'], shape)
 
     stages = [
         {'name': 'input port', 'rate': in_rate,
          'ceiling': float(widths['in_bytes']), 'unit': 'B/cycle'},
         {'name': 'copy slot', 'rate': copy_rate,
-         'ceiling': widths.get('copy_slots', DEFAULT_COPY_SLOTS) * usable_cores,
+         'ceiling': widths.get('copy_slots', DEFAULT_COPY_SLOTS) * usable,
          'unit': 'copies/cycle'},
         {'name': 'literal slot', 'rate': literal_rate,
-         'ceiling': widths.get('literal_slots', DEFAULT_LITERAL_SLOTS) * usable_cores,
+         'ceiling': widths.get('literal_slots', DEFAULT_LITERAL_SLOTS) * usable,
          'unit': 'literals/cycle'},
         {'name': 'core datapath', 'rate': out_rate,
-         'ceiling': widths['core_line_bytes'] * usable_cores, 'unit': 'B/cycle'},
+         'ceiling': widths['core_line_bytes'] * usable, 'unit': 'B/cycle'},
         {'name': 'output port', 'rate': out_rate,
          'ceiling': float(widths['out_bytes']), 'unit': 'B/cycle'},
     ]
@@ -243,7 +266,8 @@ def analyse(counters, cs_tv, widths):
         'binding_utilisation': binding['utilisation'],
         'stale_ceilings': stale,
         'verdict': verdict,
-        'usable_cores': usable_cores,
+        'cores': widths['cores'],
+        'usable_cores': usable,
         'bytes_per_cycle': round(out_rate, 4),
         'output_idle_pct': round(idle_pct, 1),
         'input_stall_pct': round(stall_pct, 1),
@@ -313,6 +337,19 @@ def describe(report, name=None):
                      % (name, shape['chunks'], shape['bytes_per_element'],
                         shape['compression_pct'], shape.get('copies', 0),
                         shape.get('literals', 0)))
+        if shape.get('largest_chunk_bytes'):
+            lines.append('  largest chunk %.0f KiB, %.0f%% of the bytes, so more cores '
+                         'can speed this draw up %.2fx at most; %d chunk(s) longer '
+                         'than the 64 KiB history'
+                         % (shape['largest_chunk_bytes'] / 1024.0,
+                            100.0 * shape['largest_chunk_bytes']
+                            / max(1, shape['expanded_bytes']),
+                            usable_cores(shape['chunks'], shape),
+                            shape.get('long_chunks', 0)))
+    if report.get('cores', 1) > (report.get('usable_cores') or 1):
+        lines.append('  usable cores %.2f of %d: a chunk runs on one core, so the '
+                     'others only get the bytes outside the largest one'
+                     % (report['usable_cores'], report['cores']))
     for st in report['stages']:
         lines.append('  %-14s %8.3f of %8.3f %-15s %4.0f%%'
                      % (st['name'], st['rate'], st['ceiling'], st['unit'],

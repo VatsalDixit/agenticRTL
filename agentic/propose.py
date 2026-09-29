@@ -508,19 +508,21 @@ WHAT YOU MUST NOT CHANGE
 
 HOW YOU ARE JUDGED
   1. Correctness: compressed Snappy chunks in, and every output byte must
-     equal a frozen reference decompressor, on real Parquet pages and on
-     synthetic chunks. A deadlock or one wrong byte rejects the candidate.
-  2. Throughput = bytes per cycle (real Parquet pages) x f_max (from
+     equal a frozen reference decompressor, on whole Parquet row groups and
+     on synthetic chunks. A deadlock or one wrong byte rejects the candidate.
+  2. Throughput = bytes per cycle (real Parquet row groups) x f_max (from
      @@SYNTH@@). Both halves count. A change that raises
      bytes/cycle a little and lowers f_max more is a loss.
   3. Area is priced: score = -gain% + 0.15 x area_growth% (more above 10%
      area growth). Area is not capped, but silicon must buy throughput.
 
 THE ONE COMMAND YOU MAY RUN (exactly as written, nothing else)
-  python agentic/check.py           compile + simulate 7 invented shapes and
-                                    compare every byte with the reference.
-                                    Also prints bytes/cycle and a stage
-                                    profile on invented data (about 15 s).
+  python agentic/check.py           compile + simulate 8 invented shapes (one
+                                    a 192 KiB chunk that wraps the 64 KiB
+                                    history, as real pages do) and compare
+                                    every byte with the reference. Also
+                                    prints bytes/cycle and a stage profile on
+                                    invented data (about 10 s).
                                     THE LOOP HAS ALREADY RUN THIS FOR YOU on
                                     the design you start from, and its output
                                     is in your brief. Running it again before
@@ -549,9 +551,13 @@ HOW TO WORK
   * Make the change in small verified steps. Run the check after each step.
     An earlier attempt elaborated cleanly and drove X on undriven byte lanes;
     only simulation found it. Do not finish with a failing check.
-  * Aim at the measured bottleneck and at real column data (pages of a few
-    hundred bytes to 64 KiB, mixed literals and copies, copy offsets from 1
-    to thousands, overlapping copies in sequential integers). Do not tune to
+  * Aim at the measured bottleneck and at real column data: whole Parquet
+    row groups written with default settings, fed page after page. A page is
+    one chunk. Pages run from a few hundred bytes to 15 MB, and 98% of the
+    scored bytes are in pages longer than the 64 KiB history, so one chunk
+    keeps one core busy for up to millions of cycles while its copies reach
+    as far as 64 KiB back. About 6-7 bytes per element, 60-86% of elements
+    are copies, overlapping copies in sequential integers. Do not tune to
     the invented shapes.
   * Keep the change coherent: one idea, fully carried through every stage it
     touches (record types, both command generators, the datapath, the top).

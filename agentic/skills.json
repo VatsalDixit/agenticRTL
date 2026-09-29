@@ -80,9 +80,9 @@
    "confidence": "low",
    "id": "replicate-cores-only-when-saturated-and-fed",
    "kind": "mechanism",
-   "pattern": "One core is saturated on a stage that cannot be widened further, AND the workload has more independent chunks than cores.",
+   "pattern": "One core is saturated on a stage that cannot be widened further, AND the scored draws' bytes are spread over more chunks than cores: a chunk runs on one core, so count bytes, not chunks (the profile gives each draw's bound).",
    "source": "earlier campaign",
-   "strategy": "Add cores with least-loaded dispatch and an order FIFO. Area multiplies with the core count, so do this after the per-core ceiling is raised, never before. A table with 3 chunks can never use a 4th core. Reason about peak demand, not average: a 4->2 core cut predicted -5% measured -19%."
+   "strategy": "Add cores with least-loaded dispatch and an order FIFO. Area multiplies with the core count, so do this after the per-core ceiling is raised, never before. A table with 3 chunks can never use a 4th core, and a row group whose largest page holds 86% of its bytes gains at most 1.16x from any number of cores. Reason about peak demand, not average: a 4->2 core cut predicted -5% measured -19%."
   },
   {
    "caveats": [],
@@ -128,7 +128,7 @@
    "kind": "rule",
    "pattern": "A change speeds up one synthetic shape a lot (tiny chunks, one huge chunk) and real tables not at all.",
    "source": "earlier campaign",
-   "strategy": "Expect it to be rejected: only real Parquet pages enter the score. Two earlier adoptions (+6% and +24% on synthetic, 0% on real) were reverted. Aim changes at what real column data does: 5-27 bytes per element, pages of hundreds of bytes to 64 KiB, overlapping copies in sequential integers."
+   "strategy": "Expect it to be rejected: only whole real Parquet row groups enter the score. Two earlier adoptions (+6% and +24% on synthetic, 0% on real) were reverted. Aim changes at what real column data does: about 6-7 bytes per element, pages from hundreds of bytes to 15 MB with 98% of the bytes in pages longer than 64 KiB, overlapping copies in sequential integers."
   },
   {
    "caveats": [],
@@ -196,7 +196,7 @@
    "passed": 0,
    "pattern": "copy slot saturated: the profile shows copies per cycle at or near its ceiling while the literal slot, the ports and the core datapath still have headroom. Real column data is copy-dominated, so the copy slot binds long before any byte-width ceiling does.",
    "source": "the copy/literal split in analyse.py",
-   "strategy": "Raise how many copy elements per cycle leave the decoder and reach the datapath: a second copy slot in element_stream carried through cmd_gen_1, cmd_gen_2 and the datapath, or a second core with least-loaded chunk dispatch when the workload has more chunks than cores. Overlapping copies (offset < length) and chunk boundaries are where earlier attempts at this broke, so test those first.",
+   "strategy": "Raise how many copy elements per cycle leave the decoder and reach the datapath: a second copy slot in element_stream carried through cmd_gen_1, cmd_gen_2 and the datapath, or a second core with least-loaded chunk dispatch when the scored bytes are spread over more chunks than cores (a chunk runs on one core). Overlapping copies (offset < length) and chunk boundaries are where earlier attempts at this broke, so test those first.",
    "tried": 0
   }
  ],
