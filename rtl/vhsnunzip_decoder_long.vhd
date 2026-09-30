@@ -41,6 +41,12 @@ begin
     variable offn   : unsigned(8 downto 0) := (others => '0');
     variable offnh  : unsigned(23 downto 0) := (others => '0');
 
+    -- Same as `offn`, but already stepped back by one line: the -8 is folded
+    -- into the literal-length addend, which is not derived from `off`, so the
+    -- exhausted and non-exhausted next offsets are two parallel adds selected by
+    -- `exh` instead of an add followed by a borrow chain gated by `exh`.
+    variable offnm  : unsigned(8 downto 0) := (others => '0');
+
     -- Same as `off`, but modulo the line width and converted to integer.
     variable ofi    : natural range 0 to 7 := 0;
 
@@ -87,10 +93,33 @@ begin
     -- bits of the header byte itself.
     variable bigli  : boolean;
 
-    -- Truncated copy of `offn` for the line-exhausted comparison, valid only
-    -- when `bigli` is clear. offns is at most 13 and the literal length is at
-    -- most 7 there, so five bits always suffice.
-    variable offns2 : unsigned(4 downto 0);
+    -- The seek of this cycle, split into its three addends instead of being
+    -- accumulated by three adders in series. k1 is the copy header size (0, 2,
+    -- 3 or 5 bytes), k2 the literal header size (0, 1 or 2..5 bytes) and kli3
+    -- the low part of the literal data seek (0, or li_len(2..0)+1). khd is the
+    -- total header size and ktot the whole five-bit seek. None of them involves
+    -- `off`, so none of them is on the off -> off recurrence: they are pure
+    -- functions of the window bytes.
+    variable k1     : unsigned(2 downto 0);
+    variable k2     : unsigned(2 downto 0);
+    variable khd    : unsigned(3 downto 0);
+    variable kli3   : unsigned(3 downto 0);
+    variable kli9   : unsigned(8 downto 0);
+    variable kli9m  : unsigned(8 downto 0);
+    variable ktot   : unsigned(4 downto 0);
+
+    -- How far the seek may go before it leaves the line (`dend`) and before it
+    -- leaves the valid part of the 16-byte window (`dwen`). Both are differences
+    -- of two registers -- cdh.endi/cdh.wendi against off(2..0) -- so they are
+    -- available at the same time as the byte muxes that select the element tag.
+    -- Comparing the *seek* against them replaces "add the header sizes to off,
+    -- then compare the sum against endi", which put two to three carry chains
+    -- in series behind the tag decode and in front of the line-exhausted
+    -- decision. This is the carry-select form of that comparison: the addend
+    -- that arrives late is the small one, so it is the one left in front of the
+    -- comparator.
+    variable dend   : signed(5 downto 0);
+    variable dwen   : signed(5 downto 0);
 
     -- Set for the single cycle in which the first line of a chunk is shifted
     -- into the holding register. The chunk's start offset (the size of the
@@ -139,22 +168,27 @@ begin
         ---------------------------------------------------------------------
         -- Handle copy elements
         ---------------------------------------------------------------------
-        offns := resize(off(2 downto 0), 4);
         ofi := to_integer(off(2 downto 0));
         mbi := ofi;
+
+        -- The two comparison bounds, relative to the current offset. Both are
+        -- register minus register, so they resolve while the byte muxes below
+        -- are still resolving; see the declarations.
+        dend := signed(resize(cdh.endi, 6)) - signed(resize(off(2 downto 0), 6));
+        dwen := signed(resize(cdh.wendi, 6)) - signed(resize(off(2 downto 0), 6));
 
         case cdh.data(ofi)(1 downto 0) is
 
           when "01" =>
             -- 2-byte copy element.
             elh.cp_val := '1';
-            offns := offns + 2;
+            k1 := "010";
             lhdr := cdh.data(ofi + 2);
 
           when "10" =>
             -- 3-byte copy element.
             elh.cp_val := '1';
-            offns := offns + 3;
+            k1 := "011";
             lhdr := cdh.data(ofi + 3);
 
           when "11" =>
@@ -162,12 +196,13 @@ begin
             -- should be zero! Otherwise they'd encode an offset beyond
             -- 64kiB, which our memory is not long enough for.
             elh.cp_val := '1';
-            offns := offns + 5;
+            k1 := "101";
             lhdr := cdh.data(ofi + 5);
 
           when others =>
             -- Literal element.
             elh.cp_val := '0';
+            k1 := "000";
             lhdr := cdh.data(ofi);
 
         end case;
@@ -230,30 +265,44 @@ begin
         --    one extra command it costs is negligible, while decoding it here
         --    would put four more offns-indexed byte muxes and a 24-bit
         --    zero-compare in series with the copy tag decode.
-        hdr_ok := offns <= cdh.wendi
+        -- `offns <= cdh.wendi`, i.e. `off(2..0) + k1 <= cdh.wendi`, written as
+        -- `k1 <= cdh.wendi - off(2..0)` so that the sum the copy tag selects is
+        -- not added to anything before it is compared.
+        hdr_ok := signed(resize(k1, 6)) <= dwen
               and (elh.cp_val = '0' or lhdr(7 downto 4) /= "1111");
 
         if not hdr_ok then
           -- No element (for now); beyond end of stream, or starts on the next
           -- line and we cannot reach it.
           elh.li_val := '0';
+          k2 := "000";
 
         elsif lhdr(1 downto 0) /= "00" then
           -- Copy element.
           elh.li_val := '0';
+          k2 := "000";
 
         elsif lhdr(7 downto 4) = "1111" then
           -- Literal with 2- to 5-byte header. Only reachable with cp_val = '0',
           -- i.e. with the header at off(2..0).
           elh.li_val := '1';
-          offns := offns + 2 + unsigned(lhdr(3 downto 2));
+          k2 := "010" + unsigned(lhdr(3 downto 2));
 
         else
           -- Literal with 1-byte header.
           elh.li_val := '1';
-          offns := offns + 1;
+          k2 := "001";
 
         end if;
+
+        -- Total header size, and the post-header offset. The two header sizes
+        -- are added to each other rather than one after the other to `off`, so
+        -- `off` joins in a single adder that no longer feeds another one. k2 can
+        -- only exceed 1 when k1 is 0, because hdr_ok above refuses a multi-byte
+        -- literal header that sits behind a copy, so k1 + k2 <= 6 and offns <= 13,
+        -- exactly as before: it still fits four bits and never wraps.
+        khd  := resize(k1, 4) + resize(k2, 4);
+        offns := resize(off(2 downto 0), 4) + khd;
 
         elh.li_off := offns;
 
@@ -298,23 +347,30 @@ begin
 
         end if;
 
-        -- Seek past literal data.
-        offn := resize(offns, 9);
+        -- Seek past literal data. The literal part of the seek is formed on its
+        -- own and then added to `off` and to the header size in one three-input
+        -- adder, instead of being chained onto the post-header offset: the sum
+        -- is identical (offns = off(2..0) + khd, with off(8..3) zero whenever
+        -- this result is kept) but nothing waits for a previous carry chain.
         offnh := (others => '0');
+        kli9  := (others => '0');
+        kli9m := to_unsigned(504, 9);
+        kli3  := (others => '0');
         if elh.li_val = '1' then
-          offn := offn + elh.li_len(7 downto 0) + 1;
+          kli9  := resize(elh.li_len(7 downto 0), 9) + 1;
+          kli9m := resize(elh.li_len(7 downto 0), 9) - 7;
+          kli3  := resize(elh.li_len(2 downto 0), 4) + 1;
           offnh := elh.li_len(31 downto 8);
         end if;
+        offn  := resize(off(2 downto 0), 9) + resize(khd, 9) + kli9;
+        offnm := resize(off(2 downto 0), 9) + resize(khd, 9) + kli9m;
 
         -- Same seek, but only over the low three bits of the literal length,
         -- and the flag that says those three bits are not the whole story.
-        -- Both are computed next to the nine-bit seek above rather than after
-        -- it; see the line-exhausted decision below.
+        -- `ktot` is the whole seek *relative to off*, so it is a function of the
+        -- window bytes only; see the line-exhausted decision below.
         bigli  := elh.li_val = '1' and elh.li_len(31 downto 3) /= 0;
-        offns2 := resize(offns, 5);
-        if elh.li_val = '1' then
-          offns2 := offns2 + resize(elh.li_len(2 downto 0), 5) + 1;
-        end if;
+        ktot   := resize(khd, 5) + resize(kli3, 5);
 
         ---------------------------------------------------------------------
 
@@ -328,19 +384,22 @@ begin
           elh.cp_val := '0';
           elh.li_val := '0';
 
-          -- The offset did not move, so the line stays exhausted.
+          -- The offset did not move, so the line stays exhausted. Stepping to
+          -- the next line is the same subtraction as it always was; only the
+          -- other branch gets the folded form.
           exh := true;
+          off := off - 8;
 
         else
-          off := offn;
           offh := offnh;
 
           -- The line is exhausted when the new offset offn = offns + li_len + 1
           -- is past cdh.endi, or when the literal length has a non-zero high
-          -- part. Written that way the decision waits for the nine-bit seek
-          -- adder above, and it is what gates cdh.valid, which in turn selects
-          -- the load multiplexer in front of the entire tag decode: the whole
-          -- recurrence hangs off this one comparison.
+          -- part. Written literally like that the decision waits for the
+          -- nine-bit seek adder, and it is what gates cdh.valid, which in turn
+          -- selects the load multiplexer in front of the entire tag decode: the
+          -- whole recurrence hangs off this one comparison, so every level of
+          -- logic in front of it is paid for once per cycle.
           --
           -- cdh.endi is at most 7, so as soon as the literal is eight bytes or
           -- longer the answer is "exhausted" no matter what offns is, and the
@@ -348,20 +407,35 @@ begin
           -- reduction over li_len(31..3) which does not pass through the adder
           -- at all (and subsumes the old offnh /= 0 term, since a non-zero high
           -- part means a literal of at least 256 bytes). What is left is the
-          -- literals of 0..7 bytes, for which offn never exceeds 13+7+1 = 21
-          -- and the five-bit offns2 is exact. So the comparison behind the
-          -- adder shrinks from nine bits to five, and the wide part of it moves
-          -- off the recurrence and into a shallow OR beside it.
-          exh := bigli or offns2 > cdh.endi;
+          -- literals of 0..7 bytes, for which the seek never exceeds 13+7+1 = 21
+          -- and five bits are exact.
+          --
+          -- The remaining five-bit comparison used to be `off + ktot > endi`,
+          -- with `ktot` accumulated onto `off` by two or three adders in series
+          -- behind the tag decode. It is written here as `ktot > endi - off`
+          -- instead: `dend` is a difference of two registers and is ready before
+          -- the tag is, and `ktot` is a sum of three small window-derived
+          -- constants, so the recurrence now holds one narrow add and one
+          -- magnitude compare rather than a chain of them. In this branch
+          -- off <= cdh.endi <= 7, so off = off(2..0) and dend >= 0, and the
+          -- comparison is exactly the old one.
+          exh := bigli or signed(resize(ktot, 6)) > dend;
+
+          -- Both candidate next offsets were formed in parallel above, so the
+          -- late `exh` only selects between them.
+          if exh then
+            off := offnm;
+          else
+            off := offn;
+          end if;
 
         end if;
 
         -- If our new offset is beyond the current line, invalidate the line
-        -- and decrease by 8 accordingly to prepare for the next line. Also
-        -- indicate to the datapath that it should pop from the literal line
-        -- stream after executing this command to stay in sync.
+        -- (the offset was already stepped back by 8 above). Also indicate to
+        -- the datapath that it should pop from the literal line stream after
+        -- executing this command to stay in sync.
         if exh then
-          off := off - 8;
           cdh.valid := '0';
           elh.ld_pop := '1';
           elh.last := cdh.last;
