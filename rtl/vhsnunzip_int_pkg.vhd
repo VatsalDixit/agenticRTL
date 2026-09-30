@@ -119,6 +119,14 @@ package vhsnunzip_int_pkg is
     last      : std_logic;
     endi      : unsigned(2 downto 0);
 
+    -- Index of the last valid byte of the *whole* 16-byte window. This is
+    -- 8 + the lookahead line's endi when the lookahead line exists, and equal
+    -- to endi when this is the last line of the chunk (the lookahead half
+    -- then holds stale data). The decoder uses this to tell whether an
+    -- element header that starts past the first line can be decoded out of
+    -- the lookahead half rather than being deferred to the next cycle.
+    wendi     : unsigned(3 downto 0);
+
   end record;
 
   constant COMPRESSED_STREAM_DOUBLE_INIT : compressed_stream_double := (
@@ -127,7 +135,8 @@ package vhsnunzip_int_pkg is
     first     => UNDEF,
     start     => (others => UNDEF),
     last      => UNDEF,
-    endi      => (others => UNDEF)
+    endi      => (others => UNDEF),
+    wendi     => (others => UNDEF)
   );
 
   procedure stream_des(l: inout line; value: inout compressed_stream_double; to_x: boolean);
@@ -747,6 +756,9 @@ package body vhsnunzip_int_pkg is
       value.last := vhsn_to_x01(value.last);
       value.endi := vhsn_to_x01(value.endi);
     end if;
+    -- The reference stream dumps predate the wendi field; reconstruct the
+    -- conservative value from what is in them (no usable lookahead half).
+    value.wendi := "0" & value.endi;
     value.valid := '1';
   end procedure;
 
