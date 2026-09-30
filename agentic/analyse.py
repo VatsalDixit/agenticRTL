@@ -306,6 +306,15 @@ def lever(combined, wns_ns=None):
                            'stale, so trust the raw counters, not the '
                            'utilisations.' % ', '.join(combined['stale_ceilings']))}
     tight = combined['tightest_utilisation']
+    if tight >= SATURATED and combined['tightest'] == 'copy slot':
+        return {'lever': 'width',
+                'reason': ('copy slot is at %.0f%% of its ceiling: the design issues a '
+                           'fixed number of copy elements per cycle, and that caps '
+                           'bytes/cycle at bytes / copies on each draw (see the cap '
+                           'lines). Only MORE COPY ELEMENTS PER CYCLE (dual issue) or '
+                           'a faster clock move it; a wider line, a wider port or a '
+                           'larger copy cap cannot, since copies are shorter than '
+                           'the line.' % (100.0 * tight))}
     if tight >= SATURATED:
         return {'lever': 'width',
                 'reason': ('%s is at %.0f%% of its ceiling. A faster clock cannot '
@@ -346,6 +355,14 @@ def describe(report, name=None):
                             / max(1, shape['expanded_bytes']),
                             usable_cores(shape['chunks'], shape),
                             shape.get('long_chunks', 0)))
+    shape = report.get('shape') or {}
+    copy = next((st for st in report['stages'] if st['name'] == 'copy slot'), None)
+    if copy and shape.get('copies'):
+        cap = shape['expanded_bytes'] / float(shape['copies']) * copy['ceiling']
+        lines.append('  copy-issue cap: %g copy element(s) per cycle caps this draw at '
+                     '%.2f B/cycle (bytes / copies); measured %.2f, %.0f%% of it'
+                     % (copy['ceiling'], cap, report['bytes_per_cycle'],
+                        100.0 * report['bytes_per_cycle'] / cap))
     if report.get('cores', 1) > (report.get('usable_cores') or 1):
         lines.append('  usable cores %.2f of %d: a chunk runs on one core, so the '
                      'others only get the bytes outside the largest one'

@@ -566,10 +566,11 @@ def progress_text(state):
                p.get('bpc_gain_pct') or 0, p.get('fmax_gain_pct') or 0, p.get('area_gain_pct') or 0))
 
 
-def build_ctx(state, skills_data, iteration, guide_text=''):
+def build_ctx(state, skills_data, iteration, guide_text='', roadmap_text=''):
     best = state['best']['metrics']
     return {
         'guide_text': guide_text,
+        'roadmap_text': roadmap_text,
         'goal_text': state['goal_text'],
         'iteration': iteration,
         'max_iters': state['max_iters'],
@@ -606,6 +607,15 @@ class Run(object):
         self.state['updated'] = now_iso()
         write_json(self.state_path, self.state)
         report.write_report(self.state, os.path.join(self.dir, 'report.html'))
+
+    def roadmap_text(self):
+        """roadmap.md in the run folder: the engineer's staged plan, read every
+        iteration so it can be edited while the run goes on, or ''."""
+        try:
+            with open(os.path.join(self.dir, 'roadmap.md'), encoding='utf-8') as fil:
+                return fil.read().strip()
+        except IOError:
+            return ''
 
     def guide_text(self):
         """The design guide for the best design so far, or ''."""
@@ -777,7 +787,20 @@ def restart(name, log):
     cmd = [sys.executable, os.path.abspath(__file__)] + restart_argv(name)
     log('restarting to pick up the kit change (restart %d of at most 20)' % gen)
     sys.stdout.flush()
-    raise SystemExit(subprocess.call(cmd, env=env))
+    # The child owns the run from here and saves it itself. This process must
+    # never save again: its state is older than the child's. It used to fall
+    # through to the interrupt handler when the window closed and write its
+    # copy last, which rolled hacc-real200 back from 24 iterations to 10.
+    # subprocess.call would also kill the child on Ctrl+C before it saved.
+    child = subprocess.Popen(cmd, env=env)
+    while True:
+        try:
+            rc = child.wait()
+            break
+        except KeyboardInterrupt:
+            continue            # the child got the same signal and is saving
+    sys.stdout.flush()
+    os._exit(rc)
 
 
 def restart_argv(name):
@@ -1115,7 +1138,8 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     log('lever: %s -- %s' % (parent.get('lever', {}).get('lever'),
                              parent.get('lever', {}).get('reason')))
 
-    ctx = build_ctx(state, skills_data, k, guide_text=run.guide_text())
+    ctx = build_ctx(state, skills_data, k, guide_text=run.guide_text(),
+                    roadmap_text=run.roadmap_text())
     ctx['check_text'] = run.check_text
     if resuming:
         directions = [slot['direction'] for slot in resuming]

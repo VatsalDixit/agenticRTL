@@ -638,6 +638,11 @@ def build_user_prompt(ctx, direction, others, resumed=False):
     lines.append('ITERATION %d of %d. Best design so far vs the original: %s'
                  % (ctx['iteration'], ctx['max_iters'], ctx['progress_text']))
     lines.append('')
+    if ctx.get('roadmap_text'):
+        lines.append('ROADMAP FROM THE ENGINEER (the architecture this run is building '
+                     'towards; your assignment below is one step of it or beside it)')
+        lines.append(ctx['roadmap_text'])
+        lines.append('')
     lines.append('CURRENT DESIGN, MEASURED')
     lines.append(ctx['state_text'])
     lines.append('')
@@ -710,6 +715,9 @@ STAGE PROFILE
 
 LEVER: %s -- %s
 
+ROADMAP FROM THE ENGINEER
+%s
+
 SKILL LIBRARY
 %s
 
@@ -720,6 +728,12 @@ HISTORY (most recent last)
 %s
 
 Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
+- If a ROADMAP is given, direction 1 MUST carry out its next unfinished step
+  (read HISTORY to see which steps have landed), as one coherent change,
+  even where the skill library marks that mechanism AVOID: the roadmap is
+  the engineer's call and overrides the library for the mechanisms it names.
+  If a step failed, direction 1 retries it with the failure fixed, or takes
+  the roadmap's fallback. The other directions stay free.
 - Each direction targets the measured bottleneck or a credible second one;
   never an idle stage. Prefer high-confidence skills that fit the profile.
 - Direction 1 MUST raise the per-cycle ceiling of the stage the lever names
@@ -754,7 +768,7 @@ Reply with JSON only:
  "note": "one or two sentences on the overall state"}
 """ % (ctx['goal_text'], ctx['iteration'], ctx['max_iters'], ctx['progress_text'],
        ctx['state_text'], ctx['profile_text'], ctx['lever']['lever'],
-       ctx['lever']['reason'], ctx['skills_text'],
+       ctx['lever']['reason'], ctx.get('roadmap_text') or '(none)', ctx['skills_text'],
        ctx.get('facts_text') or '(none recorded yet)',
        ctx['history_text'] or '(nothing tried yet)', n, n)
 
