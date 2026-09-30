@@ -202,6 +202,21 @@ RETRY_MIN_GAIN_PCT = 5.0
 RETRY_PER_ITERATION = 2
 
 
+def retry_eligible(c, retried):
+    """Whether a measured candidate may be offered again (git aside).
+
+    A retry is its original candidate again, on its own new branch, and the
+    original has had its one retry. Without this check the same design came
+    back after every adoption: hacc-real200 measured one 32-byte line three
+    times, in iterations 9, 10 and 11.
+    """
+    m = c.get('measured') or {}
+    return (c.get('outcome') in ('too_expensive', 'candidate') and bool(c.get('branch'))
+            and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT
+            and c['branch'] not in retried
+            and not str(c.get('id') or '').startswith('retry-'))
+
+
 def retry_candidates(run, state, k, iter_dir, log):
     """Re-merge earlier rejected candidates with a large gain onto the current
     best and offer them as extra candidates.
@@ -209,7 +224,7 @@ def retry_candidates(run, state, k, iter_dir, log):
     A candidate can be rejected for a rule that later changes (area pricing),
     or lose only because a sibling scored better that iteration. If its
     branch still merges cleanly onto the best design, it is measured again.
-    Each old candidate is retried once.
+    Each old candidate is retried once, and a retry is never retried.
 
     A candidate built on the current best is left alone until the best moves:
     the merge would fast-forward to the very design already measured, and a
@@ -220,10 +235,7 @@ def retry_candidates(run, state, k, iter_dir, log):
     pool = []
     for it in state['iterations']:
         for c in it.get('candidates', []):
-            m = c.get('measured') or {}
-            if c.get('outcome') in ('too_expensive', 'candidate') and c.get('branch') \
-                    and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT \
-                    and c['branch'] not in retried \
+            if retry_eligible(c, retried) \
                     and git_ok(['rev-parse', '--verify', 'refs/heads/' + c['branch']]) \
                     and not git_ok(['merge-base', '--is-ancestor', best, c['branch']]):
                 pool.append(c)

@@ -510,6 +510,19 @@ def test_synthesis_runs_alongside_the_long_draws():
           str(events))
 
 
+def test_a_retry_is_never_retried():
+    import loop
+    old = {'outcome': 'too_expensive', 'branch': 'agentic-cand/r/i9-c1',
+           'id': 'thirtytwo-byte-line', 'measured': {'gain_pct': 5.76}}
+    check('a rejected candidate with a large gain gets one retry',
+          loop.retry_eligible(old, []) and not loop.retry_eligible(old, [old['branch']]))
+    again = dict(old, branch='agentic-cand/r/i10-r1', id='retry-thirtytwo-byte-line')
+    check('the retry itself is not retried after the next adoption',
+          not loop.retry_eligible(again, []))
+    small = dict(old, measured={'gain_pct': 3.0})
+    check('a small gain is not retried', not loop.retry_eligible(small, []))
+
+
 def test_simulators_are_shared_out():
     import loop
     saved = loop.CONFIG['sim_slots']
