@@ -46,19 +46,19 @@ begin
     -- pointers from the relative offsets in the copy elements. lt_val stores
     -- whether the pointer is valid.
     variable lt_val : std_logic;
-    variable lt_ptr : unsigned(12 downto 0);
+    variable lt_ptr : unsigned(11 downto 0);
 
     -- Elements are available in c1h that we can't load yet because we're still
     -- busy with a literal from the previous element transfer.
     variable c1_pend: std_logic;
 
     -- Preprocessed copy length. The sign bit is an inverted validity bit.
-    variable cp_len : signed(3 downto 0) := (others => '1');
+    variable cp_len : signed(4 downto 0) := (others => '1');
 
     -- Temporary variables used during decoding.
     variable cp_rel : signed(16 downto 0);
-    variable cp_lt  : unsigned(12 downto 0);
-    variable len    : unsigned(3 downto 0);
+    variable cp_lt  : unsigned(11 downto 0);
+    variable len    : unsigned(4 downto 0);
 
     -- Remaining literal length, diminished-one. The sign bit is an inverted
     -- validity bit.
@@ -76,10 +76,10 @@ begin
     variable li_off : unsigned(3 downto 0);
 
     -- Current decompressed line offset.
-    variable off    : unsigned(3 downto 0);
+    variable off    : unsigned(4 downto 0);
 
     -- Number of bytes we can (still) write this cycle.
-    variable budget : unsigned(3 downto 0);
+    variable budget : unsigned(4 downto 0);
 
     -- Temporary flag, representing whether we can advance to the next element
     -- information record.
@@ -109,7 +109,7 @@ begin
       if c1h.valid = '0' and lt_val = '1' then
         c1h := c1;
         if c1h.valid = '1' then
-          c1_pend := not c1h.cp_len(3) or c1h.li_val;
+          c1_pend := not c1h.cp_len(4) or c1h.li_val;
         end if;
       end if;
 
@@ -133,14 +133,17 @@ begin
 
         -- Compute short-term address. This coincidentally works out to a
         -- carry-free operation!
-        cmh.st_addr := not unsigned(cp_rel(7 downto 3));
+        cmh.st_addr := not unsigned(cp_rel(8 downto 4));
 
         -- Compute long-term addresses. This unfortunately is not exactly
-        -- carry-free...
-        cp_lt := lt_ptr + unsigned(cp_rel(15 downto 3));
+        -- carry-free... cp_lt counts 16-byte lines; each such line lives in one
+        -- of the two RAM pairs (selected by its LSB), so the even/odd address
+        -- pair below reads the 32-byte window that contains any 16-byte line
+        -- and its lookahead line.
+        cp_lt := lt_ptr + unsigned(cp_rel(15 downto 4));
         cmh.lt_swap := cp_lt(0);
-        cmh.lt_adev := cp_lt(12 downto 1) + cp_lt(0 downto 0);
-        cmh.lt_adod := cp_lt(12 downto 1);
+        cmh.lt_adev := resize(cp_lt(11 downto 1) + cp_lt(0 downto 0), 12);
+        cmh.lt_adod := resize(cp_lt(11 downto 1), 12);
 
         -- If we need to read too far back for the short term memory to reach
         -- in all cases, use the long-term memory. The reason for the
@@ -149,8 +152,8 @@ begin
         -- can read back the results from the previous cycle immediately),
         -- while the long-term memory is pipelined, has port arbiters, and so
         -- on, so it has significant write-to-read latency.
-        if cp_rel(16 downto 3) < -31 then
-          cmh.lt_val := not cp_len(3);
+        if cp_rel(16 downto 4) < -31 then
+          cmh.lt_val := not cp_len(4);
         else
           cmh.lt_val := '0';
         end if;
@@ -158,13 +161,13 @@ begin
         -- Determine the rotation/byte mux selection.
         cmh.cp_rle := c1h.cp_rle;
         if c1h.cp_rle = '1' then
-          cmh.cp_rol := "0" & unsigned(cp_rel(2 downto 0));
+          cmh.cp_rol := "0" & unsigned(cp_rel(3 downto 0));
         else
-          cmh.cp_rol := unsigned(cp_rel(2 downto 0)) - off;
+          cmh.cp_rol := unsigned(cp_rel(3 downto 0)) - off;
         end if;
 
         -- Determine how many byte slots are still available for the literal.
-        budget := unsigned(cp_len(3 downto 0)) xor "0111";
+        budget := unsigned(cp_len(4 downto 0)) xor "01111";
 
         -- Update state for copy.
         off := off + unsigned(cp_len) + 1;
@@ -179,7 +182,7 @@ begin
 
         -- Determine how many literal bytes we can write.
         if li_len < signed(resize(budget, li_len'length)) then
-          len := unsigned(li_len(3 downto 0)) + 1;
+          len := unsigned(li_len(4 downto 0)) + 1;
         else
           len := budget;
         end if;
@@ -206,16 +209,17 @@ begin
         -- number of literal bytes this cycle is 15-li_off. For li_off < 8
         -- that is 8 or more, so this clamp is a no-op there and only the
         -- lookahead case is affected.
-        if len > (not li_off) then
-          len := not li_off;
+        if len > resize(not li_off, len'length) then
+          len := resize(not li_off, len'length);
         end if;
 
-        -- Determine the rotation for the literal.
-        cmh.li_rol := li_off - off;
+        -- Determine the rotation for the literal. The literal window is exactly
+        -- one 16-byte decompressed line wide, so only the low 4 bits matter.
+        cmh.li_rol := li_off - off(3 downto 0);
 
         -- Update state for literal.
         off := off + len;
-        li_off := li_off + len;
+        li_off := li_off + len(3 downto 0);
         li_len := li_len - signed(resize(len, li_len'length));
 
         -- Save the offset after the literal so the datapath can derive which
@@ -224,10 +228,10 @@ begin
         cmh.li_end := off;
 
         -- Carry the MSB of the decompression offset into the line pointer.
-        if off(3) = '1' then
+        if off(4) = '1' then
           lt_ptr := lt_ptr + 1;
         end if;
-        off(3) := '0';
+        off(4) := '0';
 
         -- Determine whether we're done with this element information record.
         advance := true;
@@ -277,7 +281,7 @@ begin
 
       -- Load the long-term memory pointer when we get it.
       if lt_val = '0' and lt_off_ld = '1' then
-        lt_ptr := lt_off;
+        lt_ptr := lt_off(11 downto 0);
         lt_val := '1';
       end if;
 

@@ -241,7 +241,7 @@ package vhsnunzip_int_pkg is
     -- DIMINISHED-ONE, just like the value in the Snappy header (this saves a
     -- bit).
     cp_off    : unsigned(15 downto 0);
-    cp_len    : signed(3 downto 0);
+    cp_len    : signed(4 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -346,7 +346,7 @@ package vhsnunzip_int_pkg is
     --  - the effect of lt_swap is inverted on a byte-by-byte basis based on
     --    cp_rol.
     --
-    cp_rol    : unsigned(3 downto 0);
+    cp_rol    : unsigned(4 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -362,7 +362,7 @@ package vhsnunzip_int_pkg is
     -- + one. Bytes between cp_endi and endi are literal bytes. The copy
     -- selection signals can be decoded from this in the same way that the 
     -- byte strobe signals are determined from endi.
-    cp_end    : unsigned(3 downto 0);
+    cp_end    : unsigned(4 downto 0);
 
     -- Rotation for literals. The direction is rotate-left. The MSB should be
     -- handled by offsetting the SRL literal read by one line on a byte-by-byte
@@ -376,7 +376,7 @@ package vhsnunzip_int_pkg is
     -- (endi > 8) should be written to a holding register, as the beginning for
     -- the next line. The MSB therefore indicates that an aligned line of
     -- decompressed data is complete.
-    li_end    : unsigned(3 downto 0);
+    li_end    : unsigned(4 downto 0);
 
     -- Indicates that the literal data FIFO should be popped after this command
     -- has been handled.
@@ -429,14 +429,14 @@ package vhsnunzip_int_pkg is
     valid     : std_logic;
 
     -- Decompressed data line.
-    data      : byte_array(0 to 7);
+    data      : byte_array(0 to 15);
 
     -- Asserted to mark the last line of a chunk.
     last      : std_logic;
 
-    -- Indicates the number of valid bytes. This is always 8 when last is not
-    -- set, but could be anything from 0 to 8 inclusive for the last transfer.
-    cnt       : unsigned(3 downto 0);
+    -- Indicates the number of valid bytes. This is always 16 when last is not
+    -- set, but could be anything from 0 to 16 inclusive for the last transfer.
+    cnt       : unsigned(4 downto 0);
 
   end record;
 
@@ -467,8 +467,8 @@ package vhsnunzip_int_pkg is
       lt_rd_adev  : out unsigned(11 downto 0);
       lt_rd_adod  : out unsigned(11 downto 0);
       lt_rd_next  : in  std_logic;
-      lt_rd_even  : in  byte_array(0 to 7);
-      lt_rd_odd   : in  byte_array(0 to 7);
+      lt_rd_even  : in  byte_array(0 to 15);
+      lt_rd_odd   : in  byte_array(0 to 15);
       -- pragma translate_off
       dbg_cs      : out compressed_stream_single;
       dbg_cd      : out compressed_stream_double;
