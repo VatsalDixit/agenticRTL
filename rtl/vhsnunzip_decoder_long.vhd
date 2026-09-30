@@ -44,12 +44,30 @@ begin
     -- Same as `off`, but modulo the line width and converted to integer.
     variable ofi    : natural range 0 to 7 := 0;
 
-    -- Index of the literal element header within the 16-byte pre-decoded
-    -- window. Unlike `ofi` this is NOT taken modulo the line width, so it can
-    -- point into the lookahead half of the window.
-    variable lofi   : natural range 0 to 15 := 0;
+    -- The literal element header byte, taken from the 16-byte pre-decoded
+    -- window. It sits at off(2..0) + k, where k is 0 when this element has no
+    -- copy in front of the literal and 2, 3 or 5 for the three copy header
+    -- sizes, so it can be anywhere in 0..12 and may well land in the lookahead
+    -- half of the window. Rather than indexing the window with the post-copy
+    -- offset -- which would put an adder and a 16:1 byte mux in series behind
+    -- the copy tag decode -- the four candidate bytes are selected with the
+    -- register-derived index off(2..0) and then picked apart by the copy tag,
+    -- so the header byte is available one select after the tag itself. Three of
+    -- the four candidates (k = 0, 2 and the k = 3 byte, which doubles as a
+    -- multi-byte length byte below) are muxes the copy decode needs anyway.
+    variable lhdr   : std_logic_vector(7 downto 0) := (others => '0');
 
-    -- Whether the literal element header at `lofi` can be decoded this cycle.
+    -- Index of the element header currently being decoded, taken straight from
+    -- the `off` register instead of from the post-copy offset. A multi-byte
+    -- literal header is only ever decoded for an element that has no copy in
+    -- front of it (see `hdr_ok` below), and for such an element the literal
+    -- header sits exactly at off(2..0), so its length bytes can be selected
+    -- with this register-derived index. That keeps those byte muxes (and hence
+    -- the 24-bit `offnh /= 0` reduction behind them) off the
+    -- tag -> offset -> line-exhausted path that owns the worst timing path.
+    variable mbi    : natural range 0 to 7 := 0;
+
+    -- Whether the literal element header in `lhdr` can be decoded this cycle.
     variable hdr_ok : boolean;
 
     -- Output holding register.
@@ -85,6 +103,7 @@ begin
         ---------------------------------------------------------------------
         offns := resize(off(2 downto 0), 4);
         ofi := to_integer(off(2 downto 0));
+        mbi := ofi;
 
         case cdh.data(ofi)(1 downto 0) is
 
@@ -92,11 +111,13 @@ begin
             -- 2-byte copy element.
             elh.cp_val := '1';
             offns := offns + 2;
+            lhdr := cdh.data(ofi + 2);
 
           when "10" =>
             -- 3-byte copy element.
             elh.cp_val := '1';
             offns := offns + 3;
+            lhdr := cdh.data(ofi + 3);
 
           when "11" =>
             -- 5-byte copy element. Note that we ignore byte 4 and 5; they
@@ -104,10 +125,12 @@ begin
             -- 64kiB, which our memory is not long enough for.
             elh.cp_val := '1';
             offns := offns + 5;
+            lhdr := cdh.data(ofi + 5);
 
           when others =>
             -- Literal element.
             elh.cp_val := '0';
+            lhdr := cdh.data(ofi);
 
         end case;
 
@@ -126,14 +149,11 @@ begin
         ---------------------------------------------------------------------
         -- Handle literal elements
         ---------------------------------------------------------------------
-        ofi := to_integer(offns(2 downto 0));
-
-        -- Index of the literal header inside the full 16-byte window. When
-        -- the copy element header above ended within the current line this is
-        -- the same as ofi; when it ran past byte 7 it points into the
-        -- lookahead half that the pre-decoder gives us.
-        lofi := to_integer(offns);
-
+        -- `lhdr` above is the header byte at the post-copy offset `offns`, i.e.
+        -- what used to be written cdh.data(to_integer(offns)). Nothing is
+        -- indexed by the post-copy offset any more: no byte mux sits behind the
+        -- copy tag decode.
+        --
         -- Originally, a literal header that started beyond the current line
         -- was simply not decoded: the element was emitted with only the copy,
         -- the line was popped, and the literal became an element (and hence a
@@ -158,32 +178,37 @@ begin
         --    chunk and the lookahead half holds stale bytes. Without this the
         --    decoder happily reads the pre-decoder's padding as a one-byte
         --    literal header and invents an output byte.
-        --  - Only single-byte literal headers are taken from the lookahead
-        --    half. A multi-byte header would need its length bytes indexed at
-        --    lofi+1..lofi+4, which can run past the end of the window, and
-        --    offns (4 bits) could wrap. Multi-byte headers mean literals of
-        --    60+ bytes, which are handled over many cycles anyway, so there
-        --    is nothing to win there.
-        -- Note that, given offns <= wendi, "offns <= endi" is the same test as
-        -- "offns(3) = '0'": when endi < 7 the line is the last one of a chunk
-        -- and wendi equals endi, and when endi = 7 the low half is exactly
-        -- offns(3) = '0'. So this needs one comparator, not two.
+        --  - A multi-byte literal header is only decoded when this element has
+        --    no copy in front of it, i.e. when the header sits at off(2..0)
+        --    itself. Its length bytes then live at off(2..0)+1..+4, which are
+        --    selected from the `off` register and not from the post-copy
+        --    offset, so they cost no logic depth on the tag -> offset ->
+        --    line-exhausted path. When a copy IS in front of the header, a
+        --    multi-byte header is simply not decoded: the element is emitted
+        --    with only the copy, `off` is left pointing at the literal header,
+        --    and the literal becomes an element of its own on the next cycle
+        --    (the pre-i4 behaviour for this case). A multi-byte header means a
+        --    literal of 60+ bytes, which occupies many commands anyway, so the
+        --    one extra command it costs is negligible, while decoding it here
+        --    would put four more offns-indexed byte muxes and a 24-bit
+        --    zero-compare in series with the copy tag decode.
         hdr_ok := offns <= cdh.wendi
-              and (offns(3) = '0' or cdh.data(lofi)(7 downto 4) /= "1111");
+              and (elh.cp_val = '0' or lhdr(7 downto 4) /= "1111");
 
         if not hdr_ok then
           -- No element (for now); beyond end of stream, or starts on the next
           -- line and we cannot reach it.
           elh.li_val := '0';
 
-        elsif cdh.data(lofi)(1 downto 0) /= "00" then
+        elsif lhdr(1 downto 0) /= "00" then
           -- Copy element.
           elh.li_val := '0';
 
-        elsif cdh.data(lofi)(7 downto 4) = "1111" then
-          -- Literal with 2- to 5-byte header. Only reachable for lofi <= 7.
+        elsif lhdr(7 downto 4) = "1111" then
+          -- Literal with 2- to 5-byte header. Only reachable with cp_val = '0',
+          -- i.e. with the header at off(2..0).
           elh.li_val := '1';
-          offns := offns + 2 + unsigned(cdh.data(lofi)(3 downto 2));
+          offns := offns + 2 + unsigned(lhdr(3 downto 2));
 
         else
           -- Literal with 1-byte header.
@@ -194,40 +219,44 @@ begin
 
         elh.li_off := offns;
 
-        -- Note that the multi-byte-header branches below can only be *taken
-        -- with li_val set* when lofi <= 7, in which case lofi = ofi; keeping
-        -- the length bytes indexed by ofi therefore leaves their byte mux
-        -- exactly as wide as it was (indices 1..11) while the header byte
-        -- itself is selected from the full 16-byte window.
-        if std_match(cdh.data(lofi), "111100--") then
+        -- The multi-byte-header branches below can only be *taken with li_val
+        -- set* when this element carries no copy, in which case the header sits
+        -- at mbi = off(2..0). Their length bytes are therefore indexed by `mbi`,
+        -- which comes out of the `off` register: bytes mbi+1 and mbi+2 are
+        -- already selected for the copy offset above, so only mbi+3 and mbi+4
+        -- add a mux, and none of them sit behind the copy tag decode. When the
+        -- branch is taken with li_val clear the length is don't-care, because
+        -- `offn`/`offnh` only consume it under li_val (below) and cmd_gen
+        -- ignores li_len when li_val is clear.
+        if std_match(lhdr, "111100--") then
           -- Literal with 2-byte header, or not a literal.
           elh.li_len := X"000000"
-                      & unsigned(cdh.data(ofi + 1));
+                      & unsigned(cdh.data(mbi + 1));
 
-        elsif std_match(cdh.data(lofi), "111101--") then
+        elsif std_match(lhdr, "111101--") then
           -- Literal with 3-byte header, or not a literal.
           elh.li_len := X"0000"
-                      & unsigned(cdh.data(ofi + 2))
-                      & unsigned(cdh.data(ofi + 1));
+                      & unsigned(cdh.data(mbi + 2))
+                      & unsigned(cdh.data(mbi + 1));
 
-        elsif std_match(cdh.data(lofi), "111110--") then
+        elsif std_match(lhdr, "111110--") then
           -- Literal with 4-byte header, or not a literal.
           elh.li_len := X"00"
-                      & unsigned(cdh.data(ofi + 3))
-                      & unsigned(cdh.data(ofi + 2))
-                      & unsigned(cdh.data(ofi + 1));
+                      & unsigned(cdh.data(mbi + 3))
+                      & unsigned(cdh.data(mbi + 2))
+                      & unsigned(cdh.data(mbi + 1));
 
-        elsif std_match(cdh.data(lofi), "111111--") then
+        elsif std_match(lhdr, "111111--") then
           -- Literal with 5-byte header, or not a literal.
-          elh.li_len := unsigned(cdh.data(ofi + 4))
-                      & unsigned(cdh.data(ofi + 3))
-                      & unsigned(cdh.data(ofi + 2))
-                      & unsigned(cdh.data(ofi + 1));
+          elh.li_len := unsigned(cdh.data(mbi + 4))
+                      & unsigned(cdh.data(mbi + 3))
+                      & unsigned(cdh.data(mbi + 2))
+                      & unsigned(cdh.data(mbi + 1));
 
         else
           -- Literal with 1-byte header, or not a literal.
           elh.li_len := X"000000"
-                      & "00" & unsigned(cdh.data(lofi)(7 downto 2));
+                      & "00" & unsigned(lhdr(7 downto 2));
 
         end if;
 
