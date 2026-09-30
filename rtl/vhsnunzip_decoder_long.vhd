@@ -70,6 +70,28 @@ begin
     -- Whether the literal element header in `lhdr` can be decoded this cycle.
     variable hdr_ok : boolean;
 
+    -- Whether this line is exhausted by the element decoded this cycle, i.e.
+    -- whether the holding register must be reloaded and the literal line
+    -- popped. This is the head of the decode recurrence: it feeds cdh.valid,
+    -- which selects the load multiplexer in front of the whole tag decode, and
+    -- place-and-route names that self-loop as the worst path of the design.
+    -- See the comment at its assignment for why it does not wait for the
+    -- nine-bit literal seek adder.
+    variable exh    : boolean;
+
+    -- Set when the literal of this element is eight bytes or longer. Such an
+    -- element always runs past the end of the current eight-byte line,
+    -- whatever the offset it starts at, so this term settles the line-exhausted
+    -- decision without the seek adder. It is a plain OR reduction of the high
+    -- bits of the literal length, which for the common one-byte header is three
+    -- bits of the header byte itself.
+    variable bigli  : boolean;
+
+    -- Truncated copy of `offn` for the line-exhausted comparison, valid only
+    -- when `bigli` is clear. offns is at most 13 and the literal length is at
+    -- most 7 there, so five bits always suffice.
+    variable offns2 : unsigned(4 downto 0);
+
     -- Set for the single cycle in which the first line of a chunk is shifted
     -- into the holding register. The chunk's start offset (the size of the
     -- varint-encoded uncompressed length header, 1 to 5) is loaded into `off`
@@ -284,6 +306,16 @@ begin
           offnh := elh.li_len(31 downto 8);
         end if;
 
+        -- Same seek, but only over the low three bits of the literal length,
+        -- and the flag that says those three bits are not the whole story.
+        -- Both are computed next to the nine-bit seek above rather than after
+        -- it; see the line-exhausted decision below.
+        bigli  := elh.li_val = '1' and elh.li_len(31 downto 3) /= 0;
+        offns2 := resize(offns, 5);
+        if elh.li_val = '1' then
+          offns2 := offns2 + resize(elh.li_len(2 downto 0), 5) + 1;
+        end if;
+
         ---------------------------------------------------------------------
 
         -- Invalidate the decoded elements if we were actually decoding
@@ -295,16 +327,40 @@ begin
         if off > cdh.endi or offh /= 0 then
           elh.cp_val := '0';
           elh.li_val := '0';
+
+          -- The offset did not move, so the line stays exhausted.
+          exh := true;
+
         else
           off := offn;
           offh := offnh;
+
+          -- The line is exhausted when the new offset offn = offns + li_len + 1
+          -- is past cdh.endi, or when the literal length has a non-zero high
+          -- part. Written that way the decision waits for the nine-bit seek
+          -- adder above, and it is what gates cdh.valid, which in turn selects
+          -- the load multiplexer in front of the entire tag decode: the whole
+          -- recurrence hangs off this one comparison.
+          --
+          -- cdh.endi is at most 7, so as soon as the literal is eight bytes or
+          -- longer the answer is "exhausted" no matter what offns is, and the
+          -- adder result is irrelevant. That case is exactly `bigli`, a bare OR
+          -- reduction over li_len(31..3) which does not pass through the adder
+          -- at all (and subsumes the old offnh /= 0 term, since a non-zero high
+          -- part means a literal of at least 256 bytes). What is left is the
+          -- literals of 0..7 bytes, for which offn never exceeds 13+7+1 = 21
+          -- and the five-bit offns2 is exact. So the comparison behind the
+          -- adder shrinks from nine bits to five, and the wide part of it moves
+          -- off the recurrence and into a shallow OR beside it.
+          exh := bigli or offns2 > cdh.endi;
+
         end if;
 
         -- If our new offset is beyond the current line, invalidate the line
         -- and decrease by 8 accordingly to prepare for the next line. Also
         -- indicate to the datapath that it should pop from the literal line
         -- stream after executing this command to stay in sync.
-        if off > cdh.endi or offh /= 0 then
+        if exh then
           off := off - 8;
           cdh.valid := '0';
           elh.ld_pop := '1';
