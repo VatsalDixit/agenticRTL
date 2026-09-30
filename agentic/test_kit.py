@@ -461,7 +461,7 @@ def test_synthesis_runs_alongside_the_long_draws():
     saved = (measure.simulate, measure.synthesize, measure.draw_bytes,
              measure.analyse.rtl_widths)
 
-    def run(fail_on):
+    def run(fail_on, host_lost=False):
         events, started = [], threading.Event()
 
         def fake_sim(rtl, build, ds, widths, timeout=None, jobs=None):
@@ -480,6 +480,8 @@ def test_synthesis_runs_alongside_the_long_draws():
         def fake_synth(rtl, out):
             started.set()
             events.append('synth')
+            if host_lost:
+                raise measure.HostUnreachable('ssh to host failed: could not resolve')
             return {'f_max_mhz': 250.0, 'wns_ns': 0.0, 'area': 1000,
                     'area_unit': 'LUTs', 'synth_backend': 'hacc'}
 
@@ -508,6 +510,10 @@ def test_synthesis_runs_alongside_the_long_draws():
     check('a design failing a long draw keeps no synthesis numbers',
           'synth' in events and 'f_max_mhz' not in out and not out['oracle_pass'],
           str(events))
+    out, events = run(None, host_lost=True)
+    check('a correct design whose host stayed away is not measured, not failed',
+          out.get('measure_error') and 'synth_error' not in out and out['oracle_pass'],
+          str({k: out.get(k) for k in ('measure_error', 'synth_error', 'oracle_pass')}))
 
 
 def test_a_retry_is_never_retried():
@@ -521,6 +527,55 @@ def test_a_retry_is_never_retried():
           not loop.retry_eligible(again, []))
     small = dict(old, measured={'gain_pct': 3.0})
     check('a small gain is not retried', not loop.retry_eligible(small, []))
+
+
+def test_a_lost_host_is_not_a_design_verdict():
+    import loop
+    import hacc
+    # What iteration 16 of hacc-real200 recorded while the VPN was down.
+    lost = {'outcome': 'failed_synth', 'branch': 'agentic-cand/r/i16-c2', 'id': 'port',
+            'measured': {}, 'reason': 'ssh to vdixit@hacc-build-02 failed: ssh: Could '
+                                      'not resolve hostname hacc-build-02: No such host is known.'}
+    broken = dict(lost, reason='vivado failed on vdixit@hacc-build-02:\nERROR: [Synth 8-439] '
+                               'module not found')
+    check('a synthesis lost to the host is measured again; one Vivado rejected is not',
+          loop.never_measured(lost) and loop.retry_eligible(lost, [])
+          and not loop.never_measured(broken) and not loop.retry_eligible(broken, []))
+
+    calls, saved = [], (hacc.run_remote, hacc.parse_reports, hacc.time.sleep,
+                        hacc.ram_interface_problem, hacc.CONFIG.get('hacc_wait_min'))
+
+    def flaky(rtl, out, top, limit):
+        calls.append(1)
+        if len(calls) < 3:
+            raise hacc.Transient('ssh to host failed: could not resolve hostname')
+
+    hacc.run_remote, hacc.parse_reports = flaky, lambda out: {'f_max_mhz': 250.0}
+    hacc.time.sleep, hacc.ram_interface_problem = (lambda s: None), (lambda rtl: None)
+    try:
+        hacc.CONFIG['hacc_wait_min'] = 120
+        got = hacc.synthesize('rtl', 'out', 'top')
+        waited = got.get('synth_attempts') == 3
+        calls[:] = []
+        hacc.CONFIG['hacc_wait_min'] = 0
+        try:
+            hacc.synthesize('rtl', 'out', 'top')
+            gave_up = False
+        except hacc.Transient:
+            gave_up = len(calls) == 1
+    finally:
+        (hacc.run_remote, hacc.parse_reports, hacc.time.sleep,
+         hacc.ram_interface_problem, hacc.CONFIG['hacc_wait_min']) = saved
+    check('synthesis waits out a lost host, and gives up only when the wait is over',
+          waited and gave_up)
+
+    parent = {'throughput_gbps': 2.0, 'bytes_per_cycle': 8.0, 'f_max_mhz': 250.0,
+              'area': 2400, 'area_unit': 'LUTs', 'synth_backend': 'hacc'}
+    ev = loop.evaluate({'oracle_pass': True, 'bytes_per_cycle': 9.0,
+                        'measure_error': 'the synthesis host could not be reached'},
+                       parent, {'metric': 'throughput', 'target_pct': None, 'text': ''})
+    check('a design never synthesised is not measured, not failed',
+          ev['outcome'] == 'measure_error' and not ev['adoptable'], str(ev))
 
 
 def test_simulators_are_shared_out():

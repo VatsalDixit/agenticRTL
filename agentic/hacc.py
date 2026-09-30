@@ -64,7 +64,10 @@ SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
 
 QUICK_TIMEOUT_S = 300      # anything that is not the synthesis itself
 LOCAL_GRACE_S = 600        # past the host's deadline, only the link has hung
-ATTEMPTS = 3               # for failures that are about the host, not the design
+# Failures that are about the host, not the design, are retried with these
+# pauses (the last repeating) until hacc_wait_min runs out. Three tries in two
+# minutes once lost both candidates of an iteration to a dropped VPN.
+RETRY_PAUSES_S = (30, 60, 120, 300)
 
 # Substrings that make a Vivado failure environmental rather than about the
 # design. Short on purpose: a wrong guess turns one real failure into three.
@@ -366,20 +369,30 @@ def parse_reports(out_dir):
 # --------------------------------------------------------------------------
 
 def synthesize(rtl_dir, out_dir, top):
-    """Area and timing for one rtl/ folder, from Vivado on the host."""
+    """Area and timing for one rtl/ folder, from Vivado on the host.
+
+    A failure about the host rather than the design (ssh cannot connect, the
+    VPN is down, the link drops mid-run) is retried until hacc_wait_min has
+    passed, so a laptop that loses the VPN for a while pauses a measurement
+    instead of failing it. Raises Transient if the host never came back.
+    """
     problem = ram_interface_problem(rtl_dir)
     if problem:
         raise HaccError(problem)
-    for attempt in range(1, ATTEMPTS + 1):
+    deadline = time.time() + 60.0 * float(CONFIG.get('hacc_wait_min') or 0)
+    attempt = 0
+    while True:
+        attempt += 1
         if tools.STOPPING:
             raise HaccError('the loop is stopping; synthesis not started')
         try:
             run_remote(rtl_dir, out_dir, top, int(CONFIG['vivado_timeout_s']))
             break
         except Transient:
-            if attempt == ATTEMPTS or tools.STOPPING:
+            pause = RETRY_PAUSES_S[min(attempt, len(RETRY_PAUSES_S)) - 1]
+            if tools.STOPPING or time.time() + pause > deadline:
                 raise
-            time.sleep(30 * attempt)
+            time.sleep(pause)
     metrics = parse_reports(out_dir)
     metrics['synth_attempts'] = attempt
     return metrics

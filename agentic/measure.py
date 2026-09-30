@@ -77,6 +77,11 @@ class MeasureError(RuntimeError):
     """The tools could not produce numbers that can be believed."""
 
 
+class HostUnreachable(MeasureError):
+    """The synthesis host could not be reached, even after waiting for it.
+    Says nothing about the design."""
+
+
 def corpus_dir(root=None):
     return os.path.join(root or ROOT, '.agentic', 'corpus')
 
@@ -344,6 +349,8 @@ def synthesize(rtl_dir, out_dir, timeout=None):
     if backend == 'hacc':
         try:
             return hacc.synthesize(rtl_dir, out_dir, TOP)
+        except hacc.Transient as exc:
+            raise HostUnreachable(str(exc))
         except hacc.HaccError as exc:
             raise MeasureError(str(exc))
     if backend != 'yosys':
@@ -424,6 +431,8 @@ def _synthesize_into(rtl_dir, out_dir, box):
     t0 = time.time()
     try:
         box['metrics'] = synthesize(rtl_dir, out_dir)
+    except HostUnreachable as exc:
+        box['unreachable'] = str(exc)
     except MeasureError as exc:
         box['error'] = str(exc)
     except Exception as exc:               # a thread must not die unheard
@@ -474,6 +483,7 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
         worker.join()
         if all(r['oracle_pass'] for r in sims):
             synth_metrics, synth_error = box.get('metrics'), box.get('error')
+    unreachable = box.get('unreachable') if all(r['oracle_pass'] for r in sims) else None
     out = summarize(sims, synth_metrics)
     out['widths'] = widths
     out['sim_seconds'] = sim_seconds
@@ -484,7 +494,13 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
                                 '(most likely out of memory) on %s, even when run on '
                                 'its own; nothing was learned about the design'
                                 % ', '.join(killed))
-    if synth_metrics is not None or synth_error:
+    elif unreachable:
+        # Nor is a host that stayed out of reach: the design was never synthesised.
+        out['measure_error'] = ('the synthesis host could not be reached for %s min '
+                                '(%s); the design was never synthesised and nothing '
+                                'was learned about it'
+                                % (CONFIG.get('hacc_wait_min'), unreachable[:200]))
+    if synth_metrics is not None or synth_error or unreachable:
         out['synth_seconds'] = box.get('seconds')
     if synth_error:
         out['synth_error'] = synth_error

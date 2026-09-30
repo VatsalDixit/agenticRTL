@@ -45,6 +45,7 @@ sys.path.insert(0, KIT)
 import analyse                         # noqa: E402
 import freeze                          # noqa: E402
 import guide as guide_mod              # noqa: E402
+import hacc                            # noqa: E402
 import learn as learn_mod              # noqa: E402
 import measure                         # noqa: E402
 import propose                         # noqa: E402
@@ -202,19 +203,39 @@ RETRY_MIN_GAIN_PCT = 5.0
 RETRY_PER_ITERATION = 2
 
 
+# Reasons a synthesis host gives for failing, rather than a design. Kits
+# before the host wait recorded these as failed_synth.
+HOST_FAILURE = re.compile(r'ssh to \S+ (?:failed|did not finish)|could not create a '
+                          r'working directory on|ended without an exit status|'
+                          r'could not be reached')
+
+
+def never_measured(c):
+    """Whether a candidate's measurement did not happen: its simulators were
+    killed from outside, or the synthesis host stayed out of reach. Its design
+    was never judged, so it is measured again, even on the same base."""
+    if c.get('outcome') == 'measure_error':
+        return True
+    return (c.get('outcome') == 'failed_synth'
+            and bool(HOST_FAILURE.search(c.get('reason') or '')))
+
+
 def retry_eligible(c, retried):
-    """Whether a measured candidate may be offered again (git aside).
+    """Whether a candidate may be offered again (git aside).
 
     A retry is its original candidate again, on its own new branch, and the
     original has had its one retry. Without this check the same design came
     back after every adoption: hacc-real200 measured one 32-byte line three
     times, in iterations 9, 10 and 11.
     """
+    if not c.get('branch') or c['branch'] in retried \
+            or str(c.get('id') or '').startswith('retry-'):
+        return False
+    if never_measured(c):
+        return True
     m = c.get('measured') or {}
-    return (c.get('outcome') in ('too_expensive', 'candidate') and bool(c.get('branch'))
-            and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT
-            and c['branch'] not in retried
-            and not str(c.get('id') or '').startswith('retry-'))
+    return (c.get('outcome') in ('too_expensive', 'candidate')
+            and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT)
 
 
 def retry_candidates(run, state, k, iter_dir, log):
@@ -229,6 +250,8 @@ def retry_candidates(run, state, k, iter_dir, log):
     A candidate built on the current best is left alone until the best moves:
     the merge would fast-forward to the very design already measured, and a
     measurement is no longer half a minute but half an hour of simulation.
+    A candidate that was never measured is the exception, and goes first:
+    its session was paid for and its design never judged.
     """
     retried = state.setdefault('retried', [])
     best = state['best']['commit']
@@ -237,9 +260,11 @@ def retry_candidates(run, state, k, iter_dir, log):
         for c in it.get('candidates', []):
             if retry_eligible(c, retried) \
                     and git_ok(['rev-parse', '--verify', 'refs/heads/' + c['branch']]) \
-                    and not git_ok(['merge-base', '--is-ancestor', best, c['branch']]):
+                    and (never_measured(c)
+                         or not git_ok(['merge-base', '--is-ancestor', best, c['branch']])):
                 pool.append(c)
-    pool.sort(key=lambda c: -(c['measured'].get('gain_pct') or 0))
+    pool.sort(key=lambda c: (not never_measured(c),
+                             -((c.get('measured') or {}).get('gain_pct') or 0)))
     out = []
     for j, old in enumerate(pool[:RETRY_PER_ITERATION], 1):
         retried.append(old['branch'])
@@ -267,17 +292,24 @@ def retry_candidates(run, state, k, iter_dir, log):
         except GitError as exc:
             log('  %s: retry of %s failed: %s' % (label, old.get('id'), exc))
             continue
-        log('  %s: retrying %s (measured %+.2f%% at iteration %d) merged onto the current best'
-            % (label, old.get('id'), old['measured'].get('gain_pct') or 0,
-               it_of(state, old)))
+        measured = old.get('measured') or {}
+        if never_measured(old):
+            then = 'never measured at iteration %d: %s' % (it_of(state, old),
+                                                           (old.get('reason') or '')[:90])
+            hypothesis = 'not measured earlier (%s); measured now' % then
+        else:
+            then = 'measured %+.2f%% at iteration %d' % (measured.get('gain_pct') or 0,
+                                                         it_of(state, old))
+            hypothesis = ('rejected or outscored earlier with %+.2f%% gain; may pass '
+                          'under the current rule or on the current best'
+                          % (measured.get('gain_pct') or 0))
+        log('  %s: retrying %s (%s) merged onto the current best' % (label, old.get('id'), then))
         out.append(({'label': label, 'branch': branch,
-                     'direction': {'focus': 'retry of %s: %s' % (old.get('id'), old['direction'].get('focus', '')),
-                                   'hypothesis': 'rejected or outscored earlier with %+.2f%% gain; '
-                                                 'may pass under the current rule or on the current best'
-                                                 % (old['measured'].get('gain_pct') or 0),
-                                   'skill_ids': old['direction'].get('skill_ids') or []},
+                     'direction': {'focus': 'retry of %s: %s' % (old.get('id'), (old.get('direction') or {}).get('focus', '')),
+                                   'hypothesis': hypothesis,
+                                   'skill_ids': (old.get('direction') or {}).get('skill_ids') or []},
                      'id': 'retry-' + str(old.get('id')), 'rationale': old.get('rationale', ''),
-                     'expected_gain_pct': old['measured'].get('gain_pct'),
+                     'expected_gain_pct': measured.get('gain_pct', old.get('expected_gain_pct')),
                      'expected_effect': old.get('expected_effect', ''), 'risk': old.get('risk', ''),
                      'skills_used': old.get('skills_used') or [],
                      'session': {'status': 'retry', 'cost_usd': 0.0, 'turns': 0, 'seconds': 0.0,
@@ -783,6 +815,27 @@ def starting_check(base_dir, log):
     keep = [ln for ln in text.splitlines()
             if ln.strip() and not ln.startswith('This is invented stimulus')]
     return '\n'.join(keep[:40])
+
+
+HOST_POLL_S = 120
+
+
+def wait_for_host(run, state, log):
+    """Hold the next iteration while the synthesis host cannot be reached:
+    sessions written now could not be measured. Polls until it answers."""
+    ok, msg = hacc.available()
+    if ok:
+        return
+    log('the synthesis host cannot be reached (%s); waiting for it before '
+        'starting sessions (is the VPN up?)' % msg[:160])
+    run.status.set(phase='waiting', detail='synthesis host unreachable (VPN?)')
+    t0 = time.time()
+    while not ok:
+        time.sleep(HOST_POLL_S)
+        ok, msg = hacc.available()
+    waited = time.time() - t0
+    state['wait_s'] = round((state.get('wait_s') or 0) + waited, 1)
+    log('the synthesis host answers again after %.0f min' % (waited / 60.0))
 
 
 def sim_jobs(candidates):
@@ -1454,6 +1507,8 @@ def main():
                         globals()['KIT_MTIME'] = kit_mtime()
                 else:
                     globals()['KIT_MTIME'] = kit_mtime()
+            if CONFIG['synth_backend'] == 'hacc' and not args.dry_run and not args.fake:
+                wait_for_host(run, state, log)
             outcome = run_iteration(run, draws, skills_data, k, n_cands,
                                     dry_run=args.dry_run, fake=args.fake)
             if args.dry_run:

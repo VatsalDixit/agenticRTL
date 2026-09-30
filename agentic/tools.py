@@ -62,6 +62,10 @@ DEFAULT_CONFIG = {
     "hacc_host": "vdixit@hacc-build-02",
     "hacc_vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh",
     "hacc_part": "xcu55c-fsvh2892-2L-e",
+    # How long a synthesis waits for the host when it cannot be reached (the
+    # VPN dropped, the laptop slept). After that the candidate is recorded as
+    # not measured, never as failing synthesis, and is measured again later.
+    "hacc_wait_min": 120,
     # How much of a gain place-and-route jitter alone can produce. Re-placing
     # a design after an unrelated edit moves f_max by about a megahertz, so on
     # a place-and-route backend a gain under this is not evidence of anything.
