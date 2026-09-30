@@ -191,10 +191,23 @@ begin
         -- overflow. There are two ways to deal with this; either we limit
         -- len such that it doesn't overflow, or we just don't write any
         -- chunk in this case and wait until the next cycle, when we'll have
-        -- advanced a line. The latter costs only a *tiny* bit of throughput
-        -- while the latter requires a bit more logic.
-        if li_off(3) = '1' then
-          len := "0000";
+        -- advanced a line. The original design took the latter route; we take
+        -- the former, because it lets a command that only has a couple of
+        -- byte slots left over from its copy still fill those slots with
+        -- literal data instead of writing nothing and spending an extra
+        -- command on the literal.
+        --
+        -- The literal source window is 16 bytes wide: the current literal
+        -- line and the lookahead line (see the LOOKAHEAD_LOOKUP table in
+        -- vhsnunzip_pipeline). Byte index li_off+len-1 must stay within that
+        -- window, and li_off itself must stay representable in its 4 bits
+        -- (it is reduced by 8 exactly once, when the literal line is popped),
+        -- so the resulting li_off may be at most 15. Hence the available
+        -- number of literal bytes this cycle is 15-li_off. For li_off < 8
+        -- that is 8 or more, so this clamp is a no-op there and only the
+        -- lookahead case is affected.
+        if len > (not li_off) then
+          len := not li_off;
         end if;
 
         -- Determine the rotation for the literal.
