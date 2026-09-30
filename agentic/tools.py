@@ -67,9 +67,15 @@ DEFAULT_CONFIG = {
     # a place-and-route backend a gain under this is not evidence of anything.
     # Yosys has no placer and no seed, and uses min_gain_pct alone.
     "pnr_noise_pct": 1.0,
+    # Simulators running at once, shared out over the candidates measured
+    # together and never fewer than 3 each: two candidates get 4 apiece. The
+    # longest table runs on one simulator for over half an hour; with 3 slots
+    # the rest queued behind it and the round took ten minutes longer. About
+    # 0.6-1 GB of memory each, on 16 cores.
+    "sim_slots": 8,
     # Tool timeouts. One simulation call covers every long draw of one
-    # candidate, three at a time: whole Parquet row groups take 18 minutes on
-    # the original design and over half an hour on a two-core one.
+    # candidate: whole Parquet row groups take 18 minutes on the original
+    # design and over half an hour on a two-core one.
     "sim_timeout_s": 10800,
     "synth_timeout_s": 2400,
     # Vivado's own. Three hours, from the earlier flow: at 20k LUTs one

@@ -14,6 +14,7 @@
   "hacc_vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh",
   "hacc_part": "xcu55c-fsvh2892-2L-e",
   "pnr_noise_pct": 1.0,
+  "sim_slots": 8,
   "sim_timeout_s": 10800,
   "synth_timeout_s": 2400,
   "vivado_timeout_s": 10800,

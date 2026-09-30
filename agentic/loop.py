@@ -208,10 +208,15 @@ def retry_candidates(run, state, k, iter_dir, log):
 
     A candidate can be rejected for a rule that later changes (area pricing),
     or lose only because a sibling scored better that iteration. If its
-    branch still merges cleanly onto the best design, measuring it again
-    costs half a minute. Each old candidate is retried once.
+    branch still merges cleanly onto the best design, it is measured again.
+    Each old candidate is retried once.
+
+    A candidate built on the current best is left alone until the best moves:
+    the merge would fast-forward to the very design already measured, and a
+    measurement is no longer half a minute but half an hour of simulation.
     """
     retried = state.setdefault('retried', [])
+    best = state['best']['commit']
     pool = []
     for it in state['iterations']:
         for c in it.get('candidates', []):
@@ -219,7 +224,8 @@ def retry_candidates(run, state, k, iter_dir, log):
             if c.get('outcome') in ('too_expensive', 'candidate') and c.get('branch') \
                     and (m.get('gain_pct') or 0) >= RETRY_MIN_GAIN_PCT \
                     and c['branch'] not in retried \
-                    and git_ok(['rev-parse', '--verify', 'refs/heads/' + c['branch']]):
+                    and git_ok(['rev-parse', '--verify', 'refs/heads/' + c['branch']]) \
+                    and not git_ok(['merge-base', '--is-ancestor', best, c['branch']]):
                 pool.append(c)
     pool.sort(key=lambda c: -(c['measured'].get('gain_pct') or 0))
     out = []
@@ -767,10 +773,16 @@ def starting_check(base_dir, log):
     return '\n'.join(keep[:40])
 
 
+def sim_jobs(candidates):
+    """Draws each candidate simulates at once: sim_slots shared out, never
+    fewer than the three the script runs by default."""
+    return max(3, int(CONFIG['sim_slots']) // max(1, candidates))
+
+
 def measure_one(args):
-    rtl_dir, work_dir, draws = args
+    rtl_dir, work_dir, draws, jobs = args
     try:
-        return measure.measure(rtl_dir, work_dir, draws, synth=True)
+        return measure.measure(rtl_dir, work_dir, draws, synth=True, jobs=jobs)
     except Exception as exc:                # never let one candidate kill the run
         return {'oracle_pass': False, 'error': 'measurement crashed: %s' % exc,
                 'draws': []}
@@ -1159,8 +1171,9 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     run.status.set(phase='measure', detail='%d candidates: simulate + synthesise' % len(to_measure))
     if to_measure:
         log('measuring %d candidate(s)...' % len(to_measure))
+        per = sim_jobs(len(to_measure))
         jobs = [(os.path.join(asg['worktree'], 'rtl'),
-                 os.path.join(iter_dir, c['label'] + '-measure'), draws)
+                 os.path.join(iter_dir, c['label'] + '-measure'), draws, per)
                 for c, asg in to_measure]
         t0 = time.time()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs))
@@ -1359,7 +1372,8 @@ def main():
             run.status.set(phase='baseline', detail='measuring the starting design')
             log('measuring the baseline design...')
             base = measure.measure(os.path.join(run.base_dir, 'rtl'),
-                                   os.path.join(run.dir, 'baseline-measure'), draws)
+                                   os.path.join(run.dir, 'baseline-measure'), draws,
+                                   jobs=sim_jobs(1))
             if base.get('error') or not base.get('oracle_pass'):
                 log('the starting design does not pass: %s'
                     % (base.get('error') or base.get('first_problem')))

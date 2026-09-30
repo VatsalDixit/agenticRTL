@@ -464,9 +464,11 @@ def test_synthesis_runs_alongside_the_long_draws():
     def run(fail_on):
         events, started = [], threading.Event()
 
-        def fake_sim(rtl, build, ds, widths, timeout=None):
+        def fake_sim(rtl, build, ds, widths, timeout=None, jobs=None):
             names = [d.name for d, _p, _c in ds]
             events.append('sim ' + '+'.join(names))
+            if jobs != 4:
+                events.append('jobs %s, not the 4 asked for' % jobs)
             if 'long' in names:
                 events.append('synthesis running' if started.wait(10)
                               else 'synthesis not running')
@@ -485,7 +487,8 @@ def test_synthesis_runs_alongside_the_long_draws():
         measure.draw_bytes = lambda e: 10 if e[1] == 'quick' else 10 ** 8
         measure.analyse.rtl_widths = lambda rtl: {}
         try:
-            out = measure.measure('rtl', tempfile.mkdtemp(prefix='kit-measure-'), draws)
+            out = measure.measure('rtl', tempfile.mkdtemp(prefix='kit-measure-'), draws,
+                                  jobs=4)
         finally:
             (measure.simulate, measure.synthesize, measure.draw_bytes,
              measure.analyse.rtl_widths) = saved
@@ -494,7 +497,9 @@ def test_synthesis_runs_alongside_the_long_draws():
     out, events = run(None)
     check('small draws first, then synthesis runs while the long draws simulate',
           events[0] == 'sim small' and 'synthesis running' in events
-          and out.get('throughput_gbps') == 1.25, '%s %s' % (events, out.get('throughput_gbps')))
+          and out.get('throughput_gbps') == 1.25
+          and not any(e.startswith('jobs') for e in events),
+          '%s %s' % (events, out.get('throughput_gbps')))
     out, events = run('small')
     check('a design failing a small draw gets no synthesis and no long draws',
           events == ['sim small'] and 'f_max_mhz' not in out and not out['oracle_pass'],
@@ -503,6 +508,18 @@ def test_synthesis_runs_alongside_the_long_draws():
     check('a design failing a long draw keeps no synthesis numbers',
           'synth' in events and 'f_max_mhz' not in out and not out['oracle_pass'],
           str(events))
+
+
+def test_simulators_are_shared_out():
+    import loop
+    saved = loop.CONFIG['sim_slots']
+    loop.CONFIG['sim_slots'] = 8
+    try:
+        got = [loop.sim_jobs(n) for n in (1, 2, 3)]
+    finally:
+        loop.CONFIG['sim_slots'] = saved
+    check('eight simulator slots: 8 for the baseline, 4 each for two, never under 3',
+          got == [8, 4, 3], str(got))
 
 
 def main():

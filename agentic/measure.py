@@ -152,13 +152,14 @@ def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
     return status
 
 
-def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
+def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None):
     """Run every draw against one rtl/ folder. Returns per-draw results.
 
     ``draws`` is [(draw, dir, chunks), ...]. The result for each draw is a
     dict with oracle_pass, bytes_per_cycle, counters, and a problem string
     when something went wrong. Raises MeasureError when the design does not
-    even compile.
+    even compile. ``jobs`` is how many draws simulate at once (default: the
+    script's own, 3).
     """
     if widths.get('unresolved'):
         raise MeasureError('cannot read the width of %s from the RTL: declare '
@@ -184,7 +185,7 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None):
         private.append((draw, mine, chunks))
     draws = private
 
-    status = _run_draws(rtl_dir, build_dir, generics, draws, timeout)
+    status = _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=jobs)
     # A simulator the operating system killed has said nothing about the
     # design, so those draws are run again, one at a time, before anything is
     # read into them. It is not hypothetical: with two cores each simulator
@@ -432,14 +433,15 @@ def _synthesize_into(rtl_dir, out_dir, box):
     box['seconds'] = round(time.time() - t0, 1)
 
 
-def measure(rtl_dir, work_dir, draws, synth=True, log=None):
+def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
     """The whole measurement for one rtl/ folder. Never raises for a bad
     design; returns a dict with 'error' set when the tools could not run.
 
     The small draws go first. If they all pass, synthesis starts in a thread
     and the long draws simulate meanwhile; if one fails, the design is
     rejected without either. sim_seconds and synth_seconds overlap, so they
-    add up to more than the measurement took.
+    add up to more than the measurement took. ``jobs`` is how many draws
+    simulate at once.
     """
     os.makedirs(work_dir, exist_ok=True)
     widths = analyse.rtl_widths(rtl_dir)
@@ -449,7 +451,7 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
     t_sim = time.time()
     box, worker = {}, None
     try:
-        sims = simulate(rtl_dir, sim_dir, quick, widths) if quick else []
+        sims = simulate(rtl_dir, sim_dir, quick, widths, jobs=jobs) if quick else []
         if all(r['oracle_pass'] for r in sims):
             if synth:
                 worker = threading.Thread(
@@ -457,7 +459,7 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None):
                     args=(rtl_dir, os.path.join(work_dir, 'synth'), box))
                 worker.start()
             if slow:
-                sims += simulate(rtl_dir, sim_dir, slow, widths)
+                sims += simulate(rtl_dir, sim_dir, slow, widths, jobs=jobs)
     except MeasureError as exc:
         # A synthesis already started is left to finish on its own; the
         # design is rejected whatever it reports.
