@@ -70,6 +70,21 @@ begin
     -- Whether the literal element header in `lhdr` can be decoded this cycle.
     variable hdr_ok : boolean;
 
+    -- Set for the single cycle in which the first line of a chunk is shifted
+    -- into the holding register. The chunk's start offset (the size of the
+    -- varint-encoded uncompressed length header, 1 to 5) is loaded into `off`
+    -- at the *end* of that cycle instead of at the start, and decoding is
+    -- suppressed for it. The point is that `off` as read by the decode below is
+    -- then purely the output of its own register: the chunk-start multiplexer
+    -- used to sit in front of off(2..0), i.e. in front of the byte mux that
+    -- selects the element tag, so it added a level of logic and a long route
+    -- from the pre-decoder's `first` register to the *entire*
+    -- tag -> offset -> line-exhausted recurrence. Place-and-route named exactly
+    -- that path (pre_decoder cdh[first] -> decoder off[7]) as the worst path of
+    -- the design. The cost is one dead cycle per chunk; chunks are hundreds of
+    -- bytes to 15 MB, so that is far below measurement noise.
+    variable ld_first : std_logic;
+
     -- Output holding register.
     variable elh    : element_stream := ELEMENT_STREAM_INIT;
 
@@ -82,15 +97,16 @@ begin
       end if;
 
       -- Shift new data into the input when we can.
+      ld_first := '0';
       if cdh.valid = '0' then
         cdh := cd;
         if cdh.valid = '1' and cdh.first = '1' then
-          off := resize(cdh.start, 9);
+          ld_first := '1';
         end if;
       end if;
 
       -- Decode when we have valid data and have room for the result.
-      if cdh.valid = '1' and elh.valid = '0' then
+      if cdh.valid = '1' and elh.valid = '0' and ld_first = '0' then
         elh.valid := '1';
 
         if off(8 downto 7) = "11" then
@@ -298,6 +314,16 @@ begin
           elh.last := '0';
         end if;
 
+      end if;
+
+      -- Load the start offset of a new chunk. This happens in the same cycle in
+      -- which the chunk's first line is shifted in, but after the decode block,
+      -- which is disabled for that cycle: the value decoding sees for `off` is
+      -- therefore always the register output and never this multiplexer. `offh`
+      -- is left alone, exactly as before: the previous chunk always ends with
+      -- its offset inside its last line, so the high part is already zero here.
+      if ld_first = '1' then
+        off := resize(cdh.start, 9);
       end if;
 
       -- Handle reset.
