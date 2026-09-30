@@ -1367,6 +1367,16 @@ def main():
     log = run.log
     log('agentic loop starting: run %s in %s' % (name, ROOT))
     problems = preflight(log, need_model=not args.dry_run)
+    host_down = [p for p in problems if p.startswith('synth_backend is hacc but the host')]
+    if problems and len(host_down) == len(problems) and not args.dry_run:
+        # Only the synthesis host is missing (the VPN, usually): wait for it,
+        # so a run started or reloaded while it is down begins when it is back.
+        log('PROBLEM (waiting): %s' % host_down[0])
+        run.status.set(phase='waiting', detail='synthesis host unreachable (VPN?)')
+        while problems:
+            time.sleep(HOST_POLL_S)
+            problems = preflight(log, need_model=True)
+        log('the synthesis host answers; starting')
     if problems:
         for p in problems:
             log('PROBLEM: %s' % p)
