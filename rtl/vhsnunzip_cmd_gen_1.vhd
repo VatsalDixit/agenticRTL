@@ -33,6 +33,9 @@ begin
     -- validity bit.
     variable cp_rem : signed(6 downto 0) := (others => '1');
 
+    -- Replication period selector for power-of-two self-overlapping copies.
+    variable rep    : unsigned(1 downto 0);
+
     -- Output holding register.
     variable c1h    : partial_command_stream := PARTIAL_COMMAND_STREAM_INIT;
 
@@ -72,6 +75,29 @@ begin
           c1h.cp_len := "01111";
         end if;
 
+        -- Power-of-two self-overlap acceleration. A copy whose offset is 2, 4 or
+        -- 8 produces its source pattern repeated with that period, and the
+        -- datapath can take a lane index modulo 2, 4 or 8 for free (all three
+        -- divide the eight-way lane-pair rotation, so both halves of the output
+        -- line still want the same lane per pair). Such a copy therefore needs
+        -- neither the clamp below nor the offset doubling that goes with it: it
+        -- writes a full 16-byte line per command just like a non-overlapping
+        -- copy, where before a 16-byte copy at offset 2 cost four commands
+        -- (2 + 4 + 8 + 2 bytes) and one at offset 8 cost two. Offsets of 0 and 1
+        -- keep the existing run-length path; 3, 5, 6, 7 and 9..15 keep the
+        -- doubling, because a period that does not divide eight would need a
+        -- per-destination-byte rotation rather than a per-lane-pair one.
+        rep := "00";
+        if elh.cp_off(15 downto 4) = 0 and c1h.cp_len(4) = '0' then
+          case std_logic_vector(elh.cp_off(3 downto 0)) is
+            when "0010" => rep := "01";
+            when "0100" => rep := "10";
+            when "1000" => rep := "11";
+            when others => rep := "00";
+          end case;
+        end if;
+        c1h.cp_rep := rep;
+
         if elh.cp_off <= 1 then
 
           -- Special case for single-byte repetition, since it's relatively
@@ -80,13 +106,16 @@ begin
           -- though; cp_rol becomes an index rather than a rotation when
           -- cp_rle is set. Can be disabled by just not taking this branch.
           c1h.cp_rle := '1';
+          c1h.cp_rep := "00";
 
         else
 
-          -- Without run-length=1 acceleration, we can't copy more bytes at
-          -- once than the copy offset, because we'd be reading beyond what
-          -- we've written already.
-          if unsigned(c1h.cp_len(3 downto 0)) >= elh.cp_off and c1h.cp_len(4) = '0' then
+          -- Without run-length=1 acceleration or the power-of-two replication
+          -- above, we can't copy more bytes at once than the copy offset,
+          -- because we'd be reading beyond what we've written already.
+          if rep = "00"
+             and unsigned(c1h.cp_len(3 downto 0)) >= elh.cp_off
+             and c1h.cp_len(4) = '0' then
             c1h.cp_len(3 downto 0) := signed(resize(elh.cp_off(4 downto 0) - 1, 4));
 
             -- We can however accelerate subsequent copies; after the first

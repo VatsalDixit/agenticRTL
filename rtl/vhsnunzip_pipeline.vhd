@@ -107,10 +107,10 @@ architecture behavior of vhsnunzip_pipeline is
 
   -- Command stream FIFO write-side signals.
   signal cm_push      : std_logic;
-  signal cm_ctrl      : std_logic_vector(38 downto 0);
+  signal cm_ctrl      : std_logic_vector(47 downto 0);
 
   -- Command stream FIFO read-side signals.
-  signal s1_cm_ctrl   : std_logic_vector(38 downto 0);
+  signal s1_cm_ctrl   : std_logic_vector(47 downto 0);
   signal s1_cm        : command_stream;
   signal s1_cm_exp    : command_stream;
 
@@ -461,10 +461,13 @@ begin
   cm_ctrl(32) <= cm.cp2_val;
   cm_ctrl(37 downto 33) <= std_logic_vector(cm.st_addr2);
   cm_ctrl(38) <= cm.sw_val;
+  cm_ctrl(40 downto 39) <= std_logic_vector(cm.cp_rep);
+  cm_ctrl(43 downto 41) <= std_logic_vector(cm.cp_rbase);
+  cm_ctrl(47 downto 44) <= std_logic_vector(cm.cp_rsrc);
 
   cm_fifo_inst: vhsnunzip_fifo
     generic map (
-      CTRL_WIDTH  => 39
+      CTRL_WIDTH  => 48
     )
     port map (
       clk         => clk,
@@ -492,6 +495,9 @@ begin
   s1_cm.cp2_val <= s1_cm_ctrl(32);
   s1_cm.st_addr2 <= unsigned(s1_cm_ctrl(37 downto 33));
   s1_cm.sw_val <= s1_cm_ctrl(38);
+  s1_cm.cp_rep <= unsigned(s1_cm_ctrl(40 downto 39));
+  s1_cm.cp_rbase <= unsigned(s1_cm_ctrl(43 downto 41));
+  s1_cm.cp_rsrc <= unsigned(s1_cm_ctrl(47 downto 44));
   s1_cm.lt_adev2 <= (others => '0');
   s1_cm.lt_adod2 <= (others => '0');
 
@@ -536,6 +542,18 @@ begin
     -- Per lane-pair line selects, see the signal declarations.
     variable cp_hsa       : std_logic;
     variable li_hsa       : std_logic;
+
+    -- Power-of-two self-overlap replication. rep_msk is the period minus one
+    -- (1, 3 or 7); rep_ph is the replication phase of this lane pair, i.e. the
+    -- destination byte's distance from the copy's base taken modulo the period
+    -- (and because the period divides eight, that distance modulo eight -- which
+    -- is what the lane-pair index gives -- is enough to compute it); rep_lane is
+    -- the source window byte the pair must read, whose top bit is the lane-pair
+    -- line select and whose low three bits are the lane-pair index.
+    variable rep_msk      : unsigned(2 downto 0);
+    variable rep_ph       : unsigned(2 downto 0);
+    variable rep_lane     : unsigned(3 downto 0);
+    variable rep_on       : std_logic;
 
     -- Level/state of the literal FIFO.
     variable li_level     : unsigned(4 downto 0) := (others => '1');
@@ -617,6 +635,12 @@ begin
       -- that lands on pair p is cp_rol(3) xor (p < cp_rol(2..0)). In run-length
       -- mode every destination byte reads the one same lane, so both halves
       -- then take the same side of the pair.
+      -- Decode the replication period of a power-of-two self-overlapping copy.
+      -- rep_on says the copy writes its own source pattern repeated with period
+      -- rep_msk + 1 instead of reading sixteen consecutive source bytes.
+      rep_on := s1_cm.cp_rep(1) or s1_cm.cp_rep(0);
+      rep_msk := (s1_cm.cp_rep(1) and s1_cm.cp_rep(0)) & s1_cm.cp_rep(1) & '1';
+
       for pair in 0 to 7 loop
 
         if pair < s1_cm.cp_rol(2 downto 0) then
@@ -624,11 +648,38 @@ begin
         else
           cp_hsa := s1_cm.cp_rol(3);
         end if;
-        s2_cp_hsa(pair) <= cp_hsa;
-        if s1_cm.cp_rle = '1' then
-          s2_cp_hsb(pair) <= cp_hsa;
+        -- The source window byte a replicating copy's destination byte must read
+        -- is cp_rsrc (the window index of the copy's first source byte) plus the
+        -- replication phase: one four-bit add whose low three bits are the
+        -- lane-pair index the rotator has to produce.
+        rep_ph := (to_unsigned(pair, 3) - s1_cm.cp_rbase) and rep_msk;
+        rep_lane := s1_cm.cp_rsrc + rep_ph;
+
+        -- The lane-pair line selects are indexed by the *source* lane pair, not
+        -- by the destination byte, so they are the same thermometer compare the
+        -- unaccelerated path uses with cp_rsrc in place of cp_rol: a replicating
+        -- copy only ever reads the `period` window bytes starting at cp_rsrc, so
+        -- the window byte whose low three bits are p is cp_rsrc + ((p - cp_rsrc)
+        -- mod 8), and bit 3 of that sum is exactly this compare. Lane pairs whose
+        -- phase lands past the period are never read and are don't-care.
+        -- Destination bytes b and b+8 share a phase (the period divides eight)
+        -- and hence a lane, so both halves of the output line take the same side
+        -- of the pair, exactly as in run-length mode.
+        if rep_on = '1' then
+          if pair < s1_cm.cp_rsrc(2 downto 0) then
+            s2_cp_hsa(pair) <= not s1_cm.cp_rsrc(3);
+            s2_cp_hsb(pair) <= not s1_cm.cp_rsrc(3);
+          else
+            s2_cp_hsa(pair) <= s1_cm.cp_rsrc(3);
+            s2_cp_hsb(pair) <= s1_cm.cp_rsrc(3);
+          end if;
         else
-          s2_cp_hsb(pair) <= not cp_hsa;
+          s2_cp_hsa(pair) <= cp_hsa;
+          if s1_cm.cp_rle = '1' then
+            s2_cp_hsb(pair) <= cp_hsa;
+          else
+            s2_cp_hsb(pair) <= not cp_hsa;
+          end if;
         end if;
 
         -- Exactly the same decomposition for the 16-byte literal window, whose
@@ -662,6 +713,13 @@ begin
         -- the same value.
         if s1_cm.cp_rle = '1' then
           s2_cp_rol(pair) <= s1_cm.cp_rol(2 downto 0) - pair;
+        elsif rep_on = '1' then
+
+          -- The rotator adds (byte mod 8) back, which for this lane pair is
+          -- `pair`, so the lane index computed above is handed over diminished by
+          -- it -- the same cancellation run-length mode does.
+          s2_cp_rol(pair) <= rep_lane(2 downto 0) - pair;
+
         else
           s2_cp_rol(pair) <= s1_cm.cp_rol(2 downto 0);
         end if;

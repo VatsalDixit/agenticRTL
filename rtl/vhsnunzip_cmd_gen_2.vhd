@@ -40,6 +40,7 @@ architecture behavior of vhsnunzip_cmd_gen_2 is
   -- Simulation-only validation switches; see the hooks in the process below.
   constant TEST_CP2 : boolean := false;
   constant TEST_SW  : boolean := false;
+  constant TEST_REP : boolean := false;
 
 begin
   proc: process (clk) is
@@ -228,6 +229,50 @@ begin
 
         -- Determine the rotation/byte mux selection.
         cmh.cp_rle := c1h.cp_rle;
+
+        -- Power-of-two self-overlap replication. The period travels with the
+        -- copy; the datapath also needs the window index of the copy's first
+        -- source byte and the low three bits of its destination base, because the
+        -- replication phase is counted from the copy's base and not from the
+        -- start of the output line. All three are don't-care -- and the period is
+        -- forced inactive -- on a command that carries no copy, i.e. on the
+        -- continuation commands of a long literal.
+        cmh.cp_rbase := cp_base(2 downto 0);
+        cmh.cp_rsrc := unsigned(cp_rel(3 downto 0));
+        if cp_len(4) = '0' then
+          cmh.cp_rep := c1h.cp_rep;
+        else
+          cmh.cp_rep := "00";
+        end if;
+
+        -- pragma translate_off
+        -- Validation hook: route copies that cannot possibly overlap themselves
+        -- through the replication path with the smallest period that still covers
+        -- the whole copy. A copy of at most `period` bytes never has a destination
+        -- byte more than period-1 past its own base, so (b - base) mod period is
+        -- just b - base and the replication is an exact no-op: the output must
+        -- stay bit-identical while all three period decodes, the masked phase
+        -- arithmetic, the four-bit lane add, the lane-pair line select and their
+        -- interaction with literals, pairs, literal-first commands and chunk
+        -- boundaries are exercised. The phase takes every value 0..7 here, which
+        -- is the whole value space a real replication can produce as well; what
+        -- the hook cannot reach is the wrap itself, which is a bare AND with the
+        -- period mask. The offset test keeps the copy from reading a byte it
+        -- writes, which is what makes the no-op claim hold.
+        -- Simulation only; not part of the synthesised design.
+        if TEST_REP and cp_len(4) = '0' and cp_len <= 7
+           and c1h.cp_rle = '0'
+           and c1h.cp_off > resize(unsigned(cp_len(3 downto 0)), 16) then
+          if cp_len <= 1 then
+            cmh.cp_rep := "01";
+          elsif cp_len <= 3 then
+            cmh.cp_rep := "10";
+          else
+            cmh.cp_rep := "11";
+          end if;
+        end if;
+        -- pragma translate_on
+
         if c1h.cp_rle = '1' then
           cmh.cp_rol := "0" & unsigned(cp_rel(3 downto 0));
         else

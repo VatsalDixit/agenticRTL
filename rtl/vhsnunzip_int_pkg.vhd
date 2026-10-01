@@ -297,6 +297,18 @@ package vhsnunzip_int_pkg is
     -- within the two lines.
     cp_rle    : std_logic;
 
+    -- Power-of-two self-overlap acceleration. A copy whose offset is 2, 4 or 8
+    -- reads a byte it writes itself as soon as its length exceeds the offset,
+    -- which without this flag forces stage 1 to clamp the copy to cp_off bytes
+    -- per command (and to double the offset for the next one): a 16-byte copy
+    -- at offset 4 costs three commands instead of one. Since the destination is
+    -- then simply the source pattern repeated with period cp_off, and since
+    -- 2, 4 and 8 all divide the 8-byte lane-pair rotation, the whole of the
+    -- acceleration is "take the source lane index modulo cp_off" in the
+    -- datapath's per-lane-pair rotation. cp_rep encodes the period: "00" = no
+    -- replication, "01" = 2, "10" = 4, "11" = 8.
+    cp_rep    : unsigned(1 downto 0);
+
     -- Literal element information. li_offs is the starting byte offset within
     -- li_data for the literal; li_len encodes the literal length. li_len is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
@@ -327,6 +339,7 @@ package vhsnunzip_int_pkg is
     cp2_off   => (others => UNDEF),
     cp2_len   => (others => UNDEF),
     cp_rle    => UNDEF,
+    cp_rep    => (others => '0'),
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
@@ -409,6 +422,26 @@ package vhsnunzip_int_pkg is
     -- within the two lines.
     cp_rle    : std_logic;
 
+    -- Power-of-two self-overlap acceleration; see partial_command_stream. When
+    -- cp_rep is non-zero the period is 2**cp_rep bytes, and the destination byte
+    -- at line offset b reads source window byte cp_rsrc + ((b - base) mod
+    -- period) rather than cp_rsrc + (b - base); cp_rsrc is the window index of
+    -- the copy's first source byte (cp_rel(3..0), i.e. cp_rol + base) and
+    -- cp_rbase is the low three bits of the copy's destination base, which is
+    -- what the period is counted from. Because the period divides eight,
+    -- (b - base) mod period only needs b mod 8, so the phase is a lane-pair
+    -- property and the rotation stays an eight-way one; destination bytes b and
+    -- b+8 land on the same phase, hence on the same source lane, exactly as in
+    -- run-length mode. The lanes used are the ones the unaccelerated command
+    -- would have given its first `period` destination bytes, so every per-lane
+    -- short-term address, lookahead bit and long-term line select is unchanged;
+    -- the whole of the acceleration is a masked three-bit add and a four-bit add
+    -- in front of the per-lane-pair rotation register, whose carry out is the
+    -- lane-pair line select.
+    cp_rep    : unsigned(1 downto 0);
+    cp_rbase  : unsigned(2 downto 0);
+    cp_rsrc   : unsigned(3 downto 0);
+
     -- This index indicates the last valid *copy* byte provided by this command
     -- + one. Bytes between cp_endi and endi are literal bytes. The copy
     -- selection signals can be decoded from this in the same way that the 
@@ -478,6 +511,9 @@ package vhsnunzip_int_pkg is
     st_addr   => (others => UNDEF),
     cp_rol    => (others => UNDEF),
     cp_rle    => UNDEF,
+    cp_rep    => (others => '0'),
+    cp_rbase  => (others => '0'),
+    cp_rsrc   => (others => '0'),
     cp_end    => (others => UNDEF),
     cp2_val   => '0',
     st_addr2  => (others => UNDEF),
