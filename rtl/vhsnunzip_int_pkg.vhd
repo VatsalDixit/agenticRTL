@@ -176,6 +176,23 @@ package vhsnunzip_int_pkg is
     cp_off    : unsigned(15 downto 0);
     cp_len    : unsigned(5 downto 0);
 
+    -- Second copy element, issued in the same transfer as the first one. Only
+    -- set when the element directly behind the first copy is also a copy and
+    -- the pair is guaranteed to be issuable as a single datapath command: the
+    -- two copies together fit one 16-byte line, neither of them needs the
+    -- overlapping-copy split in cmd_gen_1, and the second copy reaches back far
+    -- enough that it is always served by the long-term memory. That last
+    -- condition is what makes a pair cheap: the second copy needs no short-term
+    -- SRL read port of its own (a mirrored set of history RAMs, which are URAM
+    -- and cost no LUTs, supplies it), and it cannot read a byte that the first
+    -- copy of the pair writes this very cycle. li_val is always low when
+    -- cp2_val is set, so the second copy takes over the literal's byte region
+    -- and, in the datapath, the literal's rotator; the literal that follows the
+    -- pair becomes an element of its own.
+    cp2_val   : std_logic;
+    cp2_off   : unsigned(15 downto 0);
+    cp2_len   : unsigned(3 downto 0);
+
     -- Literal element information. li_offs is the starting byte offset within
     -- li_data for the literal; li_len encodes the literal length. li_len is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
@@ -200,6 +217,9 @@ package vhsnunzip_int_pkg is
     cp_val    => UNDEF,
     cp_off    => (others => UNDEF),
     cp_len    => (others => UNDEF),
+    cp2_val   => '0',
+    cp2_off   => (others => UNDEF),
+    cp2_len   => (others => UNDEF),
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
@@ -243,6 +263,14 @@ package vhsnunzip_int_pkg is
     cp_off    : unsigned(15 downto 0);
     cp_len    : signed(4 downto 0);
 
+    -- Second copy element of a copy pair; see element_stream. The pairing
+    -- conditions guarantee that stage 1 never has to split either copy of a
+    -- pair, so cp2_len needs no diminished-one remainder bookkeeping: it is the
+    -- decoder's length, diminished-one, verbatim.
+    cp2_val   : std_logic;
+    cp2_off   : unsigned(15 downto 0);
+    cp2_len   : unsigned(3 downto 0);
+
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
     -- main rotation is applied. Carry into bit 3 can be ignored; the high
@@ -276,6 +304,9 @@ package vhsnunzip_int_pkg is
     valid     => '0',
     cp_off    => (others => UNDEF),
     cp_len    => (others => UNDEF),
+    cp2_val   => '0',
+    cp2_off   => (others => UNDEF),
+    cp2_len   => (others => UNDEF),
     cp_rle    => UNDEF,
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
@@ -364,6 +395,22 @@ package vhsnunzip_int_pkg is
     -- byte strobe signals are determined from endi.
     cp_end    : unsigned(4 downto 0);
 
+    -- Second copy of a copy pair. This copy is always served from the long-term
+    -- memory, through a second (mirrored) set of history RAMs, so it needs no
+    -- short-term address and no run-length flag. It also never shares a command
+    -- with a literal, so it borrows the literal's byte region and the literal's
+    -- rotator in the datapath: its destination region is exactly
+    -- [cp_end, li_end), li_rol carries cp2_rol(3 downto 0), and the only field
+    -- it needs of its own is the long-term line-pair address, its swap bit, and
+    -- bit 4 of its rotation (which the literal path has no use for but the
+    -- lookahead decomposition in stage 1 needs). When lt_val2 is low the region
+    -- is the literal's again and none of this is used.
+    lt_val2   : std_logic;
+    lt_adev2  : unsigned(11 downto 0);
+    lt_adod2  : unsigned(11 downto 0);
+    lt_swap2  : std_logic;
+    cp2_roh   : std_logic;
+
     -- Rotation for literals. The direction is rotate-left. The MSB should be
     -- handled by offsetting the SRL literal read by one line on a byte-by-byte
     -- basis, in the same way that the short-term memory read handles this. The
@@ -399,6 +446,11 @@ package vhsnunzip_int_pkg is
     cp_rol    => (others => UNDEF),
     cp_rle    => UNDEF,
     cp_end    => (others => UNDEF),
+    lt_val2   => '0',
+    lt_adev2  => (others => UNDEF),
+    lt_adod2  => (others => UNDEF),
+    lt_swap2  => UNDEF,
+    cp2_roh   => UNDEF,
     li_rol    => (others => UNDEF),
     li_end    => (others => UNDEF),
     ld_pop    => UNDEF,
@@ -469,6 +521,10 @@ package vhsnunzip_int_pkg is
       lt_rd_next  : in  std_logic;
       lt_rd_even  : in  byte_array(0 to 15);
       lt_rd_odd   : in  byte_array(0 to 15);
+      lt_rd_adev2 : out unsigned(11 downto 0);
+      lt_rd_adod2 : out unsigned(11 downto 0);
+      lt_rd_even2 : in  byte_array(0 to 15);
+      lt_rd_odd2  : in  byte_array(0 to 15);
       -- pragma translate_off
       dbg_cs      : out compressed_stream_single;
       dbg_cd      : out compressed_stream_double;

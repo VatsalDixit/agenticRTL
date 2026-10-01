@@ -78,6 +78,10 @@ architecture behavior of vhsnunzip_unbuffered is
   signal lt_rd_next   : std_logic;
   signal lt_rd_even   : byte_array(0 to 15);
   signal lt_rd_odd    : byte_array(0 to 15);
+  signal lt_rd_adev2  : unsigned(11 downto 0);
+  signal lt_rd_adod2  : unsigned(11 downto 0);
+  signal lt_rd_even2  : byte_array(0 to 15);
+  signal lt_rd_odd2   : byte_array(0 to 15);
 
   -- RAM interface signals. The decompression history is stored as 16-byte
   -- lines, but each history RAM is 8 bytes wide, so a line is split over a
@@ -87,9 +91,12 @@ architecture behavior of vhsnunzip_unbuffered is
   -- line, in exactly the way two 8-byte RAMs did for the 8-byte line.
   signal wr_ptr       : unsigned(11 downto 0);
   signal wr_push      : std_logic;
-  signal ram_wr_cmd   : ram_command_array(0 to 3);
-  signal ram_rd_cmd   : ram_command_array(0 to 3);
-  signal ram_rd_resp  : ram_response_array(0 to 3);
+  -- Instances 4..7 are a mirror of 0..3: they are written with exactly the same
+  -- data, and exist purely to give the second copy of a copy pair its own read
+  -- port. They are URAM/BRAM, not logic, so they cost no LUTs.
+  signal ram_wr_cmd   : ram_command_array(0 to 7);
+  signal ram_rd_cmd   : ram_command_array(0 to 7);
+  signal ram_rd_resp  : ram_response_array(0 to 7);
 
 begin
 
@@ -109,6 +116,10 @@ begin
       lt_rd_next  => lt_rd_next,
       lt_rd_even  => lt_rd_even,
       lt_rd_odd   => lt_rd_odd,
+      lt_rd_adev2 => lt_rd_adev2,
+      lt_rd_adod2 => lt_rd_adod2,
+      lt_rd_even2 => lt_rd_even2,
+      lt_rd_odd2  => lt_rd_odd2,
       de          => de,
       de_ready    => de_ready
     );
@@ -146,8 +157,8 @@ begin
   -- instance of the pair and its high half in the second.
   wr_push <= de.valid and de_ready;
 
-  ram_wr_gen: for idx in 0 to 3 generate
-    constant PAIR : natural := idx / 2;
+  ram_wr_gen: for idx in 0 to 7 generate
+    constant PAIR : natural := (idx mod 4) / 2;
     constant HALF : natural := idx mod 2;
     signal pair_sel : std_logic;
   begin
@@ -179,11 +190,15 @@ begin
   -- Connect the long-term memory read request signals. Both halves of a pair
   -- always share an address, because they hold the two halves of one 16-byte
   -- history line.
-  ram_rd_gen: for idx in 0 to 3 generate
-    constant PAIR : natural := idx / 2;
+  ram_rd_gen: for idx in 0 to 7 generate
+    constant PAIR : natural := (idx mod 4) / 2;
+    constant MIRR : natural := idx / 4;
     signal rd_addr : unsigned(11 downto 0);
   begin
-    rd_addr <= lt_rd_adod when PAIR = 1 else lt_rd_adev;
+    rd_addr <= lt_rd_adod2 when (PAIR = 1 and MIRR = 1)
+          else lt_rd_adev2 when MIRR = 1
+          else lt_rd_adod when PAIR = 1
+          else lt_rd_adev;
     ram_rd_cmd(idx) <= (
       valid => lt_rd_valid,
       addr  => rd_addr,
@@ -198,10 +213,15 @@ begin
   lt_rd_odd(0 to 7)    <= ram_rd_resp(2).rdat;
   lt_rd_odd(8 to 15)   <= ram_rd_resp(3).rdat;
 
+  lt_rd_even2(0 to 7)  <= ram_rd_resp(4).rdat;
+  lt_rd_even2(8 to 15) <= ram_rd_resp(5).rdat;
+  lt_rd_odd2(0 to 7)   <= ram_rd_resp(6).rdat;
+  lt_rd_odd2(8 to 15)  <= ram_rd_resp(7).rdat;
+
   lt_rd_next <= ram_rd_resp(3).valid_next;
 
-  -- The four RAMs holding the decompression history.
-  ram_gen: for idx in 0 to 3 generate
+  -- The RAMs holding the decompression history, plus their mirror.
+  ram_gen: for idx in 0 to 7 generate
   begin
     ram_inst: vhsnunzip_ram
       generic map (

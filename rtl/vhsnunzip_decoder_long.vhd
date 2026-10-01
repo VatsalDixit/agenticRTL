@@ -23,8 +23,46 @@ entity vhsnunzip_decoder_long is
 end vhsnunzip_decoder_long;
 
 architecture behavior of vhsnunzip_decoder_long is
+
+  -- The byte positions at which the element behind a copy can start. The copy
+  -- header is 2, 3 or 5 bytes long, so the candidate index is off(2..0)+2, +3
+  -- or +5; the 5-byte form encodes an offset of 64kiB or more, which neither a
+  -- valid Snappy stream with a 32kiB window nor this core's 64kiB history can
+  -- produce, so it is not a pairing candidate and only two candidates remain.
+  -- Both are derived from the `off` register alone, so both candidate decodes
+  -- run in parallel with the first element's own decode and only a 2:1
+  -- multiplexer selected by the first element's tag sits behind it -- exactly
+  -- the structure the literal header byte `lhdr` already uses.
+  type nat2 is array (0 to 1) of natural range 0 to 7;
+  constant K1J : nat2 := (2, 3);
+
 begin
   proc: process (clk) is
+
+    -- Candidate decodes of the element behind the copy, one per candidate
+    -- position. c2ok(p) is set when that candidate is a copy that may be paired
+    -- with the first one; see the pairing conditions at its assignment. khdc(p)
+    -- is the *total* header size of the paired transfer for that candidate,
+    -- K1J(p) + the second copy's own header size, formed here so that the pair
+    -- adds a multiplexer behind the k1+k2 adder rather than in front of it: the
+    -- line-exhausted recurrence then sees one extra 4-bit select and no extra
+    -- carry chain.
+    type u4_arr is array (0 to 1) of unsigned(3 downto 0);
+    type u16_arr is array (0 to 1) of unsigned(15 downto 0);
+    variable c2ok   : std_logic_vector(0 to 1);
+    variable khdc   : u4_arr;
+    variable c2len  : u4_arr;
+    variable c2off  : u16_arr;
+
+    -- Whether the pair is issued this cycle, and the total header size it
+    -- implies.
+    variable pair   : std_logic;
+    variable khdp   : unsigned(3 downto 0);
+
+    -- Scratch for the candidate decodes.
+    variable cj     : natural range 0 to 15;
+    variable l1     : unsigned(6 downto 0);
+    variable l2     : unsigned(6 downto 0);
 
     -- Input holding register.
     variable cdh    : compressed_stream_double := COMPRESSED_STREAM_DOUBLE_INIT;
@@ -220,6 +258,114 @@ begin
         end if;
 
         ---------------------------------------------------------------------
+        -- Handle the second copy of a copy pair
+        ---------------------------------------------------------------------
+        -- Decode the element that would sit behind the copy at each of the two
+        -- pairable copy header sizes. Every byte index here is off(2..0) +
+        -- constant, so none of this waits for the first element's tag; only the
+        -- 2:1 selection below does.
+        for p in 0 to 1 loop
+          cj := ofi + K1J(p);
+
+          -- The second copy's own header.
+          if cdh.data(cj)(1 downto 0) = "01" then
+            khdc(p) := to_unsigned(K1J(p) + 2, 4);
+            c2off(p) := "00000" & unsigned(cdh.data(cj)(7 downto 5))
+                                & unsigned(cdh.data(cj + 1));
+            l2 := resize(unsigned(cdh.data(cj)(4 downto 2)), 7) + 3;
+
+            -- The second copy must reach back at least 768 bytes. cmd_gen_2
+            -- routes a copy to the long-term memory as soon as it reaches more
+            -- than 31 lines (496 bytes) back from a destination position of at
+            -- most 31, so anything from 528 bytes is guaranteed long-term; 768
+            -- is the nearest bound that is a plain test on the high bits. Being
+            -- long-term means the second copy needs no short-term SRL read port
+            -- of its own, and reaching that far back also means it cannot read
+            -- any byte that the first copy of the pair writes this very cycle,
+            -- which is the data hazard that would otherwise forbid the pair.
+            c2ok(p) := cdh.data(cj)(7)
+                    or (cdh.data(cj)(6) and cdh.data(cj)(5));
+
+          elsif cdh.data(cj)(1 downto 0) = "10" then
+            khdc(p) := to_unsigned(K1J(p) + 3, 4);
+            c2off(p) := unsigned(cdh.data(cj + 2)) & unsigned(cdh.data(cj + 1));
+            l2 := resize(unsigned(cdh.data(cj)(7 downto 2)), 7);
+
+            -- Same 768-byte bound; here the offset's high byte is a byte of its
+            -- own, so the test is simply "high byte is 3 or more".
+            if unsigned(cdh.data(cj + 2)) >= 3 then
+              c2ok(p) := '1';
+            else
+              c2ok(p) := '0';
+            end if;
+
+          else
+            -- A literal, or a 5-byte copy header.
+            khdc(p) := to_unsigned(K1J(p), 4);
+            c2off(p) := (others => '0');
+            l2 := (others => '0');
+            c2ok(p) := '0';
+
+          end if;
+          c2len(p) := l2(3 downto 0);
+
+          -- The first copy's length and its "offset is at least 16" test. The
+          -- candidate index p *is* the first copy's header size, so each
+          -- candidate knows which of the two header layouts the first copy has.
+          -- An offset of at least 16 means neither cmd_gen_1's overlapping-copy
+          -- split nor its run-length acceleration can trigger, so the first
+          -- copy is guaranteed to be issued whole in the pair's one cycle.
+          if p = 0 then
+            l1 := resize(unsigned(cdh.data(ofi)(4 downto 2)), 7) + 3;
+            if unsigned(cdh.data(ofi)(7 downto 5)) = 0
+               and unsigned(cdh.data(ofi + 1)(7 downto 4)) = 0 then
+              c2ok(p) := '0';
+            end if;
+          else
+            l1 := resize(unsigned(cdh.data(ofi)(7 downto 2)), 7);
+            if unsigned(cdh.data(ofi + 2)) = 0
+               and unsigned(cdh.data(ofi + 1)(7 downto 4)) = 0 then
+              c2ok(p) := '0';
+            end if;
+          end if;
+
+          -- Both copies together must fit one 16-byte line. The lengths are
+          -- diminished-one, so this is "real lengths add up to 16 or less".
+          if l1 + l2 > 14 then
+            c2ok(p) := '0';
+          end if;
+
+          -- The whole of the second header must be inside the valid part of the
+          -- 16-byte window. K1J(p) + 3 covers the largest paired header (3
+          -- bytes) with one byte to spare.
+          if signed(to_signed(K1J(p) + 3, 6)) > dwen then
+            c2ok(p) := '0';
+          end if;
+
+        end loop;
+
+        -- Select the candidate that matches the first element's header size.
+        -- This is the only part of the second copy's decode that sits behind
+        -- the first element's tag, and it is one multiplexer deep.
+        if cdh.data(ofi)(1 downto 0) = "01" then
+          pair := c2ok(0);
+          khdp := khdc(0);
+          elh.cp2_off := c2off(0);
+          elh.cp2_len := c2len(0);
+        elsif cdh.data(ofi)(1 downto 0) = "10" then
+          pair := c2ok(1);
+          khdp := khdc(1);
+          elh.cp2_off := c2off(1);
+          elh.cp2_len := c2len(1);
+        else
+          pair := '0';
+          khdp := khdc(0);
+          elh.cp2_off := c2off(0);
+          elh.cp2_len := c2len(0);
+        end if;
+        elh.cp2_val := pair;
+
+        ---------------------------------------------------------------------
         -- Handle literal elements
         ---------------------------------------------------------------------
         -- `lhdr` above is the header byte at the post-copy offset `offns`, i.e.
@@ -301,7 +447,24 @@ begin
         -- only exceed 1 when k1 is 0, because hdr_ok above refuses a multi-byte
         -- literal header that sits behind a copy, so k1 + k2 <= 6 and offns <= 13,
         -- exactly as before: it still fits four bits and never wraps.
+        -- When the pair is taken, the element behind the first copy is the
+        -- second copy and not a literal, so the literal slot stays empty and
+        -- the total header size of this transfer is the first copy's header
+        -- plus the second copy's header. That total was already formed per
+        -- candidate above, so the pair costs one 4-bit multiplexer *behind* the
+        -- k1+k2 adder instead of a multiplexer on k2 in front of it: the
+        -- line-exhausted recurrence gains a select and no carry chain. Note
+        -- that k2 is "000" here whenever pair is set (lhdr is a copy header, so
+        -- the hdr_ok chain above took one of its two li_val = '0' branches),
+        -- which is why khdp replaces the whole sum rather than part of it.
+        if pair = '1' then
+          elh.li_val := '0';
+        end if;
+
         khd  := resize(k1, 4) + resize(k2, 4);
+        if pair = '1' then
+          khd := khdp;
+        end if;
         offns := resize(off(2 downto 0), 4) + khd;
 
         elh.li_off := offns;
@@ -383,6 +546,7 @@ begin
         if off > cdh.endi or offh /= 0 then
           elh.cp_val := '0';
           elh.li_val := '0';
+          elh.cp2_val := '0';
 
           -- The offset did not move, so the line stays exhausted. Stepping to
           -- the next line is the same subtraction as it always was; only the

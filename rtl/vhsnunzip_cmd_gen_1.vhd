@@ -108,14 +108,22 @@ begin
         -- Advance if there are no (more) bytes in the copy.
         if cp_rem(6) = '1' then
           elh.valid := '0';
+          -- The decoder only pairs copies that need no splitting at all (the
+          -- first copy's offset is at least 16 and the two lengths add up to at
+          -- most 16), so a paired record always takes this branch on its first
+          -- cycle and the second copy is passed straight on.
+          c1h.cp2_val := elh.cp2_val;
           c1h.li_val := elh.li_val;
           c1h.ld_pop := elh.ld_pop;
           c1h.last := elh.last;
         else
+          c1h.cp2_val := '0';
           c1h.li_val := '0';
           c1h.ld_pop := '0';
           c1h.last := '0';
         end if;
+        c1h.cp2_off := elh.cp2_off;
+        c1h.cp2_len := elh.cp2_len;
         c1h.li_off := elh.li_off;
         c1h.li_len := elh.li_len;
 
