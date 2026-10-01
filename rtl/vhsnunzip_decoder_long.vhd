@@ -41,23 +41,22 @@ begin
 
     -- Candidate decodes of the element behind the copy, one per candidate
     -- position. c2ok(p) is set when that candidate is a copy that may be paired
-    -- with the first one; see the pairing conditions at its assignment. khdc(p)
-    -- is the *total* header size of the paired transfer for that candidate,
-    -- K1J(p) + the second copy's own header size, formed here so that the pair
-    -- adds a multiplexer behind the k1+k2 adder rather than in front of it: the
-    -- line-exhausted recurrence then sees one extra 4-bit select and no extra
-    -- carry chain.
+    -- with the first one; see the pairing conditions at its assignment. ksecc(p)
+    -- is the *second* copy's own header size for that candidate, i.e. the part of
+    -- the paired transfer's total header size that the first copy does not
+    -- account for. The first copy's share is folded into `base` and `d1` by the
+    -- tag decode, so the pair adds a 4-bit select beside those and no adder.
     type u4_arr is array (0 to 1) of unsigned(3 downto 0);
     type u16_arr is array (0 to 1) of unsigned(15 downto 0);
     variable c2ok   : std_logic_vector(0 to 1);
-    variable khdc   : u4_arr;
+    variable ksecc  : u4_arr;
     variable c2len  : u4_arr;
     variable c2off  : u16_arr;
 
-    -- Whether the pair is issued this cycle, and the total header size it
-    -- implies.
+    -- Whether the pair is issued this cycle, and the second copy's header size
+    -- it implies.
     variable pair   : std_logic;
-    variable khdp   : unsigned(3 downto 0);
+    variable ksecp  : unsigned(3 downto 0);
 
     -- Literal-first transfer: a short literal element followed by a copy, both
     -- issued in the same transfer and in that order. The literal's one-byte
@@ -71,6 +70,11 @@ begin
     -- out of range.
     variable swok   : std_logic;
     variable swfar  : std_logic;
+    -- The line-exhausted answer for a literal-first transfer, formed without the
+    -- literal-length multiplexer: see its assignment. `swok` itself is four
+    -- byte-mux levels deep (header byte -> length -> copy header select ->
+    -- admission), so it must not sit in front of any of the seek arithmetic.
+    variable exh_sw : boolean;
     variable khdsw  : unsigned(3 downto 0);
     variable swk    : unsigned(2 downto 0);
     variable swlen  : unsigned(3 downto 0);
@@ -153,20 +157,55 @@ begin
     -- bits of the header byte itself.
     variable bigli  : boolean;
 
-    -- The seek of this cycle, split into its three addends instead of being
-    -- accumulated by three adders in series. k1 is the copy header size (0, 2,
-    -- 3 or 5 bytes), k2 the literal header size (0, 1 or 2..5 bytes) and kli3
-    -- the low part of the literal data seek (0, or li_len(2..0)+1). khd is the
-    -- total header size and ktot the whole five-bit seek. None of them involves
-    -- `off`, so none of them is on the off -> off recurrence: they are pure
-    -- functions of the window bytes.
+    -- The seek of this cycle, split into its addends instead of being
+    -- accumulated by adders in series. k1 is the copy header size (0, 2, 3 or 5
+    -- bytes) and k2 the literal header size (0, 1 or 2..5 bytes). k1 never
+    -- reaches an adder of its own: the tag decode adds it straight to `off`
+    -- (`base`) and subtracts it straight from the bound (`d1`), both of which are
+    -- then functions of registers and the tag alone. Only the *rest* of the
+    -- header size -- k2, or the second copy's header, or the whole of a
+    -- literal-first transfer's -- arrives behind the literal header byte, and it
+    -- meets `base` in a single 4-bit adder (`bsum`) rather than being summed with
+    -- k1 first and added to `off` afterwards.
     variable k1     : unsigned(2 downto 0);
     variable k2     : unsigned(2 downto 0);
-    variable khd    : unsigned(3 downto 0);
-    variable kli3   : unsigned(3 downto 0);
-    variable kli9   : unsigned(8 downto 0);
-    variable kli9m  : unsigned(8 downto 0);
-    variable ktot   : unsigned(4 downto 0);
+    variable base   : unsigned(3 downto 0);
+    variable ksecs  : unsigned(3 downto 0);
+    variable bsum   : unsigned(3 downto 0);
+
+    -- The same two quantities with the literal's own +1 -- the one that turns a
+    -- literal length into a seek past the literal's data -- already included.
+    -- Which header form this element has decides both the header size and whether
+    -- there is a literal at all, so that +1 is a different *constant* per branch
+    -- of the header decode and costs nothing, where adding it afterwards put an
+    -- increment between the header sizes and the nine-bit offset adder.
+    variable k2p    : unsigned(3 downto 0);
+    variable ksecsp : unsigned(3 downto 0);
+    variable khdsw1 : unsigned(3 downto 0);
+
+    -- The literal data seek, split so that the *late* operand (the literal
+    -- length, which is six or eight bits out of the window and arrives behind
+    -- the element tag, the literal header byte select and the header-form
+    -- decode) enters exactly one carry chain and nothing else. `sa` is the
+    -- whole of the seek that does not involve the literal length: the offset,
+    -- the header sizes and the +1 that used to be chained onto the length
+    -- itself. `sb` is the same thing stepped back by one line. Both are
+    -- `base + ksecsp`, i.e. functions of `off` and the header decode, which settle
+    -- while the length bytes are still being selected, so `offn`/`offnm` cost one
+    -- 9-bit add behind the length instead of an increment followed by an add.
+    variable li8    : unsigned(8 downto 0);
+    variable sa     : unsigned(8 downto 0);
+    variable sb     : unsigned(8 downto 0);
+
+    -- Whether the copy header size of this element fits inside the valid part
+    -- of the 16-byte window, i.e. the `k1 <= dwen` half of `hdr_ok`. It is
+    -- decided per copy header size inside the tag decode below, where the
+    -- comparison has a *constant* late operand and so resolves from the
+    -- registers alone; the tag then selects one of the four answers. Written
+    -- the other way round (mux the size, then compare) it put a six-bit
+    -- comparator behind the tag multiplexer and in front of li_val, which is
+    -- what gates the whole literal seek.
+    variable k1fit  : boolean;
 
     -- How far the seek may go before it leaves the line (`dend`) and before it
     -- leaves the valid part of the 16-byte window (`dwen`). Both are differences
@@ -180,6 +219,18 @@ begin
     -- comparator.
     variable dend   : signed(5 downto 0);
     variable dwen   : signed(5 downto 0);
+
+    -- `dend` with the *first* element's header size already taken off it, chosen
+    -- by the tag decode out of four differences of registers, and `d1` with the
+    -- rest of the seek that is not the literal length taken off it as well.
+    -- The line-exhausted test is then a bare magnitude comparison whose late
+    -- operand is the three low bits of the literal length: no addend of the seek
+    -- is ever added to another one behind the tag decode. i24 moved `off` to this
+    -- side of the comparator; this moves the header sizes with it.
+    variable d1     : signed(5 downto 0);
+    variable dsk    : signed(5 downto 0);
+    variable ksec   : unsigned(3 downto 0);
+    variable lo     : unsigned(2 downto 0);
 
     -- Set for the single cycle in which the first line of a chunk is shifted
     -- into the holding register. The chunk's start offset (the size of the
@@ -243,12 +294,18 @@ begin
             -- 2-byte copy element.
             elh.cp_val := '1';
             k1 := "010";
+            k1fit := 2 <= dwen;
+            d1 := dend - 2;
+            base := resize(off(2 downto 0), 4) + 2;
             lhdr := cdh.data(ofi + 2);
 
           when "10" =>
             -- 3-byte copy element.
             elh.cp_val := '1';
             k1 := "011";
+            k1fit := 3 <= dwen;
+            d1 := dend - 3;
+            base := resize(off(2 downto 0), 4) + 3;
             lhdr := cdh.data(ofi + 3);
 
           when "11" =>
@@ -257,12 +314,18 @@ begin
             -- 64kiB, which our memory is not long enough for.
             elh.cp_val := '1';
             k1 := "101";
+            k1fit := 5 <= dwen;
+            d1 := dend - 5;
+            base := resize(off(2 downto 0), 4) + 5;
             lhdr := cdh.data(ofi + 5);
 
           when others =>
             -- Literal element.
             elh.cp_val := '0';
             k1 := "000";
+            k1fit := 0 <= dwen;
+            d1 := dend;
+            base := resize(off(2 downto 0), 4);
             lhdr := cdh.data(ofi);
 
         end case;
@@ -291,7 +354,7 @@ begin
 
           -- The second copy's own header.
           if cdh.data(cj)(1 downto 0) = "01" then
-            khdc(p) := to_unsigned(K1J(p) + 2, 4);
+            ksecc(p) := to_unsigned(2, 4);
             c2off(p) := "00000" & unsigned(cdh.data(cj)(7 downto 5))
                                 & unsigned(cdh.data(cj + 1));
             l2 := resize(unsigned(cdh.data(cj)(4 downto 2)), 7) + 3;
@@ -312,7 +375,7 @@ begin
                     or cdh.data(cj + 1)(5) or cdh.data(cj + 1)(4);
 
           elsif cdh.data(cj)(1 downto 0) = "10" then
-            khdc(p) := to_unsigned(K1J(p) + 3, 4);
+            ksecc(p) := to_unsigned(3, 4);
             c2off(p) := unsigned(cdh.data(cj + 2)) & unsigned(cdh.data(cj + 1));
             l2 := resize(unsigned(cdh.data(cj)(7 downto 2)), 7);
 
@@ -328,7 +391,7 @@ begin
 
           else
             -- A literal, or a 5-byte copy header.
-            khdc(p) := to_unsigned(K1J(p), 4);
+            ksecc(p) := to_unsigned(0, 4);
             c2off(p) := (others => '0');
             l2 := (others => '0');
             c2ok(p) := '0';
@@ -376,17 +439,17 @@ begin
         -- the first element's tag, and it is one multiplexer deep.
         if cdh.data(ofi)(1 downto 0) = "01" then
           pair := c2ok(0);
-          khdp := khdc(0);
+          ksecp := ksecc(0);
           elh.cp2_off := c2off(0);
           elh.cp2_len := c2len(0);
         elsif cdh.data(ofi)(1 downto 0) = "10" then
           pair := c2ok(1);
-          khdp := khdc(1);
+          ksecp := ksecc(1);
           elh.cp2_off := c2off(1);
           elh.cp2_len := c2len(1);
         else
           pair := '0';
-          khdp := khdc(0);
+          ksecp := ksecc(0);
           elh.cp2_off := c2off(0);
           elh.cp2_len := c2len(0);
         end if;
@@ -436,6 +499,23 @@ begin
           end if;
         end if;
         khdsw := resize(swk, 4) + 1;
+        khdsw1 := resize(swk, 4) + 2;
+
+        -- The whole seek of a literal-first transfer is known without waiting for
+        -- the literal-length multiplexer: the literal has a one-byte header, so
+        -- its length is the three bits cdh.data(ofi)(4..2) straight out of the
+        -- register (swok admits only lengths of eight bytes or less), its own
+        -- header size is one and the copy's is swk. The line-exhausted test
+        -- `off + 1 + swk + len + 1 > endi` is therefore a comparison of those
+        -- three bits against `dend` minus a constant -- a bound formed from
+        -- registers alone -- and the only late thing about it is which of the two
+        -- copy header sizes applies. `swok` then selects a ready answer instead
+        -- of feeding the subtraction that forms the bound.
+        if swhd0(1) = '0' then
+          exh_sw := signed(resize(unsigned(cdh.data(ofi)(4 downto 2)), 6)) >= dend - 3;
+        else
+          exh_sw := signed(resize(unsigned(cdh.data(ofi)(4 downto 2)), 6)) >= dend - 4;
+        end if;
 
         -- Admission. In order:
         --  - the element at off is a literal with a one-byte header and at
@@ -457,8 +537,8 @@ begin
            and cdh.data(ofi)(7 downto 5) = "000"
            and (swhd0(1 downto 0) = "01" or swhd0(1 downto 0) = "10")
            and swfar = '1'
-           and resize(swlen, 7) + resize(swlenc, 7) <= 15
-           and signed(resize(swlen, 6)) + 3 <= dwen then
+           and swlenc <= 14 - resize(unsigned(cdh.data(ofi)(4 downto 2)), 6)
+           and signed(resize(unsigned(cdh.data(ofi)(4 downto 2)), 6)) <= dwen - 4 then
           swok := '1';
         else
           swok := '0';
@@ -513,7 +593,9 @@ begin
         -- `offns <= cdh.wendi`, i.e. `off(2..0) + k1 <= cdh.wendi`, written as
         -- `k1 <= cdh.wendi - off(2..0)` so that the sum the copy tag selects is
         -- not added to anything before it is compared.
-        hdr_ok := signed(resize(k1, 6)) <= dwen
+        -- `k1fit` is that comparison, already decided per header size inside the
+        -- tag decode: see its declaration.
+        hdr_ok := k1fit
               and (elh.cp_val = '0' or lhdr(7 downto 4) /= "1111");
 
         if not hdr_ok then
@@ -521,57 +603,72 @@ begin
           -- line and we cannot reach it.
           elh.li_val := '0';
           k2 := "000";
+          k2p := "0000";
 
         elsif lhdr(1 downto 0) /= "00" then
           -- Copy element.
           elh.li_val := '0';
           k2 := "000";
+          k2p := "0000";
 
         elsif lhdr(7 downto 4) = "1111" then
           -- Literal with 2- to 5-byte header. Only reachable with cp_val = '0',
           -- i.e. with the header at off(2..0).
           elh.li_val := '1';
           k2 := "010" + unsigned(lhdr(3 downto 2));
+          k2p := "0011" + unsigned(lhdr(3 downto 2));
 
         else
           -- Literal with 1-byte header.
           elh.li_val := '1';
           k2 := "001";
+          k2p := "0010";
 
         end if;
 
-        -- Total header size, and the post-header offset. The two header sizes
-        -- are added to each other rather than one after the other to `off`, so
-        -- `off` joins in a single adder that no longer feeds another one. k2 can
-        -- only exceed 1 when k1 is 0, because hdr_ok above refuses a multi-byte
-        -- literal header that sits behind a copy, so k1 + k2 <= 6 and offns <= 13,
-        -- exactly as before: it still fits four bits and never wraps.
         -- When the pair is taken, the element behind the first copy is the
-        -- second copy and not a literal, so the literal slot stays empty and
-        -- the total header size of this transfer is the first copy's header
-        -- plus the second copy's header. That total was already formed per
-        -- candidate above, so the pair costs one 4-bit multiplexer *behind* the
-        -- k1+k2 adder instead of a multiplexer on k2 in front of it: the
-        -- line-exhausted recurrence gains a select and no carry chain. Note
+        -- second copy and not a literal, so the literal slot stays empty. Note
         -- that k2 is "000" here whenever pair is set (lhdr is a copy header, so
         -- the hdr_ok chain above took one of its two li_val = '0' branches),
-        -- which is why khdp replaces the whole sum rather than part of it.
+        -- which is why ksecp replaces the whole of the second header size rather
+        -- than part of it.
         if pair = '1' then
           elh.li_val := '0';
         end if;
 
-        khd  := resize(k1, 4) + resize(k2, 4);
+        -- The header size that is *not* the first element's own: the literal
+        -- header size normally, the second copy's header size for a pair, and the
+        -- whole of khdsw for a literal-first transfer (whose first element is the
+        -- literal, so k1 is zero there and base is just off). `ksec` is the same
+        -- thing without the literal-first case, which is the one the
+        -- line-exhausted comparison below does not need, because `exh_sw` already
+        -- answered it from the registers; keeping swok out of `ksec` keeps the
+        -- deepest of the three selects out of the comparison's bound.
+        ksecs  := resize(k2, 4);
+        ksecsp := k2p;
+        ksec   := resize(k2, 4);
         if pair = '1' then
-          khd := khdp;
+          -- li_val is cleared just above for a pair, and k2 was already zero, so
+          -- the "+1 included" form is the same value.
+          ksecs  := ksecp;
+          ksecsp := ksecp;
+          ksec   := ksecp;
         elsif swok = '1' then
-          -- Both headers again, but the literal's one byte in front of the
-          -- copy's two or three. The literal's data seek (kli3/kli9 below) is
-          -- the one it would have had on its own, so the total seek is still
-          -- headers + literal bytes and the line-exhausted decision below is
-          -- the same comparison it always was.
-          khd := khdsw;
+          -- A literal-first transfer always carries its literal (its header is
+          -- the one-byte form at off(2..0), which swok's admission checked), so
+          -- the +1 is always included here.
+          ksecs  := khdsw;
+          ksecsp := khdsw1;
         end if;
-        offns := resize(off(2 downto 0), 4) + khd;
+
+        -- Post-header offset. `base` already holds off(2..0) + k1 out of the tag
+        -- decode, so the header sizes are never summed with each other before
+        -- `off` joins in: one 4-bit adder carries the whole of it. k2 can only
+        -- exceed 1 when k1 is 0, because hdr_ok above refuses a multi-byte
+        -- literal header that sits behind a copy, so base + ksecs <= 13, exactly
+        -- as before: it still fits four bits and never wraps.
+        bsum  := base + ksecs;
+        offns := bsum;
 
         -- The literal's data starts directly behind its own one-byte header in
         -- a literal-first transfer, not behind the whole of both headers.
@@ -634,30 +731,40 @@ begin
           elh.cp_len := swlenc;
         end if;
 
-        -- Seek past literal data. The literal part of the seek is formed on its
-        -- own and then added to `off` and to the header size in one three-input
-        -- adder, instead of being chained onto the post-header offset: the sum
-        -- is identical (offns = off(2..0) + khd, with off(8..3) zero whenever
-        -- this result is kept) but nothing waits for a previous carry chain.
+        -- Seek past literal data. `bsum` is the post-header offset, which is
+        -- exactly off(2..0) + the header sizes with off(8..3) zero whenever this
+        -- result is kept, so the nine-bit offset is formed from it directly.
+        -- The length itself is the only late operand, so it is the only thing
+        -- left in front of the adder: the +1 that turns the length into a seek
+        -- and the -8 that steps back a line are folded into `sa`/`sb`, which are
+        -- functions of `off`, the header sizes and li_val alone. `offnm` is
+        -- exactly `offn - 8` in both branches, so the borrow sits on the early
+        -- side of the adder and `exh` still only selects between two sums.
         offnh := (others => '0');
-        kli9  := (others => '0');
-        kli9m := to_unsigned(504, 9);
-        kli3  := (others => '0');
+        lo    := (others => '0');
+        li8   := (others => '0');
+        sa    := resize(base + ksecsp, 9);
         if elh.li_val = '1' then
-          kli9  := resize(elh.li_len(7 downto 0), 9) + 1;
-          kli9m := resize(elh.li_len(7 downto 0), 9) - 7;
-          kli3  := resize(elh.li_len(2 downto 0), 4) + 1;
+          li8   := resize(elh.li_len(7 downto 0), 9);
+          lo    := elh.li_len(2 downto 0);
           offnh := elh.li_len(31 downto 8);
         end if;
-        offn  := resize(off(2 downto 0), 9) + resize(khd, 9) + kli9;
-        offnm := resize(off(2 downto 0), 9) + resize(khd, 9) + kli9m;
+        sb    := sa - 8;
+        offn  := sa + li8;
+        offnm := sb + li8;
 
-        -- Same seek, but only over the low three bits of the literal length,
-        -- and the flag that says those three bits are not the whole story.
-        -- `ktot` is the whole seek *relative to off*, so it is a function of the
-        -- window bytes only; see the line-exhausted decision below.
+        -- How far the literal data may reach before it leaves the line, with
+        -- every addend of the seek that is not the literal length itself already
+        -- subtracted from the register-derived bound: `dend` loses `off` when it
+        -- is formed, the first element's header size inside the tag decode
+        -- (`d1`), and the rest of the header size here. Nothing is added to the
+        -- late operand any more, so the line-exhausted decision below is one
+        -- six-bit subtraction of early values followed by one comparison.
+        dsk := d1 - signed(resize(ksec, 6));
+
+        -- The flag that says the low three bits of the literal length are not the
+        -- whole story; see the line-exhausted decision below.
         bigli  := elh.li_val = '1' and elh.li_len(31 downto 3) /= 0;
-        ktot   := resize(khd, 5) + resize(kli3, 5);
 
         ---------------------------------------------------------------------
 
@@ -699,16 +806,22 @@ begin
           -- literals of 0..7 bytes, for which the seek never exceeds 13+7+1 = 21
           -- and five bits are exact.
           --
-          -- The remaining five-bit comparison used to be `off + ktot > endi`,
-          -- with `ktot` accumulated onto `off` by two or three adders in series
-          -- behind the tag decode. It is written here as `ktot > endi - off`
-          -- instead: `dend` is a difference of two registers and is ready before
-          -- the tag is, and `ktot` is a sum of three small window-derived
-          -- constants, so the recurrence now holds one narrow add and one
-          -- magnitude compare rather than a chain of them. In this branch
-          -- off <= cdh.endi <= 7, so off = off(2..0) and dend >= 0, and the
-          -- comparison is exactly the old one.
-          exh := bigli or signed(resize(ktot, 6)) > dend;
+          -- The remaining five-bit comparison used to be
+          -- `off + k1 + k2 + li_len(2..0) + 1 > endi`, with the addends
+          -- accumulated by two or three adders in series behind the tag decode.
+          -- i24 moved `off` to the bound's side of the comparator; `d1`/`dsk`
+          -- above move the header sizes there too, so what is left in front of
+          -- the comparator is the three low bits of the literal length and
+          -- nothing else. With the literal's own +1 absorbed by turning the
+          -- strict comparison into a non-strict one, not a single addend of the
+          -- seek is added to another one behind the tag decode.
+          if swok = '1' then
+            exh := exh_sw;
+          elsif elh.li_val = '1' then
+            exh := bigli or signed(resize(lo, 6)) >= dsk;
+          else
+            exh := dsk < 0;
+          end if;
 
           -- Both candidate next offsets were formed in parallel above, so the
           -- late `exh` only selects between them.
