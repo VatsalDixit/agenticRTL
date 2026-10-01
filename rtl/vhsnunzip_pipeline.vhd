@@ -107,10 +107,10 @@ architecture behavior of vhsnunzip_pipeline is
 
   -- Command stream FIFO write-side signals.
   signal cm_push      : std_logic;
-  signal cm_ctrl      : std_logic_vector(31 downto 0);
+  signal cm_ctrl      : std_logic_vector(37 downto 0);
 
   -- Command stream FIFO read-side signals.
-  signal s1_cm_ctrl   : std_logic_vector(31 downto 0);
+  signal s1_cm_ctrl   : std_logic_vector(37 downto 0);
   signal s1_cm        : command_stream;
   signal s1_cm_exp    : command_stream;
 
@@ -139,17 +139,22 @@ architecture behavior of vhsnunzip_pipeline is
 
   -- Second copy of a copy pair. A paired command never carries a literal, so
   -- the second copy takes over the literal's byte region, its rotation and its
-  -- rotator: all that is added here is the even/odd long-term line select and a
-  -- 3:1 mux in front of the literal sub-lanes. The second copy is always a
-  -- long-term read (the decoder only pairs copies reaching back 768 bytes or
-  -- more), so it needs no short-term address generation. s2_cp2_hs is the
+  -- rotator: all that is added here is its own source select (a second read port
+  -- on the short-term SRLs plus the mirrored long-term RAMs, selected exactly
+  -- like the first copy's) and a 3:1 mux in front of the literal sub-lanes.
+  -- The decoder only pairs copies reaching back 16 bytes or more, so the second
+  -- copy never overlaps itself and never reads what this command writes, but it
+  -- may be near enough to need the short-term memory. s2_cp2_hs is the
   -- lane-pair select, which is the literal path's own half-select: both windows
   -- index window byte p+8 against window byte p, and li_rol carries the second
   -- copy's rotation, so the two selects are the same expression.
   signal s2_pair      : std_logic;
   signal s2_le2_data  : byte_array(0 to 15);
   signal s2_lo2_data  : byte_array(0 to 15);
+  signal s2_lt_val2   : std_logic;
   signal s2_lt2_sel   : std_logic_array(0 to 15);
+  signal s2_st2_addr  : srl_addr_array(0 to 15);
+  signal s2_st2_data  : byte_array(0 to 15);
   signal s2_cp2_data  : byte_array(0 to 15);
   signal s2_cp2_hs    : std_logic_array(0 to 7);
   signal s2_li_src_a  : byte_array(0 to 7);
@@ -453,10 +458,12 @@ begin
   cm_ctrl(29) <= cm.lt_val2;
   cm_ctrl(30) <= cm.lt_swap2;
   cm_ctrl(31) <= cm.cp2_roh;
+  cm_ctrl(32) <= cm.cp2_val;
+  cm_ctrl(37 downto 33) <= std_logic_vector(cm.st_addr2);
 
   cm_fifo_inst: vhsnunzip_fifo
     generic map (
-      CTRL_WIDTH  => 32
+      CTRL_WIDTH  => 38
     )
     port map (
       clk         => clk,
@@ -481,6 +488,8 @@ begin
   s1_cm.lt_val2 <= s1_cm_ctrl(29);
   s1_cm.lt_swap2 <= s1_cm_ctrl(30);
   s1_cm.cp2_roh <= s1_cm_ctrl(31);
+  s1_cm.cp2_val <= s1_cm_ctrl(32);
+  s1_cm.st_addr2 <= unsigned(s1_cm_ctrl(37 downto 33));
   s1_cm.lt_adev2 <= (others => '0');
   s1_cm.lt_adod2 <= (others => '0');
 
@@ -529,8 +538,9 @@ begin
     -- Level/state of the literal FIFO.
     variable li_level     : unsigned(4 downto 0) := (others => '1');
 
-    -- Temporary variable for computing short-term SRL address.
+    -- Temporary variables for computing short-term SRL addresses.
     variable st_addr      : unsigned(4 downto 0);
+    variable st_addr2     : unsigned(4 downto 0);
 
   begin
     if rising_edge(clk) then
@@ -592,7 +602,8 @@ begin
       -- paired command this is the second copy's rotation; the second copy
       -- never uses run-length acceleration either, so it is shared the same way.
       s2_li_rol <= s1_cm.li_rol(2 downto 0);
-      s2_pair <= s1_cm.lt_val2;
+      s2_pair <= s1_cm.cp2_val;
+      s2_lt_val2 <= s1_cm.lt_val2;
 
       -- Destination byte i of the 16-byte output line reads copy lane
       -- (cp_rol + i) mod 16; destination byte i+8 reads lane
@@ -793,6 +804,25 @@ begin
 
         s2_st_addr(byte) <= st_addr;
 
+        -- The very same address computation for the second copy, on the second
+        -- read port of the short-term memory. Both corrections are the same ones
+        -- the first copy needs: hold_valid is a property of the source lane (how
+        -- much of the line being assembled it already holds, which is what SRL
+        -- address 0 returns), and the lookahead bit is the second copy's own.
+        -- The second copy only ever reads bytes that were written in an earlier
+        -- cycle (its offset is at least 16 and the pair writes at most 16 bytes),
+        -- so hold_valid as it stands at the start of this cycle describes the
+        -- SRL contents it reads exactly.
+        st_addr2 := s1_cm.st_addr2;
+        if hold_valid(byte) = '1' then
+          st_addr2 := st_addr2 + 1;
+        end if;
+        if cp2_ahead = '1' then
+          st_addr2 := st_addr2 - 1;
+        end if;
+
+        s2_st2_addr(byte) <= st_addr2;
+
         -- Determine hold_valid and the strobe signals for the next cycle.
         s2_int_strb(byte) <= (li_end_th(byte) and not hold_valid(byte))
                           or li_end_th(byte + 16);
@@ -838,17 +868,46 @@ begin
       );
   end generate;
 
+  -- Second read port on the short-term memory, for the second copy of a copy
+  -- pair. An SRL has one read port, so the port is a duplicate set of SRLs
+  -- written with exactly the same data and enables as the set above; only the
+  -- read address differs. This is what lets a pair's second copy reach back less
+  -- than the long-term memory's write latency, which is the common case in real
+  -- column data (offsets of tens or hundreds of bytes).
+  st2_srl_gen: for byte in 0 to 15 generate
+  begin
+    srl_inst: vhsnunzip_srl
+      generic map (
+        WIDTH       => 8,
+        DEPTH_LOG2  => 5
+      )
+      port map (
+        clk         => clk,
+        wr_ena      => s2_int_strb(byte),
+        wr_data     => s2_mux_data(byte),
+        rd_addr     => s2_st2_addr(byte),
+        rd_data     => s2_st2_data(byte)
+      );
+  end generate;
+
   -- "Load" long-term memory data.
   s2_le_data <= lt_rd_even;
   s2_lo_data <= lt_rd_odd;
   s2_le2_data <= lt_rd_even2;
   s2_lo2_data <= lt_rd_odd2;
 
-  -- Second copy source: always long-term, so just the even/odd line select.
-  s2_cp2_data_proc: process (s2_le2_data, s2_lo2_data, s2_lt2_sel) is
+  -- Second copy source: the short-term memory's second read port, or the
+  -- mirrored long-term lines with their even/odd select. Exactly the same 3:1
+  -- select the first copy has (one LUT6 per bit), so the second copy's path is
+  -- no deeper than the first's.
+  s2_cp2_data_proc: process (
+    s2_st2_data, s2_le2_data, s2_lo2_data, s2_lt_val2, s2_lt2_sel
+  ) is
   begin
     for byte in 0 to 15 loop
-      if s2_lt2_sel(byte) = '0' then
+      if s2_lt_val2 = '0' then
+        s2_cp2_data(byte) <= s2_st2_data(byte);
+      elsif s2_lt2_sel(byte) = '0' then
         s2_cp2_data(byte) <= s2_le2_data(byte);
       else
         s2_cp2_data(byte) <= s2_lo2_data(byte);

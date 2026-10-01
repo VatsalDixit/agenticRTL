@@ -274,26 +274,31 @@ begin
                                 & unsigned(cdh.data(cj + 1));
             l2 := resize(unsigned(cdh.data(cj)(4 downto 2)), 7) + 3;
 
-            -- The second copy must reach back at least 768 bytes. cmd_gen_2
-            -- routes a copy to the long-term memory as soon as it reaches more
-            -- than 31 lines (496 bytes) back from a destination position of at
-            -- most 31, so anything from 528 bytes is guaranteed long-term; 768
-            -- is the nearest bound that is a plain test on the high bits. Being
-            -- long-term means the second copy needs no short-term SRL read port
-            -- of its own, and reaching that far back also means it cannot read
-            -- any byte that the first copy of the pair writes this very cycle,
-            -- which is the data hazard that would otherwise forbid the pair.
-            c2ok(p) := cdh.data(cj)(7)
-                    or (cdh.data(cj)(6) and cdh.data(cj)(5));
+            -- The second copy must reach back at least 16 bytes. That is the
+            -- exact data hazard bound: the pair writes at most 16 bytes (the
+            -- l1 + l2 > 14 test below), and the second copy's source ends
+            -- len1 + len2 - off2 bytes past the start of what this command
+            -- writes, so off2 >= 16 >= len1 + len2 means it only reads bytes
+            -- that were already written in an earlier cycle. It also means the
+            -- second copy never overlaps itself, so it needs neither cmd_gen_1's
+            -- split nor its run-length acceleration. The second copy is served
+            -- from the short-term SRLs' second read port or from the mirrored
+            -- long-term RAMs, exactly as the first copy is served from the first
+            -- read port or the main RAMs, so no reach bound is needed here.
+            c2ok(p) := cdh.data(cj)(7) or cdh.data(cj)(6) or cdh.data(cj)(5)
+                    or cdh.data(cj + 1)(7) or cdh.data(cj + 1)(6)
+                    or cdh.data(cj + 1)(5) or cdh.data(cj + 1)(4);
 
           elsif cdh.data(cj)(1 downto 0) = "10" then
             khdc(p) := to_unsigned(K1J(p) + 3, 4);
             c2off(p) := unsigned(cdh.data(cj + 2)) & unsigned(cdh.data(cj + 1));
             l2 := resize(unsigned(cdh.data(cj)(7 downto 2)), 7);
 
-            -- Same 768-byte bound; here the offset's high byte is a byte of its
-            -- own, so the test is simply "high byte is 3 or more".
-            if unsigned(cdh.data(cj + 2)) >= 3 then
+            -- Same 16-byte bound; here the offset's high byte is a byte of its
+            -- own, so the test is "high byte non-zero, or the low byte is 16 or
+            -- more".
+            if unsigned(cdh.data(cj + 2)) /= 0
+               or unsigned(cdh.data(cj + 1)(7 downto 4)) /= 0 then
               c2ok(p) := '1';
             else
               c2ok(p) := '0';

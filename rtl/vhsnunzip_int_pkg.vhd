@@ -395,16 +395,21 @@ package vhsnunzip_int_pkg is
     -- byte strobe signals are determined from endi.
     cp_end    : unsigned(4 downto 0);
 
-    -- Second copy of a copy pair. This copy is always served from the long-term
-    -- memory, through a second (mirrored) set of history RAMs, so it needs no
-    -- short-term address and no run-length flag. It also never shares a command
-    -- with a literal, so it borrows the literal's byte region and the literal's
-    -- rotator in the datapath: its destination region is exactly
-    -- [cp_end, li_end), li_rol carries cp2_rol(3 downto 0), and the only field
-    -- it needs of its own is the long-term line-pair address, its swap bit, and
-    -- bit 4 of its rotation (which the literal path has no use for but the
-    -- lookahead decomposition in stage 1 needs). When lt_val2 is low the region
-    -- is the literal's again and none of this is used.
+    -- Second copy of a copy pair. It never shares a command with a literal, so
+    -- it borrows the literal's byte region and the literal's rotator in the
+    -- datapath: its destination region is exactly [cp_end, li_end), li_rol
+    -- carries cp2_rol(3 downto 0), and bit 4 of its rotation travels in cp2_roh
+    -- (which the literal path has no use for but the lookahead decomposition in
+    -- stage 1 needs). cp2_val says the region belongs to the second copy rather
+    -- than to a literal; when it is low none of the fields below are used.
+    --
+    -- The second copy reads either the short-term SRLs (through a second read
+    -- port, i.e. a duplicate set of SRLs written with the same data) or the
+    -- mirrored long-term RAMs, selected by lt_val2 exactly as lt_val selects
+    -- between the two for the first copy. It never needs the run-length flag,
+    -- because the decoder only pairs copies whose offset is at least 16.
+    cp2_val   : std_logic;
+    st_addr2  : unsigned(4 downto 0);
     lt_val2   : std_logic;
     lt_adev2  : unsigned(11 downto 0);
     lt_adod2  : unsigned(11 downto 0);
@@ -446,6 +451,8 @@ package vhsnunzip_int_pkg is
     cp_rol    => (others => UNDEF),
     cp_rle    => UNDEF,
     cp_end    => (others => UNDEF),
+    cp2_val   => '0',
+    st_addr2  => (others => UNDEF),
     lt_val2   => '0',
     lt_adev2  => (others => UNDEF),
     lt_adod2  => (others => UNDEF),

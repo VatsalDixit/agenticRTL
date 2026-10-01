@@ -65,11 +65,12 @@ begin
     variable len    : unsigned(4 downto 0);
 
     -- Second copy of a copy pair. The decoder guarantees that its offset is at
-    -- least 768 bytes, so it is always beyond the reach of the short-term SRLs
-    -- and is served from a mirrored set of history RAMs; it therefore needs
-    -- only a long-term address pair and a rotation. It also never shares a
-    -- command with a literal, so its rotation is handed to the datapath in
-    -- li_rol and its byte region is [cp_end, li_end).
+    -- least 16 bytes, so it never overlaps itself and never reads a byte that
+    -- this very command writes, but it may well be within the reach of the
+    -- short-term SRLs; it therefore needs a short-term address as well as a
+    -- long-term address pair, and gets them from the same arithmetic the first
+    -- copy uses. It never shares a command with a literal, so its rotation is
+    -- handed to the datapath in li_rol and its byte region is [cp_end, li_end).
     variable pair2  : std_logic;
     variable cp_rel2: signed(16 downto 0);
     variable cp_lt2 : unsigned(11 downto 0);
@@ -203,25 +204,35 @@ begin
 
         -- Second copy of a copy pair. Exactly the same address and rotation
         -- arithmetic as the first copy, but starting from the offset after the
-        -- first copy and always resolving to the long-term memory. Its byte
-        -- region is [cp_end, li_end); the literal that would otherwise occupy
-        -- that region cannot exist in a paired transfer, so the datapath serves
-        -- the second copy through the literal rotator and no second rotator is
-        -- needed. The copies together fit a 16-byte line, so off stays below 32
-        -- exactly as it does for a copy plus a full literal.
-        cmh.lt_val2 := pair2;
+        -- first copy. Its byte region is [cp_end, li_end); the literal that
+        -- would otherwise occupy that region cannot exist in a paired transfer,
+        -- so the datapath serves the second copy through the literal rotator and
+        -- no second rotator is needed. The copies together fit a 16-byte line,
+        -- so off stays below 32 exactly as it does for a copy plus a full
+        -- literal. Like the first copy it resolves either to the short-term SRLs
+        -- (second read port) or to the long-term memory (mirrored RAMs); the
+        -- reach test is the same one the first copy uses.
+        cmh.cp2_val := pair2;
         if pair2 = '1' then
           cp_rel2 := signed(resize(off, 17)) - signed(resize(c1h.cp2_off, 17));
           cp_lt2 := lt_ptr + unsigned(cp_rel2(15 downto 4));
           cmh.lt_swap2 := cp_lt2(0);
           cmh.lt_adev2 := resize(cp_lt2(11 downto 1) + cp_lt2(0 downto 0), 12);
           cmh.lt_adod2 := resize(cp_lt2(11 downto 1), 12);
+          cmh.st_addr2 := not unsigned(cp_rel2(8 downto 4));
+          if cp_rel2(16 downto 4) < -31 then
+            cmh.lt_val2 := '1';
+          else
+            cmh.lt_val2 := '0';
+          end if;
           cp2_rol := unsigned(cp_rel2(3 downto 0)) - off;
           off := off + resize(c1h.cp2_len, 5) + 1;
         else
           cmh.lt_swap2 := '0';
           cmh.lt_adev2 := (others => '0');
           cmh.lt_adod2 := (others => '0');
+          cmh.st_addr2 := (others => '0');
+          cmh.lt_val2 := '0';
           cp2_rol := (others => '0');
         end if;
         cmh.cp2_roh := cp2_rol(4);
@@ -284,20 +295,23 @@ begin
         cmh.li_end := off;
 
         -- pragma translate_off
-        -- Validation hook: route every plain long-term copy that happens to
-        -- share its command with no literal bytes through the second copy's
-        -- slot instead of the first one's. The two slots are equivalent for
-        -- such a copy, so the output must be bit-identical, which exercises the
-        -- second slot's addressing, lookahead decomposition, lane-pair select
-        -- and byte-region selection on stimulus that does not happen to contain
-        -- pairable copies. Simulation only; not part of the synthesised design.
-        if TEST_CP2 and cmh.lt_val = '1' and c1h.cp_rle = '0'
+        -- Validation hook: route every plain copy that happens to share its
+        -- command with no literal bytes through the second copy's slot instead
+        -- of the first one's. The two slots are equivalent for such a copy, so
+        -- the output must be bit-identical, which exercises the second slot's
+        -- addressing (short-term *and* long-term), lookahead decomposition,
+        -- lane-pair select and byte-region selection on stimulus that does not
+        -- happen to contain pairable copies. Simulation only; not part of the
+        -- synthesised design.
+        if TEST_CP2 and cp_end_pre /= off and c1h.cp_rle = '0'
            and pair2 = '0' and len = 0 then
+          cmh.cp2_val := '1';
+          cmh.lt_val2 := cmh.lt_val;
           cmh.lt_val := '0';
-          cmh.lt_val2 := '1';
           cmh.lt_swap2 := cmh.lt_swap;
           cmh.lt_adev2 := cmh.lt_adev;
           cmh.lt_adod2 := cmh.lt_adod;
+          cmh.st_addr2 := cmh.st_addr;
           cmh.li_rol := cmh.cp_rol(3 downto 0);
           cmh.cp2_roh := cmh.cp_rol(4);
           cmh.cp_end := cp_end_pre;
