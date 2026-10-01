@@ -201,6 +201,21 @@ package vhsnunzip_int_pkg is
     li_off    : unsigned(3 downto 0);
     li_len    : unsigned(31 downto 0);
 
+    -- Element order flag. Normally a transfer is "copy first, then the literal
+    -- or the second copy behind it", so the copy owns the low byte region of
+    -- the command and the literal/second copy the high one. When sw_val is set
+    -- the transfer is the other way around: a short literal (at most eight
+    -- bytes, one-byte header) comes FIRST and the copy decoded behind it comes
+    -- second. The decoder only sets it when the whole literal and the whole
+    -- copy fit one 16-byte line together and the copy's offset is at least 16,
+    -- so the copy cannot read a byte the literal writes in that same command
+    -- and needs neither the overlapping-copy split nor run-length acceleration.
+    -- cp2_val is always low when sw_val is set. Downstream, only the byte
+    -- region boundaries and the destination base of the copy change; the
+    -- rotators, the history reads and the strobes are the ones they always
+    -- were, and the datapath's region select is simply inverted.
+    sw_val    : std_logic;
+
     -- Indicates that the literal data FIFO should be popped after this stream
     -- transfer has been handled.
     ld_pop    : std_logic;
@@ -223,6 +238,7 @@ package vhsnunzip_int_pkg is
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );
@@ -289,6 +305,9 @@ package vhsnunzip_int_pkg is
     li_off    : unsigned(3 downto 0);
     li_len    : unsigned(31 downto 0);
 
+    -- Literal-before-copy order flag; see element_stream.
+    sw_val    : std_logic;
+
     -- Indicates that the literal data FIFO should be popped after this stream
     -- transfer has been handled.
     ld_pop    : std_logic;
@@ -311,6 +330,7 @@ package vhsnunzip_int_pkg is
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );
@@ -430,6 +450,14 @@ package vhsnunzip_int_pkg is
     -- decompressed data is complete.
     li_end    : unsigned(4 downto 0);
 
+    -- Literal-before-copy order flag; see element_stream. The two byte regions
+    -- of a command are [off, cp_end) and [cp_end, li_end); normally the first
+    -- is the copy and the second is the literal (or the second copy), and when
+    -- sw_val is set it is the other way around. In the datapath that is exactly
+    -- one inversion of the region select; both regions keep the rotator, the
+    -- source multiplexer and the strobe logic they always had.
+    sw_val    : std_logic;
+
     -- Indicates that the literal data FIFO should be popped after this command
     -- has been handled.
     ld_pop    : std_logic;
@@ -460,6 +488,7 @@ package vhsnunzip_int_pkg is
     cp2_roh   => UNDEF,
     li_rol    => (others => UNDEF),
     li_end    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );

@@ -37,8 +37,9 @@ end vhsnunzip_cmd_gen_2;
 
 architecture behavior of vhsnunzip_cmd_gen_2 is
 
-  -- Simulation-only validation switch; see the hook in the process below.
+  -- Simulation-only validation switches; see the hooks in the process below.
   constant TEST_CP2 : boolean := false;
+  constant TEST_SW  : boolean := false;
 
 begin
   proc: process (clk) is
@@ -76,6 +77,20 @@ begin
     variable cp_lt2 : unsigned(11 downto 0);
     variable cp2_rol: unsigned(4 downto 0);
     variable cp_end_pre : unsigned(4 downto 0);
+
+    -- Literal-first command. The decoder admits one only when the literal is
+    -- at most eight bytes long, fits one 16-byte line together with the copy
+    -- behind it, and the copy's offset is at least 16; the whole literal is
+    -- therefore written by this one command, and its byte count is known
+    -- before any of the clamps below: li_len + 1, exactly. The copy's
+    -- destination base is then off + that count rather than off, which is the
+    -- only arithmetic the order reversal costs here. The final off is
+    -- off + len + cp_len + 1 either way, so the line pointer carry chain is
+    -- unchanged.
+    variable sw     : std_logic;
+    variable len_sw : unsigned(4 downto 0);
+    variable cp_base: unsigned(4 downto 0);
+    variable off_in : unsigned(4 downto 0);
 
     -- Remaining literal length, diminished-one. The sign bit is an inverted
     -- validity bit.
@@ -144,9 +159,45 @@ begin
           c1_pend := '0';
         end if;
 
+        -- Literal-first command: the literal occupies [off, off+len_sw) and
+        -- the copy starts behind it. cp_len's sign bit is the copy's validity,
+        -- so a record whose copy has already been issued never swaps.
+        sw := c1h.sw_val and not cp_len(4);
+        off_in := off;
+        if sw = '1' then
+          len_sw := resize(unsigned(li_len(3 downto 0)), 5) + 1;
+        else
+          len_sw := (others => '0');
+        end if;
+
+        -- pragma translate_off
+        -- Validation hook: issue commands that the decoder does not mark as
+        -- literal-first through the literal-first path anyway, in the two
+        -- degenerate shapes where that must be bit-identical. A command with a
+        -- literal and no copy becomes "literal in the first region, empty copy
+        -- region behind it", which exercises a non-zero literal-first base and
+        -- the inverted region select; a command with a copy and no literal
+        -- becomes "empty literal region, copy behind it", which exercises the
+        -- copy being served through the second byte region. Simulation only;
+        -- not part of the synthesised design.
+        if TEST_SW and sw = '0' then
+          if cp_len(4) = '1' and li_len(li_len'high) = '0' and li_len < 8
+             and li_len + 1 + signed(resize(li_off, li_len'length)) < 15 then
+            sw := '1';
+            len_sw := resize(unsigned(li_len(3 downto 0)), 5) + 1;
+          elsif cp_len(4) = '0' and li_len(li_len'high) = '1'
+                and c1h.cp2_val = '0' then
+            sw := '1';
+            len_sw := (others => '0');
+          end if;
+        end if;
+        -- pragma translate_on
+
+        cp_base := off + len_sw;
+
         -- Compute copy source addresses. cp_rel(..3) = relative line;
         -- 0 = current line, positive is further forward.
-        cp_rel := signed(resize(off, 17)) - signed(resize(c1h.cp_off, 17));
+        cp_rel := signed(resize(cp_base, 17)) - signed(resize(c1h.cp_off, 17));
 
         -- Compute short-term address. This coincidentally works out to a
         -- carry-free operation!
@@ -180,7 +231,7 @@ begin
         if c1h.cp_rle = '1' then
           cmh.cp_rol := "0" & unsigned(cp_rel(3 downto 0));
         else
-          cmh.cp_rol := unsigned(cp_rel(3 downto 0)) - off;
+          cmh.cp_rol := unsigned(cp_rel(3 downto 0)) - cp_base;
         end if;
 
         -- Determine how many byte slots are still available for the literal.
@@ -191,16 +242,22 @@ begin
         pair2 := c1h.cp2_val and not cp_len(4);
 
         -- Update state for copy.
-        cp_end_pre := off;
-        off := off + unsigned(cp_len) + 1;
+        cp_end_pre := cp_base;
+        off := cp_base + unsigned(cp_len) + 1;
 
         -- Thanks to the preprocessing in stage 1, each copy command can be
         -- handled in a single cycle, so we're done with it now.
         cp_len := (others => '1');
 
-        -- Save the offset after the copy so the datapath can derive which
-        -- bytes should come from the copy path.
-        cmh.cp_end := off;
+        -- Save the boundary between the command's two byte regions. Normally
+        -- that is the offset after the copy; in a literal-first command it is
+        -- the offset after the literal, which is where the copy starts.
+        if sw = '1' then
+          cmh.cp_end := cp_base;
+        else
+          cmh.cp_end := off;
+        end if;
+        cmh.sw_val := sw;
 
         -- Second copy of a copy pair. Exactly the same address and rotation
         -- arithmetic as the first copy, but starting from the offset after the
@@ -280,12 +337,30 @@ begin
         -- indexed the same way: window byte p+8 against window byte p.
         if pair2 = '1' then
           cmh.li_rol := cp2_rol(3 downto 0);
+        elsif sw = '1' then
+          -- The literal starts at the command's own offset, not behind the
+          -- copy.
+          cmh.li_rol := li_off - off_in(3 downto 0);
         else
           cmh.li_rol := li_off - off(3 downto 0);
         end if;
 
-        -- Update state for literal.
-        off := off + len;
+        -- pragma translate_off
+        -- A literal-first command must write its whole literal: the copy was
+        -- placed behind exactly len_sw bytes. The decoder's admission rules
+        -- guarantee that neither the write budget nor the literal window clamp
+        -- below bites, which this checks.
+        assert sw = '0' or len = len_sw
+          report "literal-first command had its literal clamped"
+          severity failure;
+        -- pragma translate_on
+
+        -- Update state for literal. In a literal-first command the literal's
+        -- bytes are in front of the copy and were already counted into the
+        -- copy's base, so the offset must not advance over them twice.
+        if sw = '0' then
+          off := off + len;
+        end if;
         li_off := li_off + len(3 downto 0);
         li_len := li_len - signed(resize(len, li_len'length));
 
@@ -304,7 +379,7 @@ begin
         -- happen to contain pairable copies. Simulation only; not part of the
         -- synthesised design.
         if TEST_CP2 and cp_end_pre /= off and c1h.cp_rle = '0'
-           and pair2 = '0' and len = 0 then
+           and pair2 = '0' and len = 0 and sw = '0' then
           cmh.cp2_val := '1';
           cmh.lt_val2 := cmh.lt_val;
           cmh.lt_val := '0';

@@ -114,11 +114,13 @@ begin
           -- cycle and the second copy is passed straight on.
           c1h.cp2_val := elh.cp2_val;
           c1h.li_val := elh.li_val;
+          c1h.sw_val := elh.sw_val;
           c1h.ld_pop := elh.ld_pop;
           c1h.last := elh.last;
         else
           c1h.cp2_val := '0';
           c1h.li_val := '0';
+          c1h.sw_val := '0';
           c1h.ld_pop := '0';
           c1h.last := '0';
         end if;

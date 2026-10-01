@@ -107,10 +107,10 @@ architecture behavior of vhsnunzip_pipeline is
 
   -- Command stream FIFO write-side signals.
   signal cm_push      : std_logic;
-  signal cm_ctrl      : std_logic_vector(37 downto 0);
+  signal cm_ctrl      : std_logic_vector(38 downto 0);
 
   -- Command stream FIFO read-side signals.
-  signal s1_cm_ctrl   : std_logic_vector(37 downto 0);
+  signal s1_cm_ctrl   : std_logic_vector(38 downto 0);
   signal s1_cm        : command_stream;
   signal s1_cm_exp    : command_stream;
 
@@ -460,10 +460,11 @@ begin
   cm_ctrl(31) <= cm.cp2_roh;
   cm_ctrl(32) <= cm.cp2_val;
   cm_ctrl(37 downto 33) <= std_logic_vector(cm.st_addr2);
+  cm_ctrl(38) <= cm.sw_val;
 
   cm_fifo_inst: vhsnunzip_fifo
     generic map (
-      CTRL_WIDTH  => 38
+      CTRL_WIDTH  => 39
     )
     port map (
       clk         => clk,
@@ -490,6 +491,7 @@ begin
   s1_cm.cp2_roh <= s1_cm_ctrl(31);
   s1_cm.cp2_val <= s1_cm_ctrl(32);
   s1_cm.st_addr2 <= unsigned(s1_cm_ctrl(37 downto 33));
+  s1_cm.sw_val <= s1_cm_ctrl(38);
   s1_cm.lt_adev2 <= (others => '0');
   s1_cm.lt_adod2 <= (others => '0');
 
@@ -672,13 +674,20 @@ begin
         if (cp_end_th(byte) = '1' and li_end_th(byte + 16) = '0') or cp_end_th(byte + 16) = '1' then
 
           -- Before copy end on the current line, and not used for a literal
-          -- on the next line, so this is a copied byte.
-          s2_mux_sel(byte) <= '1';
+          -- on the next line, so this byte belongs to the command's first byte
+          -- region. That region is the copy's, unless this is a literal-first
+          -- command (sw_val), in which case the two regions swap roles: the
+          -- whole of the order reversal in the datapath is this one inversion,
+          -- because the two sources arrive at the same 2:1 multiplexer either
+          -- way and each one's rotation is computed against its own
+          -- destination base in cmd_gen_2.
+          s2_mux_sel(byte) <= not s1_cm.sw_val;
 
         else
 
-          -- Not a copied byte, so it's a literal.
-          s2_mux_sel(byte) <= '0';
+          -- Second byte region: the literal (or the second copy of a pair),
+          -- or the copy of a literal-first command.
+          s2_mux_sel(byte) <= s1_cm.sw_val;
 
         end if;
 

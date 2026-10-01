@@ -59,6 +59,28 @@ begin
     variable pair   : std_logic;
     variable khdp   : unsigned(3 downto 0);
 
+    -- Literal-first transfer: a short literal element followed by a copy, both
+    -- issued in the same transfer and in that order. The literal's one-byte
+    -- header is the element tag itself, so its length is known straight out of
+    -- the registered window and selects the copy's header bytes out of that
+    -- same window with a mux whose select is one level behind the register,
+    -- beside the copy tag decode rather than behind it. swok is the admission
+    -- flag, khdsw the total header size (the literal's one byte plus the copy's
+    -- two or three) and swj the index of the copy's header byte, wrapped into
+    -- the window so that the candidates the window check rejects do not index
+    -- out of range.
+    variable swok   : std_logic;
+    variable swfar  : std_logic;
+    variable khdsw  : unsigned(3 downto 0);
+    variable swk    : unsigned(2 downto 0);
+    variable swlen  : unsigned(3 downto 0);
+    variable swlenc : unsigned(5 downto 0);
+    variable swoff  : unsigned(15 downto 0);
+    variable swj    : natural range 0 to 15;
+    variable swhd0  : std_logic_vector(7 downto 0);
+    variable swhd1  : std_logic_vector(7 downto 0);
+    variable swhd2  : std_logic_vector(7 downto 0);
+
     -- Scratch for the candidate decodes.
     variable cj     : natural range 0 to 15;
     variable l1     : unsigned(6 downto 0);
@@ -371,6 +393,78 @@ begin
         elh.cp2_val := pair;
 
         ---------------------------------------------------------------------
+        -- Handle a literal followed by a copy (literal-first transfer)
+        ---------------------------------------------------------------------
+        -- When the element at off is a literal, the transfer used to carry
+        -- nothing else: the copy that follows almost every literal in real
+        -- column data became a transfer, and hence a command, of its own. Here
+        -- that copy rides along behind the literal in the same transfer, which
+        -- means the command's two byte regions are issued in the opposite
+        -- order: literal first and copy second.
+        --
+        -- The literal's length is the top six bits of its own header byte, so
+        -- the copy's header sits at off(2..0) + 1 + length. That index is a
+        -- function of one registered byte, not of the element tag, so the byte
+        -- mux it needs runs beside the copy tag decode instead of behind it.
+        -- The literal is admitted only up to eight bytes, which keeps the
+        -- select three bits wide and the whole literal inside one transfer.
+        swlen := resize(unsigned(cdh.data(ofi)(4 downto 2)), 4) + 1;
+        swj   := (ofi + 1 + to_integer(swlen)) mod 16;
+        swhd0 := cdh.data(swj);
+        swhd1 := cdh.data((swj + 1) mod 16);
+        swhd2 := cdh.data((swj + 2) mod 16);
+
+        -- Decode the copy behind the literal, for both pairable header sizes.
+        -- swfar is its "offset is at least 16" test, in the same two forms the
+        -- second copy of a pair uses.
+        if swhd0(1) = '0' then
+          -- 2-byte copy element, or not a copy.
+          swoff  := "00000" & unsigned(swhd0(7 downto 5)) & unsigned(swhd1);
+          swlenc := resize(unsigned(swhd0(4 downto 2)), 6) + 3;
+          swk    := "010";
+          swfar  := swhd0(7) or swhd0(6) or swhd0(5)
+                 or swhd1(7) or swhd1(6) or swhd1(5) or swhd1(4);
+        else
+          -- 3-byte copy element, or a 5-byte one (rejected below).
+          swoff  := unsigned(swhd2) & unsigned(swhd1);
+          swlenc := unsigned(swhd0(7 downto 2));
+          swk    := "011";
+          if unsigned(swhd2) /= 0 or unsigned(swhd1(7 downto 4)) /= 0 then
+            swfar := '1';
+          else
+            swfar := '0';
+          end if;
+        end if;
+        khdsw := resize(swk, 4) + 1;
+
+        -- Admission. In order:
+        --  - the element at off is a literal with a one-byte header and at
+        --    most eight bytes of data (bits 7..5 of the header clear);
+        --  - the element behind it is a copy with a 2- or 3-byte header;
+        --  - that copy reaches back at least 16 bytes, so it needs neither
+        --    cmd_gen_1's overlapping-copy split nor its run-length
+        --    acceleration, and -- since the two elements together write at
+        --    most 16 bytes -- it cannot read a byte the literal writes in the
+        --    same command;
+        --  - the literal and the copy together fit one 16-byte line, which is
+        --    also what guarantees that cmd_gen_2's write budget leaves room
+        --    for the whole literal;
+        --  - the copy's header is inside the valid part of the window. With
+        --    the conservative 3-byte header size that also keeps the literal
+        --    itself inside the datapath's 16-byte literal window, because it
+        --    bounds off(2..0) + 1 + length by 13.
+        if cdh.data(ofi)(1 downto 0) = "00"
+           and cdh.data(ofi)(7 downto 5) = "000"
+           and (swhd0(1 downto 0) = "01" or swhd0(1 downto 0) = "10")
+           and swfar = '1'
+           and resize(swlen, 7) + resize(swlenc, 7) <= 15
+           and signed(resize(swlen, 6)) + 3 <= dwen then
+          swok := '1';
+        else
+          swok := '0';
+        end if;
+
+        ---------------------------------------------------------------------
         -- Handle literal elements
         ---------------------------------------------------------------------
         -- `lhdr` above is the header byte at the post-copy offset `offns`, i.e.
@@ -469,10 +563,23 @@ begin
         khd  := resize(k1, 4) + resize(k2, 4);
         if pair = '1' then
           khd := khdp;
+        elsif swok = '1' then
+          -- Both headers again, but the literal's one byte in front of the
+          -- copy's two or three. The literal's data seek (kli3/kli9 below) is
+          -- the one it would have had on its own, so the total seek is still
+          -- headers + literal bytes and the line-exhausted decision below is
+          -- the same comparison it always was.
+          khd := khdsw;
         end if;
         offns := resize(off(2 downto 0), 4) + khd;
 
-        elh.li_off := offns;
+        -- The literal's data starts directly behind its own one-byte header in
+        -- a literal-first transfer, not behind the whole of both headers.
+        if swok = '1' then
+          elh.li_off := resize(off(2 downto 0), 4) + 1;
+        else
+          elh.li_off := offns;
+        end if;
 
         -- The multi-byte-header branches below can only be *taken with li_val
         -- set* when this element carries no copy, in which case the header sits
@@ -515,6 +622,18 @@ begin
 
         end if;
 
+        -- In a literal-first transfer the copy slot carries the copy decoded
+        -- behind the literal. Everything downstream treats it as an ordinary
+        -- copy; only sw_val tells cmd_gen_2 where to put it. The literal
+        -- fields above are already the right ones, because the element at off
+        -- is the literal itself.
+        elh.sw_val := swok;
+        if swok = '1' then
+          elh.cp_val := '1';
+          elh.cp_off := swoff;
+          elh.cp_len := swlenc;
+        end if;
+
         -- Seek past literal data. The literal part of the seek is formed on its
         -- own and then added to `off` and to the header size in one three-input
         -- adder, instead of being chained onto the post-header offset: the sum
@@ -552,6 +671,7 @@ begin
           elh.cp_val := '0';
           elh.li_val := '0';
           elh.cp2_val := '0';
+          elh.sw_val := '0';
 
           -- The offset did not move, so the line stays exhausted. Stepping to
           -- the next line is the same subtraction as it always was; only the
