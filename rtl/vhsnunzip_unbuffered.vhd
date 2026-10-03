@@ -38,29 +38,32 @@ entity vhsnunzip_unbuffered is
     -- Copies from further back in history will result in garbage for that
     -- copy.
     --
-    -- The input stream must be normalized; that is, all 8 bytes must be valid
-    -- for all but the last transfer, and the last transfer must contain at
-    -- least one byte. The number of valid bytes is indicated by cnt; 8 valid
-    -- bytes is represented as 0 (implicit MSB). The LSB of the first transfer
-    -- corresponds to the first byte in the chunk. This is compatible with the
-    -- stream library components in vhlib.
+    -- The input stream must be normalized; that is, all 32 bytes must be
+    -- valid for all but the last transfer, and the last transfer must contain
+    -- at least one byte. Each chunk starts on a new transfer. The number of
+    -- valid bytes is indicated by cnt; 32 valid bytes is represented as 0
+    -- (implicit MSB). The LSB of the first transfer corresponds to the first
+    -- byte in the chunk. This is compatible with the stream library
+    -- components in vhlib.
     co_valid    : in  std_logic;
     co_ready    : out std_logic;
-    co_data     : in  std_logic_vector(63 downto 0);
-    co_cnt      : in  std_logic_vector(2 downto 0);
+    co_data     : in  std_logic_vector(255 downto 0);
+    co_cnt      : in  std_logic_vector(4 downto 0);
     co_last     : in  std_logic;
 
-    -- Decompressed output stream. This stream is almost normalized, with the
-    -- exception of the last transfer; the size of this transfer may be zero,
-    -- even if the packet is non-empty. An empty line is signalled using cnt=0
-    -- and dvalid=0. This is compatible with the stream library components in
-    -- vhlib. If you need a fully normalized stream, you could add a
-    -- StreamReshaper with element size 1 on both the input and the output.
+    -- Decompressed output stream, 32 bytes per transfer. Valid bytes are
+    -- packed from the LSB; cnt is the literal number of valid bytes (0..32)
+    -- and dvalid is set when cnt is nonzero. This stream is almost
+    -- normalized, with the exception of the last transfer; the size of this
+    -- transfer may be zero, even if the packet is non-empty. There is exactly
+    -- one last transfer per chunk, and an empty chunk is signalled using a
+    -- single transfer with cnt=0, dvalid=0 and last=1. This is compatible with
+    -- the stream library components in vhlib.
     de_valid    : out std_logic;
     de_ready    : in  std_logic;
     de_dvalid   : out std_logic;
-    de_data     : out std_logic_vector(127 downto 0);
-    de_cnt      : out std_logic_vector(4 downto 0);
+    de_data     : out std_logic_vector(255 downto 0);
+    de_cnt      : out std_logic_vector(5 downto 0);
     de_last     : out std_logic
 
   );
@@ -68,9 +71,16 @@ end vhsnunzip_unbuffered;
 
 architecture behavior of vhsnunzip_unbuffered is
 
-  -- Pipeline interface signals.
+  -- Pipeline interface signals. The pipeline (i35) works on 8-byte input
+  -- transfers and 16-byte output lines; the gearboxes below convert between
+  -- those and the 32-byte top-level ports.
   signal co           : compressed_stream_single;
+  signal co8_data     : std_logic_vector(63 downto 0);
   signal de           : decompressed_stream;
+  signal de_ready_i   : std_logic;
+  signal de_cnt_i     : std_logic_vector(5 downto 0);
+  signal co_ready_i   : std_logic;
+  signal de16_data    : std_logic_vector(127 downto 0);
   signal lt_rd_valid  : std_logic;
   signal lt_rd_val_r  : std_logic;
   signal lt_rd_adev   : unsigned(11 downto 0);
@@ -109,7 +119,7 @@ begin
       clk         => clk,
       reset       => reset,
       co          => co,
-      co_ready    => co_ready,
+      co_ready    => co_ready_i,
       lt_rd_valid => lt_rd_valid,
       lt_rd_adev  => lt_rd_adev,
       lt_rd_adod  => lt_rd_adod,
@@ -121,41 +131,69 @@ begin
       lt_rd_even2 => lt_rd_even2,
       lt_rd_odd2  => lt_rd_odd2,
       de          => de,
-      de_ready    => de_ready
+      de_ready    => de_ready_i
     );
 
-  -- To improve tool compatibility, avoid non-std_logic types on the toplevel.
-  -- Also convert to/from vhlib's stream interface where applicable.
-  co_connect_proc: process (co_valid, co_data, co_cnt, co_last) is
+  -- Input gearbox: each 32-byte beat is split into up to four 8-byte
+  -- sub-beats for the pipeline's input FIFO (sub-beats past the end of the
+  -- chunk are skipped; endi/last are set on the chunk's final sub-beat).
+  co_split_inst: entity work.vhsnunzip_co_split
+    port map (
+      clk         => clk,
+      reset       => reset,
+      in_valid    => co_valid,
+      in_ready    => co_ready,
+      in_data     => co_data,
+      in_cnt      => co_cnt,
+      in_last     => co_last,
+      out_valid   => co.valid,
+      out_ready   => co_ready_i,
+      out_data    => co8_data,
+      out_endi    => co.endi,
+      out_last    => co.last
+    );
+
+  co_connect_proc: process (co8_data) is
   begin
-    co.valid <= co_valid;
     for byte in 0 to 7 loop
-      co.data(byte) <= co_data(byte*8+7 downto byte*8);
+      co.data(byte) <= co8_data(byte*8+7 downto byte*8);
     end loop;
-    co.endi <= unsigned(co_cnt) - 1;
-    co.last <= co_last;
   end process;
 
+  -- Output gearbox: pairs the pipeline's 16-byte lines into 32-byte
+  -- transfers, flushing on the last line of each chunk.
   de_connect_proc: process (de) is
   begin
-    de_valid <= de.valid;
     for byte in 0 to 15 loop
-      de_data(byte*8+7 downto byte*8) <= de.data(byte);
+      de16_data(byte*8+7 downto byte*8) <= de.data(byte);
     end loop;
-    de_cnt <= std_logic_vector(de.cnt);
-    if de.cnt > 0 then
-      de_dvalid <= '1';
-    else
-      de_dvalid <= '0';
-    end if;
-    de_last <= de.last;
   end process;
 
+  de_pack_inst: entity work.vhsnunzip_de_pack
+    port map (
+      clk         => clk,
+      reset       => reset,
+      in_valid    => de.valid,
+      in_ready    => de_ready_i,
+      in_data     => de16_data,
+      in_cnt      => de.cnt,
+      in_last     => de.last,
+      out_valid   => de_valid,
+      out_ready   => de_ready,
+      out_data    => de_data,
+      out_cnt     => de_cnt_i,
+      out_last    => de_last
+    );
+
+  de_cnt <= de_cnt_i;
+  de_dvalid <= '0' when unsigned(de_cnt_i) = 0 else '1';
+
   -- Write the decompressed output to the memory for long-term history
-  -- storage.
+  -- storage. This uses the pipeline's 16-byte lines, handshaked into the
+  -- output gearbox, exactly as i35 did at its own output port.
   -- A 16-byte line goes to one pair of RAMs, its low half in the first
   -- instance of the pair and its high half in the second.
-  wr_push <= de.valid and de_ready;
+  wr_push <= de.valid and de_ready_i;
 
   ram_wr_gen: for idx in 0 to 7 generate
     constant PAIR : natural := (idx mod 4) / 2;
@@ -174,7 +212,7 @@ begin
   wr_ptr_proc: process (clk) is
   begin
     if rising_edge(clk) then
-      if de.valid = '1' and de_ready = '1' then
+      if de.valid = '1' and de_ready_i = '1' then
         if de.last = '0' then
           wr_ptr <= wr_ptr + 1;
         else
