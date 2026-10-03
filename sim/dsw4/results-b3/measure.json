@@ -1,0 +1,931 @@
+{
+ "bytes_per_cycle": 20.5993,
+ "bytes_per_cycle_visible": 23.569,
+ "draws": [
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.211,
+    "bytes_per_cycle": 19.3738,
+    "cores": 1,
+    "input_stall_pct": 56.7,
+    "output_idle_pct": 39.4,
+    "shape": {
+     "bytes_per_element": 6.29,
+     "chunks": 36,
+     "compressed_bytes": 2562226,
+     "compression_pct": 71.4,
+     "copies": 349632,
+     "elements": 570716,
+     "expanded_bytes": 3588432,
+     "largest_chunk_bytes": 983048,
+     "literals": 221084,
+     "long_chunks": 10
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 13.833,
+      "unit": "B/cycle",
+      "utilisation": 0.432
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 1.888,
+      "unit": "copies/cycle",
+      "utilisation": 0.944
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 1.194,
+      "unit": "literals/cycle",
+      "utilisation": 1.194
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 19.374,
+      "unit": "B/cycle",
+      "utilisation": 1.211
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 19.374,
+      "unit": "B/cycle",
+      "utilisation": 0.605
+     }
+    ],
+    "stale_ceilings": [],
+    "usable_cores": 1.0,
+    "verdict": "core datapath saturated"
+   },
+   "bytes_per_cycle": 19.3738,
+   "chunks": 36,
+   "counters": {
+    "bytes_out": 3588432,
+    "co_beats": 80086,
+    "co_stall": 104980,
+    "cycles": 185221,
+    "de_beats": 112156,
+    "de_bubble": 73065
+   },
+   "input_stall_pct": 56.7,
+   "kind": "real",
+   "name": "train-taxi",
+   "oracle_pass": true,
+   "output_idle_pct": 39.4,
+   "problem": null,
+   "scored": true,
+   "visible": true
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.521,
+    "bytes_per_cycle": 24.34,
+    "cores": 1,
+    "input_stall_pct": 32.3,
+    "output_idle_pct": 22.3,
+    "shape": {
+     "bytes_per_element": 48.68,
+     "chunks": 15,
+     "compressed_bytes": 2063,
+     "compression_pct": 28.3,
+     "copies": 118,
+     "elements": 150,
+     "expanded_bytes": 7302,
+     "largest_chunk_bytes": 512,
+     "literals": 32,
+     "long_chunks": 0
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 6.877,
+      "unit": "B/cycle",
+      "utilisation": 0.215
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 0.393,
+      "unit": "copies/cycle",
+      "utilisation": 0.197
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.107,
+      "unit": "literals/cycle",
+      "utilisation": 0.107
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 24.34,
+      "unit": "B/cycle",
+      "utilisation": 1.521
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 24.34,
+      "unit": "B/cycle",
+      "utilisation": 0.761
+     }
+    ],
+    "stale_ceilings": [
+     "core datapath"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 24.34,
+   "chunks": 15,
+   "counters": {
+    "bytes_out": 7302,
+    "co_beats": 73,
+    "co_stall": 97,
+    "cycles": 300,
+    "de_beats": 233,
+    "de_bubble": 67
+   },
+   "input_stall_pct": 32.3,
+   "kind": "synthetic",
+   "name": "synth-512B",
+   "oracle_pass": true,
+   "output_idle_pct": 22.3,
+   "problem": null,
+   "scored": false,
+   "visible": true
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.735,
+    "bytes_per_cycle": 27.7643,
+    "cores": 1,
+    "input_stall_pct": 0.0,
+    "output_idle_pct": 12.9,
+    "shape": {
+     "bytes_per_element": 58.89,
+     "chunks": 1,
+     "compressed_bytes": 704,
+     "compression_pct": 9.6,
+     "copies": 117,
+     "elements": 124,
+     "expanded_bytes": 7302,
+     "largest_chunk_bytes": 7302,
+     "literals": 7,
+     "long_chunks": 0
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 2.677,
+      "unit": "B/cycle",
+      "utilisation": 0.084
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 0.445,
+      "unit": "copies/cycle",
+      "utilisation": 0.222
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.027,
+      "unit": "literals/cycle",
+      "utilisation": 0.027
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 27.764,
+      "unit": "B/cycle",
+      "utilisation": 1.735
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 27.764,
+      "unit": "B/cycle",
+      "utilisation": 0.868
+     }
+    ],
+    "stale_ceilings": [
+     "core datapath"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 27.7643,
+   "chunks": 1,
+   "counters": {
+    "bytes_out": 7302,
+    "co_beats": 22,
+    "co_stall": 0,
+    "cycles": 263,
+    "de_beats": 229,
+    "de_bubble": 34
+   },
+   "input_stall_pct": 0.0,
+   "kind": "synthetic",
+   "name": "synth-8192B",
+   "oracle_pass": true,
+   "output_idle_pct": 12.9,
+   "problem": null,
+   "scored": false,
+   "visible": true
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.328,
+    "bytes_per_cycle": 21.2507,
+    "cores": 1,
+    "input_stall_pct": 65.0,
+    "output_idle_pct": 33.6,
+    "shape": {
+     "bytes_per_element": 6.37,
+     "chunks": 28,
+     "compressed_bytes": 4210354,
+     "compression_pct": 52.6,
+     "copies": 888737,
+     "elements": 1256745,
+     "expanded_bytes": 8003436,
+     "largest_chunk_bytes": 3755282,
+     "literals": 368008,
+     "long_chunks": 10
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 11.179,
+      "unit": "B/cycle",
+      "utilisation": 0.349
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 2.36,
+      "unit": "copies/cycle",
+      "utilisation": 1.18
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.977,
+      "unit": "literals/cycle",
+      "utilisation": 0.977
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 21.251,
+      "unit": "B/cycle",
+      "utilisation": 1.328
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 21.251,
+      "unit": "B/cycle",
+      "utilisation": 0.664
+     }
+    ],
+    "stale_ceilings": [
+     "core datapath"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 21.2507,
+   "chunks": 28,
+   "counters": {
+    "bytes_out": 8003436,
+    "co_beats": 131587,
+    "co_stall": 244884,
+    "cycles": 376619,
+    "de_beats": 250124,
+    "de_bubble": 126495
+   },
+   "input_stall_pct": 65.0,
+   "kind": "real",
+   "name": "held-lineitem",
+   "oracle_pass": true,
+   "output_idle_pct": 33.6,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "copy slot",
+    "binding_utilisation": 1.206,
+    "bytes_per_cycle": 19.0515,
+    "cores": 1,
+    "input_stall_pct": 72.1,
+    "output_idle_pct": 40.5,
+    "shape": {
+     "bytes_per_element": 5.75,
+     "chunks": 14,
+     "compressed_bytes": 4612769,
+     "compression_pct": 46.8,
+     "copies": 1248140,
+     "elements": 1714004,
+     "expanded_bytes": 9855404,
+     "largest_chunk_bytes": 6460785,
+     "literals": 465864,
+     "long_chunks": 6
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 8.917,
+      "unit": "B/cycle",
+      "utilisation": 0.279
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 2.413,
+      "unit": "copies/cycle",
+      "utilisation": 1.206
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.901,
+      "unit": "literals/cycle",
+      "utilisation": 0.901
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 19.052,
+      "unit": "B/cycle",
+      "utilisation": 1.191
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 19.052,
+      "unit": "B/cycle",
+      "utilisation": 0.595
+     }
+    ],
+    "stale_ceilings": [],
+    "usable_cores": 1.0,
+    "verdict": "copy slot saturated"
+   },
+   "bytes_per_cycle": 19.0515,
+   "chunks": 14,
+   "counters": {
+    "bytes_out": 9855404,
+    "co_beats": 144156,
+    "co_stall": 372994,
+    "cycles": 517302,
+    "de_beats": 307989,
+    "de_bubble": 209313
+   },
+   "input_stall_pct": 72.1,
+   "kind": "real",
+   "name": "held-orders",
+   "oracle_pass": true,
+   "output_idle_pct": 40.5,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.288,
+    "bytes_per_cycle": 20.614,
+    "cores": 1,
+    "input_stall_pct": 67.5,
+    "output_idle_pct": 35.6,
+    "shape": {
+     "bytes_per_element": 7.32,
+     "chunks": 10,
+     "compressed_bytes": 10144410,
+     "compression_pct": 50.5,
+     "copies": 2107572,
+     "elements": 2745877,
+     "expanded_bytes": 20100162,
+     "largest_chunk_bytes": 9400391,
+     "literals": 638305,
+     "long_chunks": 7
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 10.404,
+      "unit": "B/cycle",
+      "utilisation": 0.325
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 2.161,
+      "unit": "copies/cycle",
+      "utilisation": 1.081
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.655,
+      "unit": "literals/cycle",
+      "utilisation": 0.655
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 20.614,
+      "unit": "B/cycle",
+      "utilisation": 1.288
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 20.614,
+      "unit": "B/cycle",
+      "utilisation": 0.644
+     }
+    ],
+    "stale_ceilings": [
+     "core datapath"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 20.614,
+   "chunks": 10,
+   "counters": {
+    "bytes_out": 20100162,
+    "co_beats": 317019,
+    "co_stall": 657900,
+    "cycles": 975073,
+    "de_beats": 628137,
+    "de_bubble": 346936
+   },
+   "input_stall_pct": 67.5,
+   "kind": "real",
+   "name": "held-customer",
+   "oracle_pass": true,
+   "output_idle_pct": 35.6,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "copy slot",
+    "binding_utilisation": 1.368,
+    "bytes_per_cycle": 18.7902,
+    "cores": 1,
+    "input_stall_pct": 72.8,
+    "output_idle_pct": 41.3,
+    "shape": {
+     "bytes_per_element": 5.82,
+     "chunks": 15,
+     "compressed_bytes": 3885210,
+     "compression_pct": 46.2,
+     "copies": 1224573,
+     "elements": 1444995,
+     "expanded_bytes": 8408896,
+     "largest_chunk_bytes": 4516416,
+     "literals": 220422,
+     "long_chunks": 9
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 8.682,
+      "unit": "B/cycle",
+      "utilisation": 0.271
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 2.736,
+      "unit": "copies/cycle",
+      "utilisation": 1.368
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.493,
+      "unit": "literals/cycle",
+      "utilisation": 0.493
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 18.79,
+      "unit": "B/cycle",
+      "utilisation": 1.174
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 18.79,
+      "unit": "B/cycle",
+      "utilisation": 0.587
+     }
+    ],
+    "stale_ceilings": [
+     "copy slot"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 18.7902,
+   "chunks": 15,
+   "counters": {
+    "bytes_out": 8408896,
+    "co_beats": 121420,
+    "co_stall": 325949,
+    "cycles": 447514,
+    "de_beats": 262786,
+    "de_bubble": 184728
+   },
+   "input_stall_pct": 72.8,
+   "kind": "real",
+   "name": "held-part",
+   "oracle_pass": true,
+   "output_idle_pct": 41.3,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.624,
+    "bytes_per_cycle": 25.9918,
+    "cores": 1,
+    "input_stall_pct": 71.0,
+    "output_idle_pct": 18.8,
+    "shape": {
+     "bytes_per_element": 7.29,
+     "chunks": 7,
+     "compressed_bytes": 6505320,
+     "compression_pct": 35.7,
+     "copies": 2150746,
+     "elements": 2499645,
+     "expanded_bytes": 18225504,
+     "largest_chunk_bytes": 15668358,
+     "literals": 348899,
+     "long_chunks": 7
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 9.277,
+      "unit": "B/cycle",
+      "utilisation": 0.29
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 3.067,
+      "unit": "copies/cycle",
+      "utilisation": 1.534
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.498,
+      "unit": "literals/cycle",
+      "utilisation": 0.498
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 25.992,
+      "unit": "B/cycle",
+      "utilisation": 1.624
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 25.992,
+      "unit": "B/cycle",
+      "utilisation": 0.812
+     }
+    ],
+    "stale_ceilings": [
+     "copy slot",
+     "core datapath"
+    ],
+    "usable_cores": 1.0,
+    "verdict": "unknown (stale ceiling)"
+   },
+   "bytes_per_cycle": 25.9918,
+   "chunks": 7,
+   "counters": {
+    "bytes_out": 18225504,
+    "co_beats": 203294,
+    "co_stall": 497761,
+    "cycles": 701201,
+    "de_beats": 569551,
+    "de_bubble": 131650
+   },
+   "input_stall_pct": 71.0,
+   "kind": "real",
+   "name": "held-partsupp",
+   "oracle_pass": true,
+   "output_idle_pct": 18.8,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 1.246,
+    "bytes_per_cycle": 19.9303,
+    "cores": 1,
+    "input_stall_pct": 67.6,
+    "output_idle_pct": 37.7,
+    "shape": {
+     "bytes_per_element": 7.17,
+     "chunks": 8,
+     "compressed_bytes": 792307,
+     "compression_pct": 51.7,
+     "copies": 160675,
+     "elements": 213563,
+     "expanded_bytes": 1532063,
+     "largest_chunk_bytes": 665703,
+     "literals": 52888,
+     "long_chunks": 6
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 10.307,
+      "unit": "B/cycle",
+      "utilisation": 0.322
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 2.09,
+      "unit": "copies/cycle",
+      "utilisation": 1.045
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.688,
+      "unit": "literals/cycle",
+      "utilisation": 0.688
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 19.93,
+      "unit": "B/cycle",
+      "utilisation": 1.246
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 19.93,
+      "unit": "B/cycle",
+      "utilisation": 0.623
+     }
+    ],
+    "stale_ceilings": [],
+    "usable_cores": 1.0,
+    "verdict": "core datapath saturated"
+   },
+   "bytes_per_cycle": 19.9303,
+   "chunks": 8,
+   "counters": {
+    "bytes_out": 1532063,
+    "co_beats": 24764,
+    "co_stall": 51961,
+    "cycles": 76871,
+    "de_beats": 47882,
+    "de_bubble": 28989
+   },
+   "input_stall_pct": 67.6,
+   "kind": "real",
+   "name": "held-supplier",
+   "oracle_pass": true,
+   "output_idle_pct": 37.7,
+   "problem": null,
+   "scored": true,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 0.832,
+    "bytes_per_cycle": 13.3118,
+    "cores": 1,
+    "input_stall_pct": 11.8,
+    "output_idle_pct": 57.0,
+    "shape": {
+     "bytes_per_element": 7.48,
+     "chunks": 5,
+     "compressed_bytes": 1439,
+     "compression_pct": 58.1,
+     "copies": 219,
+     "elements": 331,
+     "expanded_bytes": 2476,
+     "largest_chunk_bytes": 1963,
+     "literals": 112,
+     "long_chunks": 0
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 7.737,
+      "unit": "B/cycle",
+      "utilisation": 0.242
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 1.177,
+      "unit": "copies/cycle",
+      "utilisation": 0.589
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.602,
+      "unit": "literals/cycle",
+      "utilisation": 0.602
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 13.312,
+      "unit": "B/cycle",
+      "utilisation": 0.832
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 13.312,
+      "unit": "B/cycle",
+      "utilisation": 0.416
+     }
+    ],
+    "stale_ceilings": [],
+    "usable_cores": 1.0,
+    "verdict": "internal latency (output idle 57% of cycles)"
+   },
+   "bytes_per_cycle": 13.3118,
+   "chunks": 5,
+   "counters": {
+    "bytes_out": 2476,
+    "co_beats": 47,
+    "co_stall": 22,
+    "cycles": 186,
+    "de_beats": 80,
+    "de_bubble": 106
+   },
+   "input_stall_pct": 11.8,
+   "kind": "real",
+   "name": "held-nation",
+   "oracle_pass": true,
+   "output_idle_pct": 57.0,
+   "problem": null,
+   "scored": false,
+   "visible": false
+  },
+  {
+   "analysis": {
+    "binding": "core datapath",
+    "binding_utilisation": 0.35,
+    "bytes_per_cycle": 5.5949,
+    "cores": 1,
+    "input_stall_pct": 0.0,
+    "output_idle_pct": 81.0,
+    "shape": {
+     "bytes_per_element": 11.63,
+     "chunks": 3,
+     "compressed_bytes": 388,
+     "compression_pct": 87.8,
+     "copies": 18,
+     "elements": 38,
+     "expanded_bytes": 442,
+     "largest_chunk_bytes": 356,
+     "literals": 20,
+     "long_chunks": 0
+    },
+    "stages": [
+     {
+      "ceiling": 32.0,
+      "name": "input port",
+      "rate": 4.911,
+      "unit": "B/cycle",
+      "utilisation": 0.153
+     },
+     {
+      "ceiling": 2.0,
+      "name": "copy slot",
+      "rate": 0.228,
+      "unit": "copies/cycle",
+      "utilisation": 0.114
+     },
+     {
+      "ceiling": 1.0,
+      "name": "literal slot",
+      "rate": 0.253,
+      "unit": "literals/cycle",
+      "utilisation": 0.253
+     },
+     {
+      "ceiling": 16.0,
+      "name": "core datapath",
+      "rate": 5.595,
+      "unit": "B/cycle",
+      "utilisation": 0.35
+     },
+     {
+      "ceiling": 32.0,
+      "name": "output port",
+      "rate": 5.595,
+      "unit": "B/cycle",
+      "utilisation": 0.175
+     }
+    ],
+    "stale_ceilings": [],
+    "usable_cores": 1.0,
+    "verdict": "internal latency (output idle 81% of cycles)"
+   },
+   "bytes_per_cycle": 5.5949,
+   "chunks": 3,
+   "counters": {
+    "bytes_out": 442,
+    "co_beats": 13,
+    "co_stall": 0,
+    "cycles": 79,
+    "de_beats": 15,
+    "de_bubble": 64
+   },
+   "input_stall_pct": 0.0,
+   "kind": "real",
+   "name": "held-region",
+   "oracle_pass": true,
+   "output_idle_pct": 81.0,
+   "problem": null,
+   "scored": false,
+   "visible": false
+  }
+ ],
+ "lever": {
+  "lever": "unknown",
+  "reason": "copy slot, core datapath reads past its ceiling; the stage model is stale, so trust the raw counters, not the utilisations."
+ },
+ "oracle_pass": true,
+ "profile": {
+  "binding": "core datapath",
+  "mean_output_idle_pct": 35.3,
+  "split": {
+   "copy slot": 2,
+   "core datapath": 5
+  },
+  "stale_ceilings": [
+   "copy slot",
+   "core datapath"
+  ],
+  "tightest": "core datapath",
+  "tightest_utilisation": 1.624
+ },
+ "sim_seconds": 5215.5,
+ "widths": {
+  "copy_slots": 2.0,
+  "core_line_bytes": 16.0,
+  "cores": 1,
+  "elements_per_transfer": 3.0,
+  "in_bytes": 32,
+  "in_cnt_bits": 5,
+  "literal_slots": 1.0,
+  "out_bytes": 32,
+  "out_cnt_bits": 6,
+  "unresolved": []
+ }
+}
