@@ -9,7 +9,7 @@ and out.hex format are therefore the kit's.
 
     python run_knobs.py VARIANT[,VARIANT...] SET[,SET...] [--jobs N]
 
-VARIANT  base | slots1 | slots2 | slots3 | cut | norep | litp1 | st12 | stall30
+VARIANT  base | slots1 | slots2 | slots3 | cut | norep | litp1 | st12 | stall30 | retgt | probe
 SET      shapes (the 8 self-test shapes, gold traces in sim/dsw4/gold)
          fuzz   (the 200 fuzz_tv streams in sim/dsw4/gold/fuzz)
          taxi   (train-taxi, kit agenticRTL_v2_real corpus)
@@ -55,6 +55,8 @@ VARIANTS = {
     'litp1':   '-gTEST_LITP1=true',
     'st12':    '-gTEST_ST_LINES=12',
     'stall30': '-gTEST_STALL_PCT=30',
+    'retgt':   '-gTEST_RETGT=true',
+    'probe':   '-gTEST_PROBE=true',   # writes probe_wr.txt / probe_wk.txt per draw
     # Port backpressure (SPEC B5 style): framing may legitimately differ.
     'bp6060':  '-gSRC_PCT=60 -gSNK_PCT=60',
     'bp9030':  '-gSRC_PCT=90 -gSNK_PCT=30',
@@ -63,7 +65,7 @@ VARIANTS = {
 KNOBS = [('TEST_SLOTS', 'natural', '4'), ('TEST_CUT', 'boolean', 'false'),
          ('TEST_NOREP', 'boolean', 'false'), ('TEST_LITP1', 'boolean', 'false'),
          ('TEST_RETGT', 'boolean', 'false'), ('TEST_ST_LINES', 'natural', '32'),
-         ('TEST_STALL_PCT', 'natural', '0')]
+         ('TEST_STALL_PCT', 'natural', '0'), ('TEST_PROBE', 'boolean', 'false')]
 
 
 def make_tb(path):

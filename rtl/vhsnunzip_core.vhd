@@ -5,8 +5,8 @@ use ieee.numeric_std.all;
 library work;
 use work.vhsnunzip_dsw4_pkg.all;
 
--- DSW-4 core (SPEC 7, 11): CO FIFO, CBUF, parser (B2: parse_serial; B3:
--- blkrd + pt + WFIFO + walker), ELQ, writer, agen, dpath, de FIFO and
+-- DSW-4 core (SPEC 7, 11): CO FIFO, CBUF, table parser (blkrd + pt +
+-- WFIFO + walker, vhsnunzip_parser), ELQ, writer, agen, dpath, de FIFO and
 -- credits. Replaces vhsnunzip_pipeline in step B2. The 32 history RAMs stay
 -- in vhsnunzip_unbuffered.
 --
@@ -20,8 +20,7 @@ use work.vhsnunzip_dsw4_pkg.all;
 --   ram_b_cmd / resp   port b of RAM instance i (LT reads).
 --                      Instance i = m*8 + par*4 + w (SPEC 6).
 --
--- TEST_* generics: see vhsnunzip_writer, vhsnunzip_agen, vhsnunzip_walker.
--- TEST_RETGT has no effect in B2 (parse_serial has no retarget).
+-- TEST_* generics: see vhsnunzip_writer, vhsnunzip_agen, vhsnunzip_parser.
 --
 -- Interface notes (B2c): the writer's de_credit_ok is the de FIFO's
 -- registered credit, its a_r port is the CBUF's GB (the writer adds both
@@ -38,7 +37,8 @@ entity vhsnunzip_core is
     TEST_LITP1     : boolean := false;
     TEST_RETGT     : boolean := false;
     TEST_ST_LINES  : natural := ST_LINES;
-    TEST_STALL_PCT : natural := 0
+    TEST_STALL_PCT : natural := 0;
+    TEST_PROBE     : boolean := false   -- sim only: probe_wr.txt / probe_wk.txt
   );
   port (
     clk         : in  std_logic;
@@ -129,8 +129,9 @@ begin
       lanesC      => lanesC
     );
 
-  -- Serial parser (B2 only; replaced by blkrd + pt + walker in B3).
-  parse_inst: entity work.vhsnunzip_parse_serial
+  -- Table parser (SPEC 3.2-3.5): block reader, PT1-PT3, WFIFO, walker.
+  parse_inst: entity work.vhsnunzip_parser
+    generic map (TEST_RETGT => TEST_RETGT, PROBE => TEST_PROBE)
     port map (
       clk         => clk,
       reset       => reset,
@@ -174,7 +175,8 @@ begin
       TEST_CUT       => TEST_CUT,
       TEST_NOREP     => TEST_NOREP,
       TEST_LITP1     => TEST_LITP1,
-      TEST_STALL_PCT => TEST_STALL_PCT
+      TEST_STALL_PCT => TEST_STALL_PCT,
+      PROBE          => TEST_PROBE
     )
     port map (
       clk          => clk,

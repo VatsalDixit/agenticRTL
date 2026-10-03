@@ -27,7 +27,7 @@ SHAPES = ['tiny-chunks', 'line-straddle-17', 'line-straddle-33', 'line-straddle-
           'sub-line', 'medium', 'single-chunk', 'long-chunk']
 FILES = ['vhsnunzip_utils_pkg.vhd', 'vhsnunzip_int_pkg.vhd', 'vhsnunzip_dsw4_pkg.vhd',
          'vhsnunzip_srl.vhd', 'vhsnunzip_fifo.vhd', 'vhsnunzip_cofifo.vhd',
-         'vhsnunzip_cbuf.vhd', 'vhsnunzip_parse_serial.vhd']
+         'vhsnunzip_cbuf.vhd']
 CFGS = {
     'fast': dict(SEED=1, SRC_PCT=100, DRAIN_PCT=100, DRAIN_MAX=4, LWLAT=10),
     'slow': dict(SEED=2, SRC_PCT=60, DRAIN_PCT=50, DRAIN_MAX=1, LWLAT=10),
@@ -41,7 +41,9 @@ def sp(p):
 
 
 def build():
-    srcs = ' '.join(sp(RTL + '/' + f) for f in FILES) + ' ' + sp(HERE + '/tb_front.vhd')
+    # B3c: the serial parser (B2 reference) moved out of rtl/ into this dir.
+    srcs = (' '.join(sp(RTL + '/' + f) for f in FILES) + ' ' + sp(HERE + '/vhsnunzip_parse_serial.vhd')
+            + ' ' + sp(HERE + '/tb_front.vhd'))
     cmd = ('cd %s && mkdir -p work && ghdl -i --std=08 --workdir=work %s && '
            'ghdl -m --std=08 --workdir=work -o tb_front tb_front' % (sp(HERE), srcs))
     r = tools.eda_shell(cmd, timeout=1800)

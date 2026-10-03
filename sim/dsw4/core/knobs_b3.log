@@ -1,0 +1,100 @@
+base     fuzz-f000              ok   29.5423 framing differs from gold (bytes equal)
+base     fuzz-f009              ok   25.9292 framing differs from gold (bytes equal)
+base     fuzz-f020              ok   23.9245 framing differs from gold (bytes equal)
+base     fuzz-f026              ok   22.9578 framing differs from gold (bytes equal)
+base     fuzz-f027              ok   22.1076 framing differs from gold (bytes equal)
+base     fuzz-f030              ok   23.0355 framing differs from gold (bytes equal)
+base     fuzz-f033              ok   22.7342 framing differs from gold (bytes equal)
+base     fuzz-f045              ok   22.5278 framing differs from gold (bytes equal)
+base     fuzz-f056              ok   24.5525 framing differs from gold (bytes equal)
+base     fuzz-f060              ok   18.0390 framing differs from gold (bytes equal)
+base     fuzz-f069              ok   25.8125 framing differs from gold (bytes equal)
+base     fuzz-f073              ok   23.1350 framing differs from gold (bytes equal)
+base     fuzz-f080              ok   22.0989 framing differs from gold (bytes equal)
+base     fuzz-f083              ok   16.4707 framing differs from gold (bytes equal)
+base     fuzz-f085              ok   22.0314 framing differs from gold (bytes equal)
+base     fuzz-f097              ok   23.4601 framing differs from gold (bytes equal)
+base     fuzz-f102              ok   25.6988 framing differs from gold (bytes equal)
+base     fuzz-f103              ok   23.8690 framing differs from gold (bytes equal)
+base     fuzz-f119              ok   22.0941 framing differs from gold (bytes equal)
+base     fuzz-f131              ok   24.9147 framing differs from gold (bytes equal)
+base     fuzz-f133              ok   25.6725 framing differs from gold (bytes equal)
+base     fuzz-f135              ok   22.9168 framing differs from gold (bytes equal)
+base     fuzz-f152              ok   22.9315 framing differs from gold (bytes equal)
+base     fuzz-f155              ok   22.0105 framing differs from gold (bytes equal)
+base     fuzz-f159              ok   21.0489 framing differs from gold (bytes equal)
+base     fuzz-f163              ok   23.2620 framing differs from gold (bytes equal)
+base     fuzz-f167              ok   24.3054 framing differs from gold (bytes equal)
+base     fuzz-f169              ok   21.1767 framing differs from gold (bytes equal)
+base     fuzz-f196              ok   24.3912 framing differs from gold (bytes equal)
+VARIANT base: 208/208 ok, 29 with framing notes (1270 s)
+retgt    medium                 ok   14.7287 framing differs from gold (bytes equal); out.hex differs from base only by 0 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f000              ok   24.7352 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f005              ok   15.4487 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f009              ok   19.5268 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f011              ok   16.3293 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f017              ok   15.0788 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f020              ok   14.8197 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f025              ok   14.7624 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f026              ok   16.6989 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f027              ok   13.8258 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f030              ok   15.3086 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f033              ok   12.2028 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f035              ok   14.8301 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f037              ok   15.3233 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f045              ok   15.8706 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f048              ok   16.1924 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f056              ok   17.1147 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f059              ok   13.1470 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f060              ok   11.7712 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f061              ok   15.6570 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f064              ok   2.4056 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f065              ok   12.5618 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f068              ok   18.0541 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f069              ok   17.4932 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f073              ok   16.3269 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f075              ok   15.5801 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f076              ok   18.2473 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f077              ok   20.0631 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f079              ok   19.0205 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f080              ok   13.8515 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f081              ok   14.5807 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f083              ok   8.0419 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f085              ok   14.3468 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f092              ok   15.6397 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f096              ok   13.7428 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f097              ok   14.7090 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f099              ok   19.8151 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f102              ok   16.9855 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f103              ok   16.4199 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f107              ok   31.1556 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f110              ok   14.4494 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f116              ok   17.0950 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f119              ok   12.9002 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f125              ok   14.3451 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f126              ok   16.4475 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f127              ok   14.7194 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f129              ok   14.1985 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f130              ok   14.9062 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f131              ok   17.4277 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f133              ok   18.6858 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f135              ok   15.8910 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f136              ok   14.4755 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f142              ok   15.1801 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f147              ok   18.2342 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f152              ok   13.9387 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f155              ok   14.5973 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f156              ok   15.7597 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f157              ok   29.1847 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f159              ok   11.3351 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f162              ok   8.7591 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f163              ok   15.6835 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f167              ok   15.0039 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f169              ok   15.4138 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f171              ok   17.1129 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f189              ok   13.3835 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f191              ok   16.0758 framing differs from gold (bytes equal); out.hex differs from base only by 1 cnt=0 last=1 transfers (bytes identical)
+retgt    fuzz-f196              ok   14.6810 framing differs from gold (bytes equal); out.hex identical to base
+retgt    fuzz-f199              ok   16.5904 framing differs from gold (bytes equal); out.hex differs from base only by 2 cnt=0 last=1 transfers (bytes identical)
+VARIANT retgt: 208/208 ok, 68 with framing notes (1293 s)
+ALL_PASS

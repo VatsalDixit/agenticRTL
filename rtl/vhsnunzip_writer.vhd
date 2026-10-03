@@ -97,7 +97,8 @@ entity vhsnunzip_writer is
     TEST_CUT       : boolean := false;
     TEST_NOREP     : boolean := false;
     TEST_LITP1     : boolean := false;
-    TEST_STALL_PCT : natural := 0
+    TEST_STALL_PCT : natural := 0;
+    PROBE          : boolean := false   -- sim only: probe_wr.txt counters
   );
   port (
     clk          : in  std_logic;
@@ -948,6 +949,80 @@ begin
         report "writer: rhnz does not match rh" severity failure;
     end if;
   end process;
+
+  -- Probe (PROBE true): per-cycle issue / stop-reason counters, rewritten to
+  -- probe_wr.txt in the simulation's working directory at every EOC command
+  -- and every 16384 cycles. Stop reason = first slot k that is not done.
+  probe_g: if PROBE generate
+    probe_p: process (clk) is
+      use std.textio.all;
+      type cnt_arr is array (natural range <>) of natural;
+      variable cyc, iss, nu0, decr, bub, litw, byt : natural := 0;
+      variable seg : cnt_arr(0 to 4) := (others => 0);
+      -- 0 cut0, 1 eoc, 2 starved, 3 kmax, 4 budget, 5 hazard, 6 litavail,
+      -- 7 litp, 8 cut, 9 all4
+      variable stp : cnt_arr(0 to 9) := (others => 0);
+      constant SN : string := "cut0    eoc     starved kmax    budget  hazard  litavl  litp    cut     all4    ";
+      variable r  : signed(7 downto 0);
+      variable k, why, ns : natural;
+      file f      : text;
+      variable l  : line;
+    begin
+      if rising_edge(clk) and reset = '0' then
+        cyc := cyc + 1;
+        r := signed('0' & hd.r7);
+        if issue = '1' then
+          iss := iss + 1;
+          byt := byt + to_integer(cmd_n.d_total);
+          ns := 0;
+          for j in 0 to 3 loop
+            if done(j) = '1' then ns := j + 1; end if;
+          end loop;
+          seg(ns) := seg(ns) + 1;
+          if done(0) = '0' then
+            why := 0;
+          elsif ns = 4 then
+            why := 9;
+          else
+            k := ns;
+            if E(k - 1).isE = '1' then why := 1;
+            elsif nu <= k then why := 2;
+            elsif k >= KMAX then why := 3;
+            elsif not (r < bnd(k).bud) then why := 4;
+            elsif plcd(k) = '1' then why := 8;
+            elsif E(k).isL = '1' and bnd(k).nl >= LITP then why := 7;
+            elsif E(k).isL = '1' then why := 6;
+            else why := 5;
+            end if;
+          end if;
+          stp(why) := stp(why) + 1;
+        elsif nu = 0 then
+          nu0 := nu0 + 1;
+        elsif de_credit_ok = '0' then
+          decr := decr + 1;
+        elsif bubble = '1' or stall = '1' then
+          bub := bub + 1;
+        else
+          litw := litw + 1;
+        end if;
+        if cyc mod 16384 = 0 or (issue = '1' and cmd_n.last = '1') then
+          file_open(f, "probe_wr.txt", write_mode);
+          write(l, string'("cycles ") & integer'image(cyc) & " issue " & integer'image(iss)
+                & " bytes " & integer'image(byt)); writeline(f, l);
+          write(l, string'("noissue nu0 ") & integer'image(nu0) & " decredit " & integer'image(decr)
+                & " bubble " & integer'image(bub) & " litwait " & integer'image(litw)); writeline(f, l);
+          write(l, string'("segs"));
+          for j in 0 to 4 loop write(l, " " & integer'image(seg(j))); end loop;
+          writeline(f, l);
+          for j in 0 to 9 loop
+            write(l, string'("stop ") & SN(8 * j + 1 to 8 * j + 8) & integer'image(stp(j)));
+            writeline(f, l);
+          end loop;
+          file_close(f);
+        end if;
+      end if;
+    end process;
+  end generate;
   -- pragma translate_on
 
 end behavior;

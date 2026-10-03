@@ -43,6 +43,7 @@ entity vhsnunzip_perf_tc is
     TEST_RETGT    : boolean  := false;
     TEST_ST_LINES : natural  := 32;
     TEST_STALL_PCT: natural  := 0;
+    TEST_PROBE    : boolean  := false;
     EXPECT_CHUNKS : natural  := 0
   );
 end vhsnunzip_perf_tc;
@@ -108,7 +109,8 @@ begin
       TEST_LITP1 => TEST_LITP1,
       TEST_RETGT => TEST_RETGT,
       TEST_ST_LINES => TEST_ST_LINES,
-      TEST_STALL_PCT => TEST_STALL_PCT
+      TEST_STALL_PCT => TEST_STALL_PCT,
+      TEST_PROBE => TEST_PROBE
     )
     port map (
       clk           => clk,
