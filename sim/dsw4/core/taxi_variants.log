@@ -1,0 +1,9 @@
+slots1   train-taxi             ok   6.0087 out.hex framing differs from base (bytes identical)
+VARIANT slots1: 1/1 ok, 1 with framing notes (949 s)
+cut      train-taxi             ok   5.9940 out.hex identical to base
+VARIANT cut: 1/1 ok, 0 with framing notes (1019 s)
+norep    train-taxi             ok   5.9007 out.hex framing differs from base (bytes identical)
+VARIANT norep: 1/1 ok, 1 with framing notes (900 s)
+st12     train-taxi             ok   6.0271 out.hex identical to base
+VARIANT st12: 1/1 ok, 0 with framing notes (931 s)
+ALL_PASS

@@ -3,7 +3,8 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 library work;
-use work.vhsnunzip_int_pkg.all;
+use work.vhsnunzip_dsw4_pkg.all;
+use work.vhsnunzip_int_pkg.vhsnunzip_ram;
 
 -- Streaming toplevel for vhsnunzip. This version of the decompressor doesn't
 -- include any large-scale input and output stream buffering, so the streams
@@ -14,13 +15,23 @@ use work.vhsnunzip_int_pkg.all;
 entity vhsnunzip_unbuffered is
   generic (
 
-    -- Whether long chunks (>64kiB) should be supported. If this is disabled,
-    -- the core will be a couple hundred LUTs smaller.
+    -- Unused since DSW-4 (kept for the component declaration in
+    -- vhsnunzip_pkg): long chunks (>64kiB) are always supported.
     LONG_CHUNKS : boolean := true;
 
-    -- This block can use either 2 UltraRAMs or 16 Xilinx 36k block RAMs.
+    -- This block uses 32 UltraRAMs or 32 x 8 Xilinx 36k block RAMs.
     -- Select "ultra" for UltraRAMs or "block" for block RAMs.
-    RAM_STYLE   : string := "ultra"
+    RAM_STYLE   : string := "ultra";
+
+    -- Simulation-only test knobs (SPEC 7), all off by default; every one
+    -- must give bit-identical output. See vhsnunzip_core.
+    TEST_SLOTS     : natural := 4;
+    TEST_CUT       : boolean := false;
+    TEST_NOREP     : boolean := false;
+    TEST_LITP1     : boolean := false;
+    TEST_RETGT     : boolean := false;
+    TEST_ST_LINES  : natural := 32;
+    TEST_STALL_PCT : natural := 0
 
   );
   port (
@@ -71,195 +82,64 @@ end vhsnunzip_unbuffered;
 
 architecture behavior of vhsnunzip_unbuffered is
 
-  -- Pipeline interface signals. The pipeline (i35) works on 8-byte input
-  -- transfers and 16-byte output lines; the gearboxes below convert between
-  -- those and the 32-byte top-level ports.
-  signal co           : compressed_stream_single;
-  signal co8_data     : std_logic_vector(63 downto 0);
+  -- Core interface.
+  signal co           : cbeat_t;
   signal de           : decompressed_stream;
-  signal de_ready_i   : std_logic;
-  signal de_cnt_i     : std_logic_vector(5 downto 0);
-  signal co_ready_i   : std_logic;
-  signal de16_data    : std_logic_vector(127 downto 0);
-  signal lt_rd_valid  : std_logic;
-  signal lt_rd_val_r  : std_logic;
-  signal lt_rd_adev   : unsigned(11 downto 0);
-  signal lt_rd_adod   : unsigned(11 downto 0);
-  signal lt_rd_next   : std_logic;
-  signal lt_rd_even   : byte_array(0 to 15);
-  signal lt_rd_odd    : byte_array(0 to 15);
-  signal lt_rd_adev2  : unsigned(11 downto 0);
-  signal lt_rd_adod2  : unsigned(11 downto 0);
-  signal lt_rd_even2  : byte_array(0 to 15);
-  signal lt_rd_odd2   : byte_array(0 to 15);
 
-  -- RAM interface signals. The decompression history is stored as 16-byte
-  -- lines, but each history RAM is 8 bytes wide, so a line is split over a
-  -- *pair* of RAMs: pair 0 (instances 0 and 1) holds the even lines, pair 1
-  -- (instances 2 and 3) holds the odd lines. Reading one line from each pair
-  -- yields the 32-byte window that contains any 16-byte line plus its lookahead
-  -- line, in exactly the way two 8-byte RAMs did for the 8-byte line.
-  signal wr_ptr       : unsigned(11 downto 0);
-  signal wr_push      : std_logic;
-  -- Instances 4..7 are a mirror of 0..3: they are written with exactly the same
-  -- data, and exist purely to give the second copy of a copy pair its own read
-  -- port. They are URAM/BRAM, not logic, so they cost no LUTs.
-  signal ram_wr_cmd   : ram_command_array(0 to 7);
-  signal ram_rd_cmd   : ram_command_array(0 to 7);
-  signal ram_rd_resp  : ram_response_array(0 to 7);
+  -- History RAMs: 32 instances, index i = m*8 + par*4 + w (SPEC 6): mirror
+  -- m = writer slot 0..3, par = output-line parity, w = 8-byte word of the
+  -- 32-byte line. Port a = history write, port b = LT read.
+  signal ram_a_cmd    : ram_command_array(0 to 31);
+  signal ram_a_resp   : ram_response_array(0 to 31);
+  signal ram_b_cmd    : ram_command_array(0 to 31);
+  signal ram_b_resp   : ram_response_array(0 to 31);
 
 begin
 
-  -- Datapath.
-  datapath_inst: vhsnunzip_pipeline
+  -- Input beat: byte i = co_data(8i+7 downto 8i); co_cnt 0 means 32 bytes,
+  -- so the index of the last valid byte is co_cnt - 1 (mod 32).
+  co.valid <= co_valid;
+  co.last  <= co_last;
+  co.endi  <= unsigned(co_cnt) - 1;
+  co_data_gen: for i in 0 to 31 generate
+    co.data(i) <= co_data(8*i+7 downto 8*i);
+  end generate;
+
+  core_inst: entity work.vhsnunzip_core
     generic map (
-      LONG_CHUNKS => LONG_CHUNKS
+      TEST_SLOTS     => TEST_SLOTS,
+      TEST_CUT       => TEST_CUT,
+      TEST_NOREP     => TEST_NOREP,
+      TEST_LITP1     => TEST_LITP1,
+      TEST_RETGT     => TEST_RETGT,
+      TEST_ST_LINES  => TEST_ST_LINES,
+      TEST_STALL_PCT => TEST_STALL_PCT
     )
     port map (
       clk         => clk,
       reset       => reset,
       co          => co,
-      co_ready    => co_ready_i,
-      lt_rd_valid => lt_rd_valid,
-      lt_rd_adev  => lt_rd_adev,
-      lt_rd_adod  => lt_rd_adod,
-      lt_rd_next  => lt_rd_next,
-      lt_rd_even  => lt_rd_even,
-      lt_rd_odd   => lt_rd_odd,
-      lt_rd_adev2 => lt_rd_adev2,
-      lt_rd_adod2 => lt_rd_adod2,
-      lt_rd_even2 => lt_rd_even2,
-      lt_rd_odd2  => lt_rd_odd2,
+      co_ready    => co_ready,
       de          => de,
-      de_ready    => de_ready_i
+      de_ready    => de_ready,
+      ram_a_cmd   => ram_a_cmd,
+      ram_a_resp  => ram_a_resp,
+      ram_b_cmd   => ram_b_cmd,
+      ram_b_resp  => ram_b_resp
     );
 
-  -- Input gearbox: each 32-byte beat is split into up to four 8-byte
-  -- sub-beats for the pipeline's input FIFO (sub-beats past the end of the
-  -- chunk are skipped; endi/last are set on the chunk's final sub-beat).
-  co_split_inst: entity work.vhsnunzip_co_split
-    port map (
-      clk         => clk,
-      reset       => reset,
-      in_valid    => co_valid,
-      in_ready    => co_ready,
-      in_data     => co_data,
-      in_cnt      => co_cnt,
-      in_last     => co_last,
-      out_valid   => co.valid,
-      out_ready   => co_ready_i,
-      out_data    => co8_data,
-      out_endi    => co.endi,
-      out_last    => co.last
-    );
-
-  co_connect_proc: process (co8_data) is
-  begin
-    for byte in 0 to 7 loop
-      co.data(byte) <= co8_data(byte*8+7 downto byte*8);
-    end loop;
-  end process;
-
-  -- Output gearbox: pairs the pipeline's 16-byte lines into 32-byte
-  -- transfers, flushing on the last line of each chunk.
-  de_connect_proc: process (de) is
-  begin
-    for byte in 0 to 15 loop
-      de16_data(byte*8+7 downto byte*8) <= de.data(byte);
-    end loop;
-  end process;
-
-  de_pack_inst: entity work.vhsnunzip_de_pack
-    port map (
-      clk         => clk,
-      reset       => reset,
-      in_valid    => de.valid,
-      in_ready    => de_ready_i,
-      in_data     => de16_data,
-      in_cnt      => de.cnt,
-      in_last     => de.last,
-      out_valid   => de_valid,
-      out_ready   => de_ready,
-      out_data    => de_data,
-      out_cnt     => de_cnt_i,
-      out_last    => de_last
-    );
-
-  de_cnt <= de_cnt_i;
-  de_dvalid <= '0' when unsigned(de_cnt_i) = 0 else '1';
-
-  -- Write the decompressed output to the memory for long-term history
-  -- storage. This uses the pipeline's 16-byte lines, handshaked into the
-  -- output gearbox, exactly as i35 did at its own output port.
-  -- A 16-byte line goes to one pair of RAMs, its low half in the first
-  -- instance of the pair and its high half in the second.
-  wr_push <= de.valid and de_ready_i;
-
-  ram_wr_gen: for idx in 0 to 7 generate
-    constant PAIR : natural := (idx mod 4) / 2;
-    constant HALF : natural := idx mod 2;
-    signal pair_sel : std_logic;
-  begin
-    pair_sel <= wr_ptr(0) when PAIR = 1 else not wr_ptr(0);
-    ram_wr_cmd(idx) <= (
-      valid => wr_push and pair_sel,
-      addr  => resize(wr_ptr(11 downto 1), 12),
-      wren  => '1',
-      wdat  => de.data(HALF*8 to HALF*8+7),
-      wctrl => "00000000");
+  -- Output line: valid bytes packed from lane 0, cnt literal 0..32.
+  de_valid  <= de.valid;
+  de_last   <= de.last;
+  de_cnt    <= std_logic_vector(de.cnt);
+  de_dvalid <= '0' when de.cnt = 0 else '1';
+  de_data_gen: for i in 0 to 31 generate
+    de_data(8*i+7 downto 8*i) <= de.data(i);
   end generate;
 
-  wr_ptr_proc: process (clk) is
-  begin
-    if rising_edge(clk) then
-      if de.valid = '1' and de_ready_i = '1' then
-        if de.last = '0' then
-          wr_ptr <= wr_ptr + 1;
-        else
-          wr_ptr <= (others => '0');
-        end if;
-      end if;
-      if reset = '1' then
-        wr_ptr <= (others => '0');
-      end if;
-    end if;
-  end process;
-
-  -- Connect the long-term memory read request signals. Both halves of a pair
-  -- always share an address, because they hold the two halves of one 16-byte
-  -- history line.
-  ram_rd_gen: for idx in 0 to 7 generate
-    constant PAIR : natural := (idx mod 4) / 2;
-    constant MIRR : natural := idx / 4;
-    signal rd_addr : unsigned(11 downto 0);
-  begin
-    rd_addr <= lt_rd_adod2 when (PAIR = 1 and MIRR = 1)
-          else lt_rd_adev2 when MIRR = 1
-          else lt_rd_adod when PAIR = 1
-          else lt_rd_adev;
-    ram_rd_cmd(idx) <= (
-      valid => lt_rd_valid,
-      addr  => rd_addr,
-      wren  => '0',
-      wdat  => (others => X"00"),
-      wctrl => "00000000");
-  end generate;
-
-  -- Two 8-byte halves make one 16-byte history line.
-  lt_rd_even(0 to 7)   <= ram_rd_resp(0).rdat;
-  lt_rd_even(8 to 15)  <= ram_rd_resp(1).rdat;
-  lt_rd_odd(0 to 7)    <= ram_rd_resp(2).rdat;
-  lt_rd_odd(8 to 15)   <= ram_rd_resp(3).rdat;
-
-  lt_rd_even2(0 to 7)  <= ram_rd_resp(4).rdat;
-  lt_rd_even2(8 to 15) <= ram_rd_resp(5).rdat;
-  lt_rd_odd2(0 to 7)   <= ram_rd_resp(6).rdat;
-  lt_rd_odd2(8 to 15)  <= ram_rd_resp(7).rdat;
-
-  lt_rd_next <= ram_rd_resp(3).valid_next;
-
-  -- The RAMs holding the decompression history, plus their mirror.
-  ram_gen: for idx in 0 to 7 generate
+  -- The RAMs holding the decompression history (4 mirrors x 2 parities x
+  -- 4 words).
+  ram_gen: for idx in 0 to 31 generate
   begin
     ram_inst: vhsnunzip_ram
       generic map (
@@ -268,10 +148,10 @@ begin
       port map (
         clk       => clk,
         reset     => reset,
-        a_cmd     => ram_wr_cmd(idx),
-        a_resp    => open,
-        b_cmd     => ram_rd_cmd(idx),
-        b_resp    => ram_rd_resp(idx)
+        a_cmd     => ram_a_cmd(idx),
+        a_resp    => ram_a_resp(idx),
+        b_cmd     => ram_b_cmd(idx),
+        b_resp    => ram_b_resp(idx)
       );
   end generate;
 

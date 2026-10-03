@@ -1,0 +1,5 @@
+tb: C:\Users\Vatsal\agenticRTL_v2_real\agentic\tb\vhsnunzip_perf_tc.sim.08.vhd
+draws: [('train-taxi', 36)]
+{'in_bytes': 32, 'in_cnt_bits': 5, 'out_bytes': 32, 'out_cnt_bits': 6, 'cores': 1, 'core_line_bytes': 16.0, 'copy_slots': 2.0, 'literal_slots': 1.0, 'elements_per_transfer': 3.0, 'unresolved': []}
+train-taxi pass 6.0271 {'cycles': 595382, 'bytes_out': 3588432, 'co_beats': 80086, 'de_beats': 112158, 'co_stall': 514729, 'de_bubble': 483224}
+828 s

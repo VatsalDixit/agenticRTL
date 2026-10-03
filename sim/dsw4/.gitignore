@@ -1,0 +1,20 @@
+# DSW-4 unit and integration benches. Only sources, scripts and small
+# reference results are tracked. Builds, GHDL binaries, copied stimulus and
+# the gold traces (849 MB; regenerate with diag/work-spec/gold.py) are
+# scratch.
+*
+!.gitignore
+!*/
+work/
+build*/
+gold/
+out/
+synth/
+__pycache__/
+b1/*/
+!*.py
+!*.vhd
+!core/*.log
+!writer/final_regress.txt
+!writer/mut_result.txt
+!front/final_all.log

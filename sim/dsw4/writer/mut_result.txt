@@ -1,0 +1,95 @@
+identity     SURVIVED by -
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@572316ns:(report note): TB_PASS mode=0 draws=28 elements=12096 commands=44160 decision_cycles=44314
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=0
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=0
+haz_le       KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@563766ns:(report note): TB_FAIL errors=121 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@346ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks cmd 7 field cut: got 1 expected 0
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=196
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=112
+endh_lt      KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@445946ns:(report note): TB_FAIL errors=76 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@180416ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/fuzz/f000 cmd 647 field c: got 3 expected 4
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44734 decision_cycles=60329
+      B: check draws=28 commands=44734 decision_cycles=60329 replay+inv errors=207
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560146ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45060 decision_cycles=46360
+      C: check draws=28 commands=45060 decision_cycles=46360 inv errors=204
+qdbl_64      SURVIVED by -
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@572316ns:(report note): TB_PASS mode=0 draws=28 elements=12096 commands=44160 decision_cycles=44314
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=0
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=0
+qdbl_strict  KILLED by A,B
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@59966ns:(report note): TB_FAIL errors=269 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@34076ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/long-chunk cmd 34 field d_total: got 07 expected 0E
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@735646ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=46106 decision_cycles=61318
+      B: check draws=28 commands=46106 decision_cycles=61318 replay+inv errors=200
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@575376ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=46419 decision_cycles=47650
+      C: check draws=28 commands=46419 decision_cycles=47650 inv errors=0
+nu_eq_nv     KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@162526ns:(report note): TB_FAIL errors=252 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@206ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks cmd 0 field d_total: got 00 expected 18
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:439:11:@1165686ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks: cycle limit 116564 reached at rp=106 of 341
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:439:11:@2351576ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/line-straddle-33: cycle limit 116268 reached at rp=97 of 267
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:439:11:@5541166ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/fuzz/f020: cycle limit 524964 reached at rp=1 of 1021
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/mutants/nu_eq_nv/vhsnunzip_writer.vhd:800:9:@5688435ns:(assertion failure): writer: command over budget
+no_fav       SURVIVED by -
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@572316ns:(report note): TB_PASS mode=0 draws=28 elements=12096 commands=44160 decision_cycles=44314
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=0
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=0
+port_b       KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@238446ns:(report note): TB_FAIL errors=250 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@14156ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/line-straddle-65 cmd 7 field slot2.port_b: got 0 expected 1
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=200
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=200
+no_bubble    KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@545116ns:(report note): TB_FAIL errors=111 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:376:13:@216ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks: command issued at t=17 without credit or in a bubble
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@604936ns:(report note): TB_FAIL errors=104 draws=28
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:376:13:@226ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks: command issued at t=18 without credit or in a bubble
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@523246ns:(report note): TB_FAIL errors=102 draws=28
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:376:13:@156ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/tiny-chunks: command issued at t=11 without credit or in a bubble
+hold_no_av   KILLED by C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@572316ns:(report note): TB_PASS mode=0 draws=28 elements=12096 commands=44160 decision_cycles=44314
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=0
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@1647186ns:(report note): TB_FAIL errors=4 draws=28
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:433:11:@492426ns:(report error): ERROR draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/fuzz/f000: deadlock, no command for 30000 cycles at rp=311 of 420
+cutk_lp      KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@111076ns:(report note): TB_FAIL errors=296 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@15006ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/line-straddle-65 cmd 57 field lw: got 00000482 expected 00000481
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=200
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=200
+litp         KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@263276ns:(report note): TB_FAIL errors=200 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@173036ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/fuzz/f000 cmd 54 field cut: got 1 expected 0
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@723646ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44698 decision_cycles=60302
+      B: check draws=28 commands=44698 decision_cycles=60302 replay+inv errors=200
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560096ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45028 decision_cycles=46344
+      C: check draws=28 commands=45028 decision_cycles=46344 inv errors=200
+repq_32      KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@567646ns:(report note): TB_FAIL errors=57 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@186836ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/fuzz/f000 cmd 1149 field rep: got 1 expected 0
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44727 decision_cycles=60330
+      B: check draws=28 commands=44727 decision_cycles=60330 replay+inv errors=116
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560126ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45046 decision_cycles=46356
+      C: check draws=28 commands=45046 decision_cycles=46356 inv errors=57
+bud_le       KILLED by A,B,C
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:478:7:@551756ns:(report note): TB_FAIL errors=144 draws=28
+      A: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:161:9:@10856ns:(report error): MISMATCH draw /mnt/c/Users/Vatsal/dsw4/sim/dsw4/gold/line-straddle-33 cmd 67 field last: got 1 expected 0
+      B: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@724006ns:(report note): TB_PASS mode=1 draws=28 elements=12096 commands=44722 decision_cycles=60332
+      B: check draws=28 commands=44722 decision_cycles=60332 replay+inv errors=200
+      C: /mnt/c/Users/Vatsal/dsw4/sim/dsw4/writer/tb_writer.vhd:474:7:@560056ns:(report note): TB_PASS mode=2 draws=28 elements=12096 commands=45058 decision_cycles=46343
+      C: check draws=28 commands=45058 decision_cycles=46343 inv errors=107
+SURVIVED: ['identity', 'qdbl_64', 'no_fav']

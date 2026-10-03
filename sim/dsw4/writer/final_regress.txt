@@ -1,0 +1,31 @@
+base_A_all_s1                PASS  56s  TB_PASS mode=0 draws=208 elements=69080 commands=289448 decision_cycles=290629
+slots2_A_all_s1              PASS  58s  TB_PASS mode=0 draws=208 elements=69080 commands=292777 decision_cycles=293932
+slots1_A_all_s1              PASS  63s  TB_PASS mode=0 draws=208 elements=69080 commands=316683 decision_cycles=317846
+slots3_A_all_s1              PASS  57s  TB_PASS mode=0 draws=208 elements=69080 commands=289748 decision_cycles=290899
+norep_A_all_s1               PASS  63s  TB_PASS mode=0 draws=208 elements=69080 commands=336113 decision_cycles=337274
+cut_A_all_s1                 PASS  72s  TB_PASS mode=0 draws=208 elements=69080 commands=324309 decision_cycles=325470
+litp1_A_all_s1               PASS  54s  TB_PASS mode=0 draws=208 elements=69080 commands=296273 decision_cycles=297467
+stall_A_all_s1               PASS  54s  TB_PASS mode=0 draws=208 elements=69080 commands=289448 decision_cycles=414000
+base_B8_all_s1               PASS  50s  TB_PASS mode=1 draws=208 elements=69080 commands=292064 decision_cycles=362564  draws=208 commands=292064 decision_cycles=362564 replay+inv errors=0
+base_B45_all_s1              PASS  49s  TB_PASS mode=1 draws=208 elements=69080 commands=289489 decision_cycles=291619  draws=208 commands=289489 decision_cycles=291619 replay+inv errors=0
+slots1_B8_all_s1             PASS  57s  TB_PASS mode=1 draws=208 elements=69080 commands=316683 decision_cycles=372433  draws=208 commands=316683 decision_cycles=372433 replay+inv errors=0
+slots2_B8_all_s1             PASS  54s  TB_PASS mode=1 draws=208 elements=69080 commands=294774 decision_cycles=365445  draws=208 commands=294774 decision_cycles=365445 replay+inv errors=0
+slots3_B8_all_s1             PASS  54s  TB_PASS mode=1 draws=208 elements=69080 commands=292328 decision_cycles=362680  draws=208 commands=292328 decision_cycles=362680 replay+inv errors=0
+norep_B8_all_s1              PASS  57s  TB_PASS mode=1 draws=208 elements=69080 commands=338025 decision_cycles=385987  draws=208 commands=338025 decision_cycles=385987 replay+inv errors=0
+cut_B8_all_s1                PASS  67s  TB_PASS mode=1 draws=208 elements=69080 commands=326737 decision_cycles=386739  draws=208 commands=326737 decision_cycles=386739 replay+inv errors=0
+litp1_B8_all_s1              PASS  56s  TB_PASS mode=1 draws=208 elements=69080 commands=298145 decision_cycles=365438  draws=208 commands=298145 decision_cycles=365438 replay+inv errors=0
+base_C25_all_s1              PASS  79s  TB_PASS mode=2 draws=208 elements=69080 commands=295444 decision_cycles=299905  draws=208 commands=295444 decision_cycles=299905 inv errors=0
+slots1_C25_all_s1            PASS  86s  TB_PASS mode=2 draws=208 elements=69080 commands=321011 decision_cycles=324303  draws=208 commands=321011 decision_cycles=324303 inv errors=0
+slots2_C25_all_s1            PASS  78s  TB_PASS mode=2 draws=208 elements=69080 commands=298272 decision_cycles=302481  draws=208 commands=298272 decision_cycles=302481 inv errors=0
+slots3_C25_all_s1            PASS  79s  TB_PASS mode=2 draws=208 elements=69080 commands=295771 decision_cycles=300041  draws=208 commands=295771 decision_cycles=300041 inv errors=0
+cut_C25_all_s1               PASS  95s  TB_PASS mode=2 draws=208 elements=69080 commands=325572 decision_cycles=329396  draws=208 commands=325572 decision_cycles=329396 inv errors=0
+norep_C25_all_s1             PASS  91s  TB_PASS mode=2 draws=208 elements=69080 commands=340805 decision_cycles=344576  draws=208 commands=340805 decision_cycles=344576 inv errors=0
+litp1_C25_all_s1             PASS  85s  TB_PASS mode=2 draws=208 elements=69080 commands=301298 decision_cycles=305467  draws=208 commands=301298 decision_cycles=305467 inv errors=0
+base_C25r12_all_s1           PASS  267s  TB_PASS mode=2 draws=208 elements=69080 commands=1057003 decision_cycles=1138609  draws=208 commands=1057003 decision_cycles=1138609 inv errors=0
+slots1_C25r12_all_s1         PASS  269s  TB_PASS mode=2 draws=208 elements=69080 commands=1061269 decision_cycles=1139250  draws=208 commands=1061269 decision_cycles=1139250 inv errors=0
+slots2_C25r12_all_s1         PASS  269s  TB_PASS mode=2 draws=208 elements=69080 commands=1057818 decision_cycles=1138805  draws=208 commands=1057818 decision_cycles=1138805 inv errors=0
+slots3_C25r12_all_s1         PASS  267s  TB_PASS mode=2 draws=208 elements=69080 commands=1056783 decision_cycles=1138232  draws=208 commands=1056783 decision_cycles=1138232 inv errors=0
+cut_C25r12_all_s1            PASS  298s  TB_PASS mode=2 draws=208 elements=69080 commands=1061983 decision_cycles=1139401  draws=208 commands=1061983 decision_cycles=1139401 inv errors=0
+norep_C25r12_all_s1          PASS  267s  TB_PASS mode=2 draws=208 elements=69080 commands=1071048 decision_cycles=1148700  draws=208 commands=1071048 decision_cycles=1148700 inv errors=0
+litp1_C25r12_all_s1          PASS  241s  TB_PASS mode=2 draws=208 elements=69080 commands=1057003 decision_cycles=1138341  draws=208 commands=1057003 decision_cycles=1138341 inv errors=0
+ALL_PASS
