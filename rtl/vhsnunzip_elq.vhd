@@ -30,7 +30,7 @@ use work.vhsnunzip_dsw4_pkg.all;
 --              the edge, asynchronous read after it).
 --   pf_adv     entries of pf the writer loads into its window at this clock
 --              edge (0..4, <= nvis); fp += pf_adv. Late (depends on the
---              writer decision): only a 7-bit add into the fp register.
+--              writer decision): a 5:1 select of the precomputed fp + 0..4.
 --   rp_adv     elements the writer retired this cycle (its decision c, 0..4);
 --              rp += rp_adv.
 --   cred_ret   rp_adv registered once, returned to the walker / parser.
@@ -71,12 +71,30 @@ architecture behavior of vhsnunzip_elq is
   signal cret        : unsigned(2 downto 0) := (others => '0');
 
   signal nvis_i      : unsigned(6 downto 0);
+  type fpc_arr is array (0 to 4) of unsigned(6 downto 0);
+  signal fpc         : fpc_arr;            -- fp + 0..4 (registers only)
   type ent_arr is array (0 to 3) of ent_t;
   signal rd          : ent_arr;            -- per bank read data
   signal wd          : ent_arr;            -- per bank write data
   signal we          : std_logic_vector(0 to 3);
   type addr_arr is array (0 to 3) of unsigned(3 downto 0);
-  signal wa, ra      : addr_arr;
+  signal wa          : addr_arr;
+  -- Bank read addresses, registered with fp (bank b holds entry
+  -- fp + ((b - fp) mod 4)), so the LUTRAM read address is a register.
+  signal ra          : addr_arr := (others => (others => '0'));
+
+  function rdaddr(f : unsigned(6 downto 0)) return addr_arr is
+    variable j   : unsigned(1 downto 0);
+    variable idx : unsigned(6 downto 0);
+    variable res : addr_arr;
+  begin
+    for b in 0 to 3 loop
+      j := to_unsigned(b, 2) - f(1 downto 0);
+      idx := f + resize(j, 7);
+      res(b) := idx(5 downto 2);
+    end loop;
+    return res;
+  end function;
 
   function pack(e : element_t) return ent_t is
   begin
@@ -98,6 +116,10 @@ architecture behavior of vhsnunzip_elq is
 begin
 
   nvis_i <= wp - fp;
+
+  fpc_g: for i in 0 to 4 generate
+    fpc(i) <= fp + i;
+  end generate;
   nvis   <= nvis_i;
 
   -- Write side: bank b takes el((b - wp) mod 4).
@@ -115,18 +137,6 @@ begin
       else
         we(b) <= '0';
       end if;
-    end loop;
-  end process;
-
-  -- Read side: bank b holds entry fp + ((b - fp) mod 4).
-  rd_addr: process (fp) is
-    variable j   : unsigned(1 downto 0);
-    variable idx : unsigned(6 downto 0);
-  begin
-    for b in 0 to 3 loop
-      j := to_unsigned(b, 2) - fp(1 downto 0);
-      idx := fp + resize(j, 7);
-      ra(b) <= idx(5 downto 2);
     end loop;
   end process;
 
@@ -167,12 +177,21 @@ begin
   begin
     if rising_edge(clk) then
       wp   <= wp + resize(wcnt, 7);
-      fp   <= fp + resize(pf_adv, 7);
+      -- fp + pf_adv as a select of precomputed fp + 0..4 (pf_adv is the
+      -- writer's late one-hot select; no adder after it).
+      case pf_adv is
+        when "001"  => fp <= fpc(1); ra <= rdaddr(fpc(1));
+        when "010"  => fp <= fpc(2); ra <= rdaddr(fpc(2));
+        when "011"  => fp <= fpc(3); ra <= rdaddr(fpc(3));
+        when "100"  => fp <= fpc(4); ra <= rdaddr(fpc(4));
+        when others => fp <= fpc(0); ra <= rdaddr(fpc(0));
+      end case;
       rp   <= rp + resize(rp_adv, 7);
       cret <= rp_adv;
       if reset = '1' then
         wp   <= (others => '0');
         fp   <= (others => '0');
+        ra   <= rdaddr(to_unsigned(0, 7));
         rp   <= (others => '0');
         cret <= (others => '0');
       end if;
@@ -196,6 +215,8 @@ begin
         report "ELQ: writer fetched an entry that is not written" severity failure;
       assert resize(rp_adv, 7) <= fp - rp
         report "ELQ: writer retired an entry it has not fetched" severity failure;
+      assert ra = rdaddr(fp)
+        report "ELQ: registered read addresses do not match fp" severity failure;
     end if;
   end process;
   -- pragma translate_on

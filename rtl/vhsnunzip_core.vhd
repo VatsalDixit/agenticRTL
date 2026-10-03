@@ -24,7 +24,8 @@ use work.vhsnunzip_dsw4_pkg.all;
 -- TEST_RETGT has no effect in B2 (parse_serial has no retarget).
 --
 -- Interface notes (B2c): the writer's de_credit_ok is the de FIFO's
--- registered credit, its a_r is the CBUF's GB registered twice, and the
+-- registered credit, its a_r port is the CBUF's GB (the writer adds both
+-- registers of A_r itself), and the
 -- writer command drives AG1 with no extra register (the de FIFO credit budget
 -- in vhsnunzip_defifo counts exactly this pipe: raise DE_CRED if a stage is
 -- added between the writer and S4). lwx goes from the dpath straight to the
@@ -163,7 +164,10 @@ begin
     );
 
   -- Writer, LOOP L1 (SPEC 3.7). de_credit_ok is the de FIFO's registered
-  -- credit; a_r is the CBUF arrival counter (GB registered twice).
+  -- credit; its a_r port takes the CBUF's GB register itself: the writer
+  -- registers it twice (A_r, SPEC 3.1) and uses the two earlier values to
+  -- register every availability field one cycle ahead. The CBUF's own a_r
+  -- output (GB registered twice) is equal to the writer's internal A_r.
   writer_inst: entity work.vhsnunzip_writer
     generic map (
       TEST_SLOTS     => TEST_SLOTS,
@@ -179,7 +183,7 @@ begin
       nvis         => nvis,
       pf_adv       => pf_adv,
       rp_adv       => rp_adv,
-      a_r          => a_r,
+      a_r          => gb,
       de_credit_ok => de_credit_ok,
       cmd          => wcmd
     );
@@ -224,5 +228,87 @@ begin
       de_credit_ok => de_credit_ok,
       level        => open
     );
+
+  -- pragma translate_off
+  -- SPEC 7 "LT source line <= hw_ptr - 2", exactly: every history line an LT
+  -- read uses (L0, and L0 + 1 when smod + n > 32) must have had its write
+  -- presented on port a at least 2 cycles before the read is presented on
+  -- port b (SPEC 1: a write presented in cycle P is seen by reads presented
+  -- in P + 2 or later), in the same chunk, and be the newest copy of that
+  -- line (written at most 4096 lines ago, so a row that still holds the line
+  -- 8192 back is caught). ag and ram_b_cmd are both AG2 registers (cycle C).
+  -- The write in cycle P belongs to the push of cycle P - 1.
+  lt_chk: process (clk) is
+    type int_arr is array (0 to 8191) of integer;
+    variable wtime  : int_arr := (others => integer'low / 2);
+    variable wchunk : int_arr := (others => -1);
+    variable wser   : int_arr := (others => integer'low / 2);
+    variable cyc    : integer := 0;
+    variable nwr    : integer := 0;     -- history lines written so far
+    variable pcnt   : integer := 0;     -- pushes with last = 1 so far
+    variable wtag   : integer := 0;     -- chunk of this cycle's writes
+    variable rcnt   : integer := 0;     -- AG2 commands with last = 1 so far
+    variable ln, l0 : integer;
+    variable sk, sn, nl : integer;
+  begin
+    if rising_edge(clk) then
+      if reset = '1' then
+        pcnt := 0; wtag := 0; rcnt := 0;
+        wchunk := (others => -1);
+      else
+        -- History writes presented this cycle (one parity bank per line).
+        for par in 0 to 1 loop
+          if ram_a_cmd(par * 4).valid = '1' and ram_a_cmd(par * 4).wren = '1' then
+            ln := to_integer(ram_a_cmd(par * 4).addr) * 2 + par;
+            wtime(ln) := cyc;
+            wchunk(ln) := wtag;
+            wser(ln) := nwr;
+            nwr := nwr + 1;
+          end if;
+        end loop;
+        -- LT reads presented this cycle.
+        if ag.valid = '1' then
+          for k in 0 to 3 loop
+            if ag.tier(k) = T_LT then
+              l0 := to_integer(ram_b_cmd(k * 8 + 4).addr) * 2;
+              if ag.l0p(k) = '1' then
+                l0 := l0 + 1;
+              end if;
+              case k is
+                when 0 => sk := 0;                       sn := to_integer(ag.s1);
+                when 1 => sk := to_integer(ag.s1);       sn := to_integer(ag.s2);
+                when 2 => sk := to_integer(ag.s2);       sn := to_integer(ag.s3);
+                when others => sk := to_integer(ag.s3);  sn := to_integer(ag.d_total);
+              end case;
+              nl := 1;
+              if to_integer(ag.smod(k)) + (sn - sk) > 32 then
+                nl := 2;
+              end if;
+              for i in 0 to nl - 1 loop
+                ln := (l0 + i) mod 8192;
+                assert wchunk(ln) = rcnt and wtime(ln) <= cyc - 2 and wser(ln) >= nwr - 4096
+                  report "core: LT read of history line " & integer'image(ln)
+                         & " (slot " & integer'image(k) & ") before its write is visible: "
+                         & "written in cycle " & integer'image(wtime(ln)) & " of chunk "
+                         & integer'image(wchunk(ln)) & ", read in cycle " & integer'image(cyc)
+                         & " of chunk " & integer'image(rcnt) & " (needs <= read - 2)"
+                  severity failure;
+              end loop;
+            end if;
+          end loop;
+          if ag.last = '1' then
+            rcnt := rcnt + 1;
+          end if;
+        end if;
+        -- Next cycle's writes come from this cycle's push.
+        wtag := pcnt;
+        if push.valid = '1' and push.last = '1' then
+          pcnt := pcnt + 1;
+        end if;
+      end if;
+      cyc := cyc + 1;
+    end if;
+  end process;
+  -- pragma translate_on
 
 end behavior;

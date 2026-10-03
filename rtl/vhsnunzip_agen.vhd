@@ -239,7 +239,15 @@ begin
   assert TEST_ST_LINES >= 1 and TEST_ST_LINES <= 32
     report "agen: TEST_ST_LINES must be 1..32 (Dhi is 5 bits)" severity failure;
 
+  -- SPEC 7 asserts on every copy slot k (S_k, n_k = S_(k+1) - S_k, with
+  -- S_0 = 0 and S_4 = d_total; unused slots carry S = d_total):
+  --   D >= 0, i.e. q > S_k (the first source byte is below the command start);
+  --   copy source < W unless REP: the LAST source byte W + S_k + n_k - 1 - q
+  --   is below W, i.e. S_k + n_k <= q (SPEC 5.1: n <= q - d). REP (slot 0):
+  --   q in {1,2,4,8,16}, sources W - q + (i mod q) < W by construction.
   assert_proc: process (clk) is
+    variable sk, sn : natural;
+    variable q      : natural;
   begin
     if rising_edge(clk) then
       if reset = '0' and a1.valid = '1' then
@@ -247,7 +255,19 @@ begin
           if a1.slot(k).used = '1' and a1.slot(k).kind = K_CPY then
             assert a1.slot(k).d >= 0
               report "agen: copy slot " & integer'image(k) & " has D < 0 (q <= S)"
-              severity error;
+              severity failure;
+            if k = 0 then sk := 0; else sk := to_integer(a1.s(k)); end if;
+            if k = 3 then sn := to_integer(a1.d_total); else sn := to_integer(a1.s(k + 1)); end if;
+            q := to_integer(a1.slot(k).q);
+            if k = 0 and a1.rep = '1' then
+              assert q = 1 or q = 2 or q = 4 or q = 8 or q = 16
+                report "agen: REP copy with q = " & integer'image(q) severity failure;
+            else
+              assert sn <= q
+                report "agen: copy slot " & integer'image(k) & " reads a byte of its own command (S "
+                       & integer'image(sk) & " + n " & integer'image(sn - sk) & " > q "
+                       & integer'image(q) & ")" severity failure;
+            end if;
           end if;
         end loop;
       end if;
