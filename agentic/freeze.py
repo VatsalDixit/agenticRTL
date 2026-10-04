@@ -28,6 +28,9 @@ FROZEN = [
     'ref/parquet_pages.py',
     'oracle.py',
     'stim.py',
+    # Every scored simulation runs on the copy of rtl/ that probe.py
+    # instruments, so it is part of the instrument too.
+    'probe.py',
     'tb/vhsnunzip_perf_tc.sim.08.vhd',
     'syn/sim_draws.sh',
     'syn/synth.sh',

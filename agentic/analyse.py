@@ -27,12 +27,23 @@ concluded "no stage saturated".
 
 Also reads worst slack when synthesis numbers are given, and answers which
 factor of throughput (bytes/cycle or f_max) is the one worth moving.
+
+When the simulation ran with the internal probe (agentic/probe.py), the
+handshakes between stages are read too, and they decide what output idle
+means. The port counters alone cannot: on i35 the output was idle 40% of
+cycles and the verdict said "internal latency", while the probe showed the
+decoder moving on 99% of cycles and nothing after it ever waiting. Idle
+there was the decoder's rate, not bubbles. Every probe path here is guarded:
+a probe bug falls back to the port-counter verdict and never fails a
+measurement.
 """
 
 import os
 import re
+import sys
 
 import oracle
+import probe as probe_mod
 
 SATURATED = 0.90
 IMPOSSIBLE = 1.25
@@ -98,6 +109,12 @@ def rtl_widths(rtl_dir):
            'literal_slots': DEFAULT_LITERAL_SLOTS,
            'elements_per_transfer': DEFAULT_ELEMENTS_PER_TRANSFER,
            'unresolved': []}
+    # Which of those are still the defaults above because the RTL did not
+    # say. A design that declares its widths elsewhere (DSW-4 keeps them in
+    # its own package) would otherwise read as K2/L8 with nothing to tell a
+    # caller that it was guessed; whoever needs a width it can trust (the
+    # packing model's calibration) checks out['defaulted'].
+    read = set()
 
     def width(port):
         found = re.search(
@@ -115,20 +132,24 @@ def rtl_widths(rtl_dir):
         bits = width(port)
         if bits:
             out[key] = bits // 8
+            read.add(key)
     for port, key in (('co_cnt', 'in_cnt_bits'), ('de_cnt', 'out_cnt_bits')):
         bits = width(port)
         if bits:
             out[key] = bits
+            read.add(key)
 
     found = re.search(r'NUM_CORES\s*:\s*(?:positive|natural|integer)\s*:=\s*(\d+)', top)
     if found:
         out['cores'] = int(found.group(1))
+        read.add('cores')
 
     found = re.search(
         r'type\s+decompressed_stream\s+is\s+record.*?'
         r'data\s*:\s*byte_array\s*\(\s*0\s+to\s+(\d+)\s*\)', pkg, re.S | re.I)
     if found:
         out['core_line_bytes'] = float(int(found.group(1)) + 1)
+        read.add('core_line_bytes')
 
     # The element stream: count cp_val/li_val style valid flags in the record,
     # by kind, because a copy and a literal do not compete for the same slot.
@@ -140,10 +161,17 @@ def rtl_widths(rtl_dir):
         literals = len(re.findall(r'\bli\d*_val\s*:', body))
         if copies:
             out['copy_slots'] = float(copies)
+            read.add('copy_slots')
         if literals:
             out['literal_slots'] = float(literals)
+            read.add('literal_slots')
         if copies + literals >= 1:
             out['elements_per_transfer'] = float(copies + literals)
+            read.add('elements_per_transfer')
+    out['defaulted'] = [k for k in ('in_bytes', 'in_cnt_bits', 'out_bytes', 'out_cnt_bits',
+                                    'cores', 'core_line_bytes', 'copy_slots',
+                                    'literal_slots', 'elements_per_transfer')
+                        if k not in read]
     return out
 
 
@@ -217,8 +245,12 @@ def usable_cores(cores, shape):
     return round(max(1.0, min(float(cores), float(max(1, shape['chunks'])), by_bytes)), 2)
 
 
-def analyse(counters, cs_tv, widths):
-    """Rates at every stage and which one binds, for one draw."""
+def analyse(counters, cs_tv, widths, probe=None):
+    """Rates at every stage and which one binds, for one draw.
+
+    ``probe`` is probe.summarise()'s result for this draw when the simulation
+    was probed; its verdict lands in report['probe'] (None without one).
+    """
     shape = stimulus_shape(cs_tv)
     cycles = max(1, counters['cycles'])
     out_rate = counters['bytes_out'] / cycles
@@ -271,7 +303,106 @@ def analyse(counters, cs_tv, widths):
         'bytes_per_cycle': round(out_rate, 4),
         'output_idle_pct': round(idle_pct, 1),
         'input_stall_pct': round(stall_pct, 1),
+        'probe': _guarded(probe_verdict, probe),
     }
+
+
+def _note(text):
+    """Where a swallowed probe error goes: stderr, which the loop's log keeps."""
+    try:
+        sys.stderr.write('analyse: %s\n' % text)
+    except Exception:
+        pass
+
+
+def _guarded(func, *args):
+    """func(*args), or None when it raises: the probe is advice, never a crash."""
+    try:
+        return func(*args)
+    except Exception as exc:
+        _note('probe part skipped: %s: %s' % (type(exc).__name__, str(exc)[:200]))
+        return None
+
+
+def _pct(x):
+    return 100.0 * (x or 0.0)
+
+
+def stage_name(stage, stages):
+    """A stage key with its entity: 'datapath_inst/main_dec_inst (vhsnunzip_decoder_long)'."""
+    if not stage:
+        return '(unknown)'
+    ent = (stages or {}).get(stage)
+    return '%s (%s)' % (stage, ent) if ent else stage
+
+
+def probe_verdict(summary):
+    """Which stage the probe names, from one draw's summary or a combined one.
+
+    The rules, in data-flow order; the first match wins:
+      rate          the first stage whose output moves on >= 85% of cycles
+                    and waits on <= 5%, while its input waits on >= 10%. It
+                    runs at its own rate: nothing after it holds it back.
+      backpressure  else the handshake that waits most, if >= 25%: its
+                    consumer holds the pipe back (a tie goes to the most
+                    downstream inner stage, probe.stalled_by).
+      starved       else the first stage whose input is empty on >= 50% of
+                    cycles while nothing after it waits.
+    -> {'limit', 'kind', 'text', 'handshakes', 'cycles', 'stages'} or None.
+    """
+    if not summary or not summary.get('handshakes'):
+        return None
+    hs = summary['handshakes']
+    stages = summary.get('stages') or {}
+    io, order = probe_mod.stage_io(hs)
+    out = None
+    for stage in order:
+        if probe_mod.meets_limit(io[stage]):
+            best = max(io[stage]['out'], key=lambda h: h['moved'])
+            waits = max(io[stage]['in'], key=lambda h: h['blocked'])
+            out = {'limit': stage, 'kind': 'rate',
+                   'text': ('%s is the limit: its output %s moves on %.0f%% of cycles and '
+                            'waits on %.1f%%, while its input %s waits on %.0f%%. Nothing '
+                            'after it holds it back; it runs at its own rate, so only more '
+                            'work per cycle in that stage raises bytes/cycle.'
+                            % (stage_name(stage, stages), best['key'], _pct(best['moved']),
+                               _pct(best['blocked']), waits['key'],
+                               _pct(waits['blocked'])))}
+            break
+    pairs = [h for h in hs if h['kind'] == 'pair']
+    if out is None and pairs:
+        worst = probe_mod.stalled_by(hs)
+        if worst['blocked'] >= 0.25:
+            out = {'limit': worst['consumer'], 'kind': 'backpressure',
+                   'text': ('%s holds the pipe back: %s waits on %.0f%% of cycles for it '
+                            '(moves on %.0f%%).'
+                            % (stage_name(worst['consumer'], stages), worst['key'],
+                               _pct(worst['blocked']), _pct(worst['moved'])))}
+    if out is None:
+        for i, h in enumerate(pairs):
+            if h['empty'] >= 0.50 and all(x['blocked'] < probe_mod.LIMIT_OUT_BLOCKED
+                                          for x in pairs[i + 1:]):
+                out = {'limit': h['consumer'], 'kind': 'starved',
+                       'text': ('%s is starved: its input %s is empty on %.0f%% of cycles '
+                                'and nothing after it waits; what feeds it (%s) is slower.'
+                                % (stage_name(h['consumer'], stages), h['key'],
+                                   _pct(h['empty']), stage_name(h['producer'], stages)))}
+                break
+    if out is None:
+        out = {'limit': None, 'kind': 'none',
+               'text': ('no stage reads as running at its own rate, holding the pipe '
+                        'back, or starved.')}
+    out.update(handshakes=hs, cycles=summary.get('cycles'), stages=stages)
+    if summary.get('window_limit_share'):
+        out['window_limit_share'] = summary['window_limit_share']
+    return out
+
+
+def _combine_probe(reports):
+    probes = [r.get('probe') for r in reports if r.get('probe')]
+    if not probes:
+        return None
+    return probe_verdict(probe_mod.combine(probes))
 
 
 def combine(reports):
@@ -285,7 +416,7 @@ def combine(reports):
     ranked = sorted(votes.items(), key=lambda kv: -len(kv[1]))
     worst = max(reports, key=lambda r: r['binding_utilisation'])
     stale = sorted({n for r in reports for n in r['stale_ceilings']})
-    return {
+    out = {
         'binding': ranked[0][0],
         'split': {name: len(rs) for name, rs in ranked},
         'tightest': worst['binding'],
@@ -294,6 +425,37 @@ def combine(reports):
         'mean_output_idle_pct': round(sum(r['output_idle_pct'] for r in reports)
                                       / len(reports), 1),
     }
+    # Cycle-weighted over the draws, the way the probe counted them.
+    verdict = _guarded(_combine_probe, reports)
+    if verdict:
+        out['probe'] = verdict
+    return out
+
+
+def _probe_lever(combined):
+    """The lever when the output idles and the probe can say why, else None."""
+    verdict = combined.get('probe')
+    if not verdict:
+        return None
+    if verdict['kind'] == 'rate':
+        name = stage_name(verdict['limit'], verdict.get('stages'))
+        return {'lever': 'width',
+                'reason': ("%s moves every cycle and nothing after it blocks; output idle "
+                           "is that stage's rate, not bubbles. Raise the work it does per "
+                           "cycle (more elements per transfer, a wider line or port). %s"
+                           % (name, verdict['text'].split(': ', 1)[-1]))}
+    for h in verdict.get('handshakes') or []:
+        if h['kind'] == 'pair' and h['blocked'] >= 0.10 and h['empty'] >= 0.30:
+            return {'lever': 'latency',
+                    'reason': ('%s both waits (%.0f%% of cycles) and runs empty (%.0f%%): '
+                               'the stages around it stall each other, which is latency '
+                               '(bubbles, stalls between stages, per-chunk overhead). %s'
+                               % (h['key'], _pct(h['blocked']), _pct(h['empty']),
+                                  verdict['text']))}
+    return {'lever': 'width',
+            'reason': ('the output is idle %.0f%% of cycles, but no handshake inside both '
+                       'waits and runs empty, so that idle is not bubbles. %s'
+                       % (combined['mean_output_idle_pct'], verdict['text']))}
 
 
 def lever(combined, wns_ns=None):
@@ -325,6 +487,10 @@ def lever(combined, wns_ns=None):
                 'reason': ('no stage is saturated and worst slack is %.3f ns: '
                            'the clock is what limits throughput.' % wns_ns)}
     if combined['mean_output_idle_pct'] > 20.0:
+        # The probe, when there is one, says whether that idle is bubbles.
+        found = _guarded(_probe_lever, combined)
+        if found:
+            return found
         return {'lever': 'latency',
                 'reason': ('no stage is saturated and the output is idle %.0f%% '
                            'of cycles: something inside is not keeping the '
@@ -374,4 +540,44 @@ def describe(report, name=None):
     lines.append('  output idle %.1f%% of cycles, input stalled %.1f%%; verdict: %s'
                  % (report['output_idle_pct'], report['input_stall_pct'],
                     report['verdict']))
+    extra = _guarded(describe_probe, report.get('probe'))
+    if extra:
+        lines.append(extra)
+    return '\n'.join(lines)
+
+
+# Handshake lines shown at most; DSW-4 has about forty, most of them registers
+# without a ready, and every pair is always shown.
+PROBE_LINES = 24
+
+
+def describe_probe(verdict, max_lines=PROBE_LINES):
+    """The probe's lines for a prompt or a log: one per handshake, then the verdict."""
+    if not verdict or not verdict.get('handshakes'):
+        return ''
+    stages = verdict.get('stages') or {}
+    hs = verdict['handshakes']
+    pairs = [h for h in hs if h['kind'] == 'pair']
+    occ = [h for h in hs if h['kind'] != 'pair']
+    shown = set(id(h) for h in pairs + occ[:max(0, max_lines - len(pairs))])
+    lines = ['  probe inside the design (% of cycles: moved / waiting / empty):']
+    for h in hs:
+        if id(h) not in shown:
+            continue
+        flow = '%s -> %s' % (h['producer'] or '?', h['consumer'] or '?')
+        if h['kind'] == 'pair':
+            lines.append('    %-30s %5.1f / %5.1f / %5.1f   %s'
+                         % (h['key'], _pct(h['moved']), _pct(h['blocked']),
+                            _pct(h['empty']), flow))
+        else:
+            lines.append('    %-30s valid %5.1f, empty %5.1f (no ready)   %s'
+                         % (h['key'], _pct(h['moved']), _pct(h['empty']), flow))
+    if len(shown) < len(hs):
+        lines.append('    (%d more without a ready not shown)' % (len(hs) - len(shown)))
+    lines.append('  probe verdict: %s' % verdict['text'])
+    share = verdict.get('window_limit_share')
+    if share:
+        lines.append('  share of 4096-cycle windows in which a stage is the limit: %s'
+                     % ', '.join('%s %.0f%%' % (stage_name(s, stages), 100.0 * v)
+                                 for s, v in sorted(share.items(), key=lambda kv: -kv[1])))
     return '\n'.join(lines)

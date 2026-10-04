@@ -86,17 +86,61 @@ DEFAULT_CONFIG = {
     # place-and-route ran past an hour and was still converging, and two
     # candidates were lost to a limit that measured the tool, not the design.
     "vivado_timeout_s": 10800,
-    # Scoring.
-    # Scoring: score = -gain% + area_weight x area_growth%. Above
-    # max_area_growth_pct a candidate also needs gain/area >= ei_floor.
-    "area_weight": 0.15,
+    # Scoring: throughput (the goal metric) alone; area is measured and
+    # shown, never scored. A candidate is adoptable from this gain up.
     "min_gain_pct": 0.2,
-    "max_area_growth_pct": 25.0,
-    "ei_floor": 0.2,
     "heldout_share_min": 0.15,
     "overfit_train_pct": 5.0,
     # How long to wait when the model provider says "limit reached".
     "limit_wait_min": 20,
+    # The engineer's roadmap (roadmap.md in the run folder) is advice, not
+    # orders. A step is dropped automatically after this many sessions
+    # declined it with a proof that it is empty or wrong for the design...
+    "roadmap_dispute_limit": 2,
+    # ...or after this many measured results within roadmap_zero_pct of zero.
+    # hacc-real200 spent 12 iterations on one step that sessions had proved
+    # could not move bytes/cycle, because the old rule made it compulsory.
+    "roadmap_zero_limit": 2,
+    "roadmap_zero_pct": 1.0,
+    # The internal probe (agentic/probe.py): counts every inter-stage
+    # handshake in a simulation-only copy of the design, so the profile can
+    # say which stage limits instead of guessing from the ports. It only
+    # reads; this is a kill switch, and window counts (visible draws only)
+    # are per this many cycles (0 = totals only).
+    "probe_enabled": True,
+    "probe_window_cycles": 4096,
+    # The packing model (agentic/packmodel.py). calib_rules is the model a
+    # design outside the i35 and DSW-4 families is calibrated with; widths
+    # is a hand override {"commit", "rules", "K", "L", "N"} that applies only
+    # to that very best commit; jobs is its worker count (~0.5 GB each).
+    "packmodel_calib_rules": "ideal",
+    "packmodel_widths": None,
+    "packmodel_jobs": 3,
+    # Build tracks: an architecture change too big for one session (the
+    # hand-built DSW-4 took a design plus about four build steps, each of
+    # which measured about zero until the last), built step by step on its
+    # own branch while the other slot runs normal candidates. A kill switch:
+    "tracks_enabled": True,
+    # Failed attempts on one step before the track is abandoned.
+    "track_max_attempts_per_step": 2,
+    # Iterations one track may use in all, re-measurements included.
+    "track_max_iterations": 8,
+    # Never-measured results in a row on one step (simulators killed, host
+    # away) before the next one counts as a failed attempt, so a step that
+    # can never be measured cannot hold the slot for ever.
+    "track_max_never_measured": 2,
+    # A non-final throughput step passes at (100 - this)% of its prediction.
+    "track_bpc_tolerance_pct": 10.0,
+    # The longest step list a design session may write.
+    "track_max_steps": 6,
+    # Synthesise non-final steps too, for an f_max reading that is shown and
+    # never judged. Off: a step is judged by simulation, and a place-and-route
+    # costs 15-20 minutes on the shared host.
+    "track_synth_steps": False,
+    # A track step builds one module and its unit test against golden data;
+    # that does not fit a normal session's budget and hour.
+    "track_session_budget_usd": 40.0,
+    "track_session_timeout_min": 120,
 }
 
 

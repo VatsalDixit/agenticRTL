@@ -210,7 +210,11 @@ class Store(object):
                 abs_ = c.get('absolute') or {}
                 point = {'i': i, 'label': c.get('label'), 'id': c.get('id'),
                          'adopted': bool(c.get('adopted')),
-                         'outcome': c.get('outcome')}
+                         'outcome': c.get('outcome'),
+                         # A track step: drawn hollow and apart, and never
+                         # part of the best series unless the track is
+                         # adopted (then best_after carries it).
+                         'track': bool(c.get('track'))}
                 # Absolutes were recorded from the campaign after this was
                 # written; for older runs rebuild them from the percentages
                 # against the design this candidate started from.
@@ -520,6 +524,12 @@ class Chart(tk.Canvas):
                                  fill=C['faint'], font=self.f['tiny'], tags=tag)
                 continue
             yv = py(v)
+            if p.get('track'):
+                # A hollow square: a step of a build track, judged against its
+                # own prediction rather than rejected.
+                self.create_rectangle(x - 3, yv - 3, x + 3, yv + 3, outline=self.colour,
+                                      fill=C['panel'], width=1, tags=tag)
+                continue
             self.create_oval(x - 3, yv - 3, x + 3, yv + 3, outline=C['faint'],
                              fill=C['panel'], width=1, tags=tag)
 
@@ -690,6 +700,7 @@ class Dashboard(tk.Tk):
         legend.grid(row=len(specs), column=0, sticky='ew')
         tk.Label(legend, text='line + filled dot: the design the loop kept     '
                               'hollow dot: a candidate it measured and rejected     '
+                              'hollow square: a build-track step     '
                               'dashed line: the baseline',
                  bg=C['bg'], fg=C['muted'], font=self.f['tiny']).pack(side='left')
 
@@ -826,7 +837,8 @@ class Dashboard(tk.Tk):
             after = it.get('best_after') or {}
             cs = []
             for c in it.get('candidates', []):
-                mark = '+' if c.get('adopted') else '-'
+                # 't' marks a track step: a part of a build, not a rejection.
+                mark = '+' if c.get('adopted') else ('t' if c.get('track') else '-')
                 cs.append('%s%s' % (mark, (c.get('id') or c.get('label') or '?')[:26]))
             self.table.insert('', 'end', tags=('win' if win else 'none',), values=(
                 it.get('iteration'),

@@ -49,7 +49,7 @@ graph TD
     W1 --> M[4. measure every candidate<br/>oracle on every byte, bytes/cycle, f_max, area]
     W2 --> M
     W3 --> M
-    M --> S[5. select<br/>score = -gain% + 0.15 x area growth%<br/>best adoptable moves the run branch]
+    M --> S[5. select<br/>score = -gain%<br/>best adoptable moves the run branch]
     S --> L[6. learn<br/>group-relative advantage -> skill library]
     L --> R[7. record<br/>state.json, report.html, loop.log]
     R --> C{target met or<br/>iterations done?}
@@ -227,14 +227,16 @@ checkout is never modified by the loop.
    added 3.6% there. Simulating whole row groups takes about
    18 minutes a candidate on the original design, so synthesis runs
    alongside the long draws, after the small ones have passed.
-3. Score = -gain% + 0.15 x area growth%. Area is priced, not capped:
-   adopted only if gain >= 0.2% (under Vivado, a gain below 1% counts only
-   if bytes/cycle carries it: re-placing a design moves f_max by about a
-   megahertz on its own), and when area grows more than 25% the
-   efficiency (gain per percent of area) must be at least 0.2. A first
-   version added a heavy penalty above 10% area growth; it rejected a +28.9%
-   throughput widening at +91% area in favour of +3% at +10%, which is the
-   wrong trade for a throughput goal.
+3. Score = -gain% on the goal metric; throughput alone decides. Area is
+   measured and shown (LUTs, registers, BRAM, URAM) but never scored. A
+   candidate is adoptable if gain >= 0.2% (under Vivado, a gain below 1%
+   counts only if bytes/cycle carries it: re-placing a design moves f_max by
+   about a megahertz on its own). Area used to be priced, with an efficiency
+   floor above 25% growth; that rule rejected exactly the widening a
+   single-stream throughput goal needs (the hand-built DSW-4 reached +228.7%
+   at about 8x the LUTs), and one decompressor fits the U55C many times
+   over, so v3 removed it. Records from before keep their `too_expensive`
+   outcome and are shown with their throughput gain.
 4. Among adoptable candidates the lowest score wins and the run branch
    moves to its commit.
 

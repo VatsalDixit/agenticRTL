@@ -21,6 +21,14 @@ The loop always measures with ITS OWN copy of the testbench, the RAM stand-in
 and the scripts (this folder), never with copies inside a candidate's
 worktree. Only the candidate's rtl/ folder is taken from the worktree.
 
+Every simulation also runs with the internal probe (agentic/probe.py): a
+simulation-only copy of rtl/ with one read-only counting process per
+architecture, which says how often each stage handshake moves, waits or
+idles. The candidate's rtl/ is never altered, and the probe never changes a
+score: bytes, cycles and the oracle come from the testbench exactly as
+before. When nothing can be probed, or the probe copy does not compile, the
+design is simulated as it is and the port counters are all there is.
+
 Usage:
     python agentic/measure.py [--rtl DIR] [--no-synth] [--json FILE]
 """
@@ -40,6 +48,7 @@ sys.path.insert(0, KIT)
 import analyse                                   # noqa: E402
 import hacc                                      # noqa: E402
 import oracle                                    # noqa: E402
+import probe as probe_mod                        # noqa: E402
 import stim                                      # noqa: E402
 from tools import (CONFIG, ROOT, eda_shell, geomean, read_json,  # noqa: E402
                    shell_path, write_json)
@@ -80,6 +89,31 @@ class MeasureError(RuntimeError):
 class HostUnreachable(MeasureError):
     """The synthesis host could not be reached, even after waiting for it.
     Says nothing about the design."""
+
+
+class ProbeBuildError(MeasureError):
+    """The probe copy of the design did not compile or elaborate. Says nothing
+    about the design: it is measured again with less probe, then without."""
+
+    def __init__(self, message, log=''):
+        MeasureError.__init__(self, message)
+        self.log = log
+
+
+# Set by the loop when a clean re-run disagreed with a probed one (it should
+# never happen; the probe only reads). While set, nothing is probed.
+PROBE_OFF_REASON = None
+
+# The probe copy measure() made, by (rtl dir, build dir), for its simulate()
+# calls to share. A registry rather than an argument, so simulate() keeps
+# the signature its callers and their stand-ins use; candidates measured at
+# once have their own build dirs and never see each other's entry.
+_SHARED_PROBE = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def _probe_key(rtl_dir, build_dir):
+    return (os.path.abspath(rtl_dir), os.path.abspath(build_dir))
 
 
 def corpus_dir(root=None):
@@ -126,9 +160,11 @@ def os_killed(rc, deadlock):
     return rc == 137 and not deadlock
 
 
-def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
+def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None, probed=False):
     """Compile once and simulate ``draws``: {draw dir as the shell sees it:
-    (rc, deadlock)}. ``jobs`` overrides how many simulate at once."""
+    (rc, deadlock)}. ``jobs`` overrides how many simulate at once. With
+    ``probed`` (rtl_dir is the probe copy) a build failure raises
+    ProbeBuildError, so the caller can try again without the probe."""
     # Longest first: the round ends when its last simulator does, and a long
     # draw started last would run on alone after the others had finished.
     ordered = sorted(draws, key=lambda e: -draw_bytes(e))
@@ -146,6 +182,9 @@ def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
                            % (timeout or CONFIG['sim_timeout_s']))
     if 'COMPILE_FAIL' in text or 'ELAB_FAIL' in text:
         tail = [l for l in text.splitlines() if l.strip()]
+        if probed:
+            raise ProbeBuildError('the probe copy does not compile:\n'
+                                  + '\n'.join(tail[-25:]), log=text)
         raise MeasureError('the design does not compile:\n' + '\n'.join(tail[-25:]))
     if 'ELAB_OK' not in text:
         raise MeasureError('unexpected simulation output:\n' + text[-1500:])
@@ -157,14 +196,125 @@ def _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=None):
     return status
 
 
-def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None):
+def prepare_probe(rtl_dir, build_dir):
+    """The probe copy of ``rtl_dir`` for one measurement, or the plain folder.
+
+    Returns a dict that the simulate() calls of one measurement share, so the
+    quick and the slow draws are probed alike, and a fallback made by the
+    first call holds for the second:
+      rtl          the folder to simulate
+      probed       whether that folder carries the probe
+      instrumented whether a probe copy was made at all
+      status       'on', 'off (...)', 'partial (skipped ...)' or 'fallback: ...'
+    Never raises: anything that goes wrong here means "no probe".
+    """
+    prep = {'rtl': rtl_dir, 'plain': rtl_dir, 'probed': False, 'instrumented': False,
+            'status': 'off', 'info': None, 'exclude': [],
+            'out': os.path.join(build_dir, 'probe_rtl'),
+            'window': int(CONFIG.get('probe_window_cycles', probe_mod.WINDOW) or 0)}
+    if not CONFIG.get('probe_enabled', True):
+        prep['status'] = 'off (probe_enabled is false in the config)'
+        return prep
+    if PROBE_OFF_REASON:
+        prep['status'] = 'off (%s)' % PROBE_OFF_REASON
+        return prep
+    try:
+        info = probe_mod.instrument(rtl_dir, prep['out'], window=prep['window'], top=TOP)
+    except Exception as exc:
+        prep['status'] = 'fallback: instrumenting failed (%s: %s)' % (
+            type(exc).__name__, str(exc)[:200])
+        return prep
+    if not info:
+        prep['status'] = 'off (no handshakes found in the RTL)'
+        return prep
+    prep.update(rtl=prep['out'], probed=True, instrumented=True, info=info, status='on')
+    return prep
+
+
+def _private_draws(draws, build_dir, windows=False):
+    """This measurement's own copies of the draw folders, ready to simulate.
+
+    Every measurement simulates in its own copies. Several candidates are
+    measured at once, and the testbench writes perf.txt/out.hex into the
+    folder it runs in, so a shared folder would let one candidate's results
+    overwrite another's. Old probe files are cleared, and the window marker
+    (probe.MARKER) is put only into VISIBLE draw folders: windows show where
+    in a draw a stage limits, which must never be written for a held-out one.
+    """
+    private = []
+    for draw, ddir, chunks in draws:
+        mine = os.path.join(build_dir, 'draws', draw.name)
+        os.makedirs(mine, exist_ok=True)
+        shutil.copyfile(os.path.join(ddir, 'cs.tv'), os.path.join(mine, 'cs.tv'))
+        _reset_probe_files(draw, mine, windows)
+        private.append((draw, mine, chunks))
+    return private
+
+
+def _reset_probe_files(draw, ddir, windows):
+    probe_mod.clear(ddir)
+    if windows and getattr(draw, 'visible', False):
+        with open(os.path.join(ddir, probe_mod.MARKER), 'w') as fil:
+            fil.write('windows\n')
+
+
+def _run_probed(prep, generics, draws, build_dir, timeout, jobs):
+    """_run_draws on the probe copy, falling back when only the probe broke it.
+
+    Returns (status, probed) where probed says whether these draws ran with
+    the probe. Only a build failure of the probe copy is retried: once with
+    the architectures the compiler named left unprobed, then on the plain
+    rtl/. A timeout or any other error is the design's and propagates; the
+    probe only reads, and its cost in simulation time is small.
+    """
+    if not prep.get('probed'):
+        return _run_draws(prep['plain'], build_dir, generics, draws, timeout,
+                          jobs=jobs), False
+    try:
+        return _run_draws(prep['rtl'], build_dir, generics, draws, timeout,
+                          jobs=jobs, probed=True), True
+    except ProbeBuildError as exc:
+        first = exc
+    bad = probe_mod.culprits(first.log, prep['info'])
+    exclude = sorted(set(prep['exclude']) | set(bad))
+    info = None
+    if exclude and set(exclude) != set((prep['info'] or {}).get('arches') or []):
+        try:
+            info = probe_mod.instrument(prep['plain'], prep['out'], window=prep['window'],
+                                        exclude=exclude, top=TOP)
+        except Exception:
+            info = None
+    if info:
+        prep.update(info=info, exclude=exclude,
+                    status='partial (skipped %s: did not compile with the probe)'
+                    % ', '.join(exclude))
+        for _d, ddir, _c in draws:
+            probe_mod.clear_counts(ddir)
+        try:
+            return _run_draws(prep['rtl'], build_dir, generics, draws, timeout,
+                              jobs=jobs, probed=True), True
+        except ProbeBuildError:
+            pass
+    line = next((l.strip() for l in (first.log or '').splitlines()
+                 if 'error' in l.lower()), 'no error line')
+    prep.update(rtl=prep['plain'], probed=False,
+                status='fallback: the probe copy did not compile; measured without the '
+                       'probe (%s)' % line[:200])
+    for _d, ddir, _c in draws:
+        probe_mod.clear_counts(ddir)
+    return _run_draws(prep['plain'], build_dir, generics, draws, timeout, jobs=jobs), False
+
+
+def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None, probe_rtl=None):
     """Run every draw against one rtl/ folder. Returns per-draw results.
 
     ``draws`` is [(draw, dir, chunks), ...]. The result for each draw is a
     dict with oracle_pass, bytes_per_cycle, counters, and a problem string
     when something went wrong. Raises MeasureError when the design does not
     even compile. ``jobs`` is how many draws simulate at once (default: the
-    script's own, 3).
+    script's own, 3). ``probe_rtl`` is prepare_probe()'s result, shared by
+    the calls of one measurement; without it this call prepares its own (as
+    check.py's does), so the probe is there on invented data too.
     """
     if widths.get('unresolved'):
         raise MeasureError('cannot read the width of %s from the RTL: declare '
@@ -178,19 +328,15 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None):
         raise MeasureError('co_data is %d bytes wide; the harness needs a '
                            'multiple of 8' % widths['in_bytes'])
 
-    # Every measurement simulates in its own copies of the draw folders.
-    # Several candidates are measured at once, and the testbench writes
-    # perf.txt/out.hex into the folder it runs in, so a shared folder would
-    # let one candidate's results overwrite another's.
-    private = []
-    for draw, ddir, chunks in draws:
-        mine = os.path.join(build_dir, 'draws', draw.name)
-        os.makedirs(mine, exist_ok=True)
-        shutil.copyfile(os.path.join(ddir, 'cs.tv'), os.path.join(mine, 'cs.tv'))
-        private.append((draw, mine, chunks))
-    draws = private
+    if probe_rtl is None:
+        with _SHARED_LOCK:
+            probe_rtl = _SHARED_PROBE.get(_probe_key(rtl_dir, build_dir))
+    prep = probe_rtl if probe_rtl is not None else prepare_probe(rtl_dir, build_dir)
+    draws = _private_draws(draws, build_dir,
+                           windows=bool(prep.get('probed') and prep.get('window')))
 
-    status = _run_draws(rtl_dir, build_dir, generics, draws, timeout, jobs=jobs)
+    status, probed = _run_probed(prep, generics, draws, build_dir, timeout, jobs)
+    ran_probed = dict((shell_path(d[1]), probed) for d in draws)
     # A simulator the operating system killed has said nothing about the
     # design, so those draws are run again, one at a time, before anything is
     # read into them. It is not hypothetical: with two cores each simulator
@@ -198,7 +344,33 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None):
     # failing correctness because the out-of-memory killer took theirs.
     killed = [d for d in draws if os_killed(*status.get(shell_path(d[1]), (99, False)))]
     if killed:
-        status.update(_run_draws(rtl_dir, build_dir, generics, killed, timeout, jobs=1))
+        for _d, ddir, _c in killed:
+            probe_mod.clear_counts(ddir)
+        again, probed = _run_probed(prep, generics, killed, build_dir, timeout, 1)
+        status.update(again)
+        ran_probed.update((shell_path(d[1]), probed) for d in killed)
+    # A probed draw that failed without a verdict of its own (an error exit,
+    # no perf.txt, no deadlock) is run once more on the plain design, in case
+    # the probe's file writes were what failed. A wrong output or a deadlock
+    # is never rerun: a probe that only reads cannot cause either, and a
+    # failing design should not cost a second simulation.
+    suspect = []
+    for entry in draws:
+        key = shell_path(entry[1])
+        rc, deadlock = status.get(key, (99, False))
+        if (ran_probed.get(key) and rc != 0 and not deadlock and not os_killed(rc, deadlock)
+                and not os.path.exists(os.path.join(entry[1], 'perf.txt'))):
+            suspect.append(entry)
+    if suspect:
+        for _d, ddir, _c in suspect:
+            probe_mod.clear(ddir)
+            for name in ('perf.txt', 'out.hex', 'sim.log'):
+                try:
+                    os.remove(os.path.join(ddir, name))
+                except OSError:
+                    pass
+        status.update(_run_draws(rtl_dir, build_dir, generics, suspect, timeout, jobs=jobs))
+        ran_probed.update((shell_path(d[1]), False) for d in suspect)
 
     results = []
     for draw, ddir, chunks in draws:
@@ -238,20 +410,29 @@ def simulate(rtl_dir, build_dir, draws, widths, timeout=None, jobs=None):
                                                / max(1, counters['cycles']), 1)
                 rec['input_stall_pct'] = round(100.0 * counters.get('co_stall', 0)
                                                / max(1, counters['cycles']), 1)
+                if ran_probed.get(shell_path(ddir)):
+                    try:                       # advisory: never a verdict
+                        rec['probe'] = probe_mod.summarise(probe_mod.read(ddir))
+                    except Exception as exc:
+                        rec['probe'] = None
+                        rec['probe_error'] = str(exc)[:200]
                 try:
-                    rec['analysis'] = analyse.analyse(counters, cs_tv, widths)
+                    rec['analysis'] = analyse.analyse(counters, cs_tv, widths,
+                                                      probe=rec.get('probe'))
                 except Exception as exc:       # the profile is advisory only
                     rec['analysis'] = None
                     rec['analysis_error'] = str(exc)[:200]
         results.append(rec)
         # A row group leaves about 100 MB of text per candidate, and the
         # counters and the verdict are all that is kept. The stimulus is a
-        # copy; a wrong output stays for whoever wants to look at it.
+        # copy; a wrong output stays for whoever wants to look at it. The
+        # probe's window files are read by now; its totals stay.
         for name in ('cs.tv',) + (('out.hex',) if rec['oracle_pass'] else ()):
             try:
                 os.remove(os.path.join(ddir, name))
             except OSError:
                 pass
+        probe_mod.clear(ddir, keep_totals=True)
     return results
 
 
@@ -415,6 +596,15 @@ def summarize(sim_results, synth_metrics):
     out['bytes_per_cycle_visible'] = round(geomean(visible), 4) if visible else None
     reports = [r.get('analysis') for r in sim_results if r['scored']]
     out['profile'] = analyse.combine(reports)
+    try:
+        # Totals over the scored draws, cycle-weighted: no windows and no
+        # per-draw names, so it may be shown wherever the profile is.
+        combined = probe_mod.combine([r.get('probe') for r in sim_results
+                                      if r['scored'] and r.get('probe')])
+        if combined:
+            out['probe'] = combined
+    except Exception as exc:               # advisory: drop it, keep the numbers
+        sys.stderr.write('measure: probe totals dropped: %s\n' % str(exc)[:200])
     if synth_metrics:
         out.update(synth_metrics)
         if out['bytes_per_cycle']:
@@ -459,6 +649,13 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
     slow = [d for d in draws if draw_bytes(d) > QUICK_DRAW_BYTES]
     t_sim = time.time()
     box, worker = {}, None
+    # One probe copy for the whole measurement, shared by both simulate()
+    # calls: the quick and the slow draws are probed alike, and a fallback
+    # the first call had to make holds for the second.
+    prep = prepare_probe(rtl_dir, sim_dir)
+    key = _probe_key(rtl_dir, sim_dir)
+    with _SHARED_LOCK:
+        _SHARED_PROBE[key] = prep
     try:
         sims = simulate(rtl_dir, sim_dir, quick, widths, jobs=jobs) if quick else []
         if all(r['oracle_pass'] for r in sims):
@@ -473,7 +670,11 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
         # A synthesis already started is left to finish on its own; the
         # design is rejected whatever it reports.
         return {'oracle_pass': False, 'error': str(exc), 'widths': widths,
-                'draws': [], 'sim_seconds': round(time.time() - t_sim, 1)}
+                'draws': [], 'sim_seconds': round(time.time() - t_sim, 1),
+                'probe_status': prep['status']}
+    finally:
+        with _SHARED_LOCK:
+            _SHARED_PROBE.pop(key, None)
     sim_seconds = round(time.time() - t_sim, 1)
     rank = dict((d.name, i) for i, (d, _p, _c) in enumerate(draws))
     sims.sort(key=lambda r: rank.get(r['name'], len(rank)))
@@ -487,6 +688,7 @@ def measure(rtl_dir, work_dir, draws, synth=True, log=None, jobs=None):
     out = summarize(sims, synth_metrics)
     out['widths'] = widths
     out['sim_seconds'] = sim_seconds
+    out['probe_status'] = prep['status']
     killed = [r['name'] for r in sims if r.get('os_killed')]
     if killed:
         # Not a correctness failure: the measurement itself did not happen.

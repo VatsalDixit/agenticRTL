@@ -123,6 +123,46 @@ def _timing_cell(timing):
     return '<br>'.join(bits) or '-'
 
 
+def _cand_class(c):
+    """A track step is a part of a build, judged against its own prediction:
+    a step that passed at -1% is not a bad candidate, so it gets its own
+    colour rather than the rejected one."""
+    if c.get('adopted'):
+        return 'win'
+    if c.get('track'):
+        return 'track'
+    return 'bad' if c.get('outcome') not in ('candidate', 'adopted') else ''
+
+
+def _tracks_table(state):
+    """One row per track step: kind, status, prediction and the measured
+    bytes/cycle of each attempt."""
+    rows = []
+    for trk in state.get('tracks') or []:
+        head = ('<tr class="trackhead"><td colspan="5"><b>%s</b> (%s) &mdash; %s%s; '
+                'opened at i%s, %s iterations used</td></tr>'
+                % (html.escape(str(trk.get('id'))), html.escape(str(trk.get('status'))),
+                   html.escape((trk.get('goal') or '')[:200]),
+                   (': ' + html.escape((trk.get('reason') or '')[:240]))
+                   if trk.get('reason') else '',
+                   trk.get('opened_iteration'), trk.get('iterations_used')))
+        rows.append(head)
+        for st in trk.get('steps') or []:
+            atts = '<br>'.join('i%s %s: %s%s' % (
+                a.get('iteration'), html.escape(str(a.get('label'))),
+                html.escape(str(a.get('outcome'))),
+                (' %.3f B/cycle' % a['measured_bpc'])
+                if isinstance(a.get('measured_bpc'), (int, float)) else '')
+                for a in st.get('attempts') or []) or '-'
+            rows.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+                st.get('n'), html.escape(str(st.get('kind'))), html.escape(str(st.get('status'))),
+                _num(st.get('predicted_bpc'), '%.2f'), atts))
+    if not rows:
+        return ''
+    return ('<h2>Tracks</h2><table class="it"><tr><th>step</th><th>kind</th><th>status</th>'
+            '<th>predicted B/cycle</th><th>attempts</th></tr>%s</table>' % ''.join(rows))
+
+
 def render_html(state):
     base = state.get('baseline') or {}
     best = (state.get('best') or {}).get('metrics') or {}
@@ -140,7 +180,7 @@ def render_html(state):
         for c in it.get('candidates', []):
             m = c.get('measured') or {}
             cands.append('<div class="cand %s"><b>%s</b> %s &mdash; %s%s</div>' % (
-                'win' if c.get('adopted') else ('bad' if c.get('outcome') not in ('candidate', 'adopted') else ''),
+                _cand_class(c),
                 html.escape(c.get('label', '')), html.escape(c.get('id') or 'no proposal'),
                 html.escape(c.get('outcome', '')),
                 (' (throughput %s, area %s, predicted %s)' % (
@@ -180,10 +220,12 @@ def render_html(state):
     css = ('<style>body{font-family:system-ui,sans-serif;margin:24px;max-width:1100px}'
            'table{border-collapse:collapse;margin:12px 0}td,th{border:1px solid #ccc;padding:4px 8px;font-size:13px;vertical-align:top}'
            '.cand{margin:2px 0;padding:2px 4px;border-radius:3px;background:#f3f3f3}.cand.win{background:#d8f5dc}.cand.bad{background:#f8e0e0}'
+           '.cand.track{background:#e2ecf8}.trackhead td{background:#f3f6fb}'
            'code{background:#eee;padding:1px 4px}</style>')
-    return ('<!doctype html><html><head><meta charset="utf-8"><title>agentic run %s</title>%s</head><body>%s%s%s%s%s'
+    return ('<!doctype html><html><head><meta charset="utf-8"><title>agentic run %s</title>%s</head><body>%s%s%s%s%s%s'
             '<p style="color:#777;font-size:12px">rendered %s</p></body></html>'
-            % (html.escape(state.get('run', '')), css, head, status_line, summary, charts, table, now_iso()))
+            % (html.escape(state.get('run', '')), css, head, status_line, summary, charts, table,
+               _tracks_table(state), now_iso()))
 
 
 def write_report(state, path):

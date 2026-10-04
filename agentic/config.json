@@ -19,11 +19,11 @@
   "sim_timeout_s": 10800,
   "synth_timeout_s": 2400,
   "vivado_timeout_s": 10800,
-  "area_weight": 0.15,
   "min_gain_pct": 0.2,
-  "max_area_growth_pct": 25.0,
-  "ei_floor": 0.2,
   "heldout_share_min": 0.15,
   "overfit_train_pct": 5.0,
-  "limit_wait_min": 20
+  "limit_wait_min": 20,
+  "tracks_enabled": true,
+  "track_session_budget_usd": 40.0,
+  "track_session_timeout_min": 120
 }
