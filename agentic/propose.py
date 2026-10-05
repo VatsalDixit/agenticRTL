@@ -891,10 +891,8 @@ THIS SESSION IS ONE STEP OF A BUILD TRACK
   The whole design must still pass `python agentic/check.py` when you
   finish: if the new module is not complete yet, wire it in behind the old
   path or leave it unconnected.
-  THE SPEC (docs/track-@@ID@@/SPEC.md):
-@@SPEC@@
-  NOTES FROM EARLIER STEPS:
-@@NOTES@@
+  The spec (docs/track-@@ID@@/SPEC.md) and the notes from the earlier steps
+  are at the start of your first message.
   If the spec is wrong for this step, write the correction in
   docs/track-@@ID@@/STEP-@@N@@.md and say so in PROPOSAL.json. The step's kind
   and prediction are fixed by the track; you may add "predicted_bpc" with
@@ -968,14 +966,38 @@ def track_system_text(track):
     return _fill(TRACK_BRIEF, {
         'ID': tid, 'GOAL': track.get('goal', ''), 'BRANCH': track.get('branch', ''),
         'N': track.get('n'), 'M': track.get('m'), 'KIND': track.get('kind'),
-        'TEXT': track.get('text', ''), 'JUDGED': judged,
-        'SPEC': indent(track.get('spec')), 'NOTES': indent(track.get('prev_notes'))})
+        'TEXT': track.get('text', ''), 'JUDGED': judged})
+
+
+# The spec and the earlier steps' notes go in the first message, not in the
+# system prompt. The SDK passes the system prompt on the command line, and on
+# Windows a command line is capped at 32,767 characters: the general brief, a
+# 12k spec and 6k of notes went over it at a track's step 4, and Windows
+# reported the failed launch as "Claude Code not found". The first message
+# goes over stdin, which has no such cap.
+TRACK_CONTEXT = """THE TRACK'S SPEC (docs/track-@@ID@@/SPEC.md):
+@@SPEC@@
+
+NOTES FROM THE EARLIER STEPS OF THIS TRACK:
+@@NOTES@@
+
+"""
+
+
+def track_context_text(track):
+    """The spec and earlier notes a build step needs, for its first message."""
+    indent = lambda text: '\n'.join('    ' + ln for ln in (text or '(none)').splitlines())
+    return _fill(TRACK_CONTEXT, {'ID': track.get('id', ''),
+                                 'SPEC': indent(track.get('spec')),
+                                 'NOTES': indent(track.get('prev_notes'))})
 
 
 def build_user_prompt(ctx, direction, others, resumed=False):
     """The measured state plus this candidate's assignment."""
     lines = []
     track = direction.get('track') or None
+    if track and track.get('kind') != 'design':
+        lines.append(track_context_text(track))
     if resumed and track and track.get('kind') == 'design':
         lines.append(DESIGN_RESUME_PREFIX.replace('@@ID@@', track.get('id', '')))
     elif resumed:

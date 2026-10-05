@@ -606,6 +606,16 @@ def _run200_state():
         return json.load(fil)
 
 
+def _run200_roadmap():
+    """hacc-real200's v2 roadmap: roadmap.md, or the copy it was retired to
+    when v3 resumed the run without it."""
+    for name in ('roadmap.md', 'roadmap.md.v2-retired'):
+        path = os.path.join(RUN200, name)
+        if os.path.isfile(path):
+            return path
+    return os.path.join(RUN200, 'roadmap.md')
+
+
 def _vivado(bpc, gbps, luts):
     return {'throughput_gbps': gbps, 'bytes_per_cycle': bpc, 'f_max_mhz': 250.0,
             'area': luts, 'area_unit': 'LUTs', 'synth_backend': 'hacc'}
@@ -822,7 +832,7 @@ def test_roadmap_parses_steps_and_models():
     specs = loop.roadmap_specs(tagged)
     check('v3 roadmap: only tags the packing model accepts are sent to it, once each',
           specs == ['K4/L32/N32', 'K4/B32/N32 rules=dsw4'], str(specs))
-    real = os.path.join(RUN200, 'roadmap.md')
+    real = _run200_roadmap()
     if os.path.isfile(real):
         with open(real, encoding='utf-8') as fil:
             _pre, got = loop.parse_roadmap(fil.read())
@@ -983,9 +993,12 @@ def test_old_state_without_roadmap_or_tracks_loads():
     dst = os.path.join(KTEST, 'state.json')
     shutil.copyfile(src, dst)
     state = loop.read_json(dst)
+    # The live run has had a roadmap record since v3 resumed it; strip it to
+    # stand for the pre-v3 state this check is about.
+    state.pop('roadmap', None)
     had = 'roadmap' in state
     loop.state_defaults(state)
-    with open(os.path.join(RUN200, 'roadmap.md'), encoding='utf-8') as fil:
+    with open(_run200_roadmap(), encoding='utf-8') as fil:
         _pre, steps = loop.parse_roadmap(fil.read())
     loop.sync_roadmap_state(state, steps, state['best']['metrics'].get('bytes_per_cycle'), {})
     recorded = sorted(r['name'] for r in state['baseline']['draws'])
@@ -1479,6 +1492,9 @@ def test_old_state_loads_with_tracks():
     src = os.path.join(RUN200, 'state.json')
     mtime = os.path.getmtime(src)
     state = copy.deepcopy(state)
+    # The live run has had tracks since v3 resumed it; strip them to stand for
+    # the pre-v3 state this check is about.
+    state.pop('tracks', None)
     had = 'tracks' in state
     run = _FakeRun(state)
     loop.state_defaults(state)
@@ -2249,14 +2265,27 @@ def test_track_sessions_get_their_own_limits():
     text = propose.track_system_text(tr)
     design = propose.track_system_text(dict(tr, kind='design', base_bpc=9.7, why='W',
                                             planned=[{'kind': 'golden', 'text': 'P1'}]))
-    check('v3 tracks: the step brief carries the step, its prediction, the spec, the notes '
-          'and the unit-test command; the design brief the planned steps',
+    first = propose.build_user_prompt(
+        {'goal_text': 'g', 'iteration': 1, 'max_iters': 2, 'progress_text': 'p',
+         'state_text': 's', 'profile_text': 'pr', 'lever': {'lever': 'w', 'reason': 'r'},
+         'skills_text': 'sk', 'history_text': ''},
+        {'focus': 'f', 'hypothesis': 'h', 'track': tr}, [])
+    check('v3 tracks: the step brief carries the step, its prediction and the unit-test '
+          'command, the first message the spec and the notes; the design brief the '
+          'planned steps',
           'step (3 of 4, kind throughput): the back end' in text
           and 'Predicted bytes/cycle after this step: 13.00' in text and '90%' in text
-          and 'SPECTEXT' in text and 'NOTESTEXT' in text
+          and 'SPECTEXT' not in text and 'NOTESTEXT' not in text
+          and 'SPECTEXT' in first and 'NOTESTEXT' in first and '@@' not in first
           and 'python agentic/check.py --unit <name>' in text and '@@' not in text
           and 'Do not change rtl/' in design and 'P1' in design and '9.70' in design
           and '@@' not in design, text[:300])
+    big = dict(tr, spec='S' * 12000, prev_notes='N' * 6000)
+    sysprompt = propose.SYSTEM_BRIEF + propose.track_system_text(big)
+    check('v3 tracks: a full spec and full notes stay out of the system prompt, which '
+          'the SDK passes on the command line (Windows caps it at 32,767 characters; '
+          'i58 failed to launch at about 31k plus escapes)',
+          len(sysprompt) < 16000 and 'S' * 100 not in sysprompt, str(len(sysprompt)))
     golden = propose.track_system_text(dict(tr, kind='golden'))
     check('v3 tracks: a golden step is told it is checked for correctness only',
           'correctness only' in golden and 'Predicted' not in golden)
