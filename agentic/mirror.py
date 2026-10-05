@@ -96,7 +96,7 @@ def main():
     os.makedirs(here, exist_ok=True)
     remote_dir = '%s/.agentic/runs/%s' % (args.remote.rstrip('/'), args.run)
     print('mirroring %s:%s into %s every %g s (Ctrl-C to stop)'
-          % (args.host, remote_dir, here, args.every))
+          % (args.host, remote_dir, here, args.every), flush=True)
 
     gui = None
     since = 0
@@ -114,15 +114,15 @@ def main():
                  'checked': now, 'state_mtime': since}, indent=1).encode())
             if last_ok is None or now - last_ok > 600:
                 print('%s  host reached; loop %s' % (time.strftime('%H:%M:%S'),
-                                                     'running' if alive else 'NOT running'))
+                                                     'running' if alive else 'NOT running'), flush=True)
             last_ok = now
         except Exception as exc:     # the VPN dropped, the laptop woke up: try again
-            print('%s  no copy: %s' % (time.strftime('%H:%M:%S'), str(exc)[:200]))
+            print('%s  no copy: %s' % (time.strftime('%H:%M:%S'), str(exc)[:200]), flush=True)
         if args.gui and gui is None and os.path.exists(os.path.join(here, 'state.json')):
             gui = subprocess.Popen([sys.executable, os.path.join(KIT, 'gui.py'),
                                     '--runs-dir', MIRRORS, '--run', args.run])
         if gui is not None and gui.poll() is not None:
-            print('dashboard closed; mirror stopped')
+            print('dashboard closed; mirror stopped', flush=True)
             return 0
         try:
             time.sleep(args.every)
