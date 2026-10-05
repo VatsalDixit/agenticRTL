@@ -441,6 +441,63 @@ GIT_FORMS_TEXT = """\
   git checkout -- rtl[/<file>]        (undo your own edits)"""
 
 
+_REV_TOKEN = re.compile(r'^%s$' % _REV)
+
+
+def git_revs(cmd):
+    """The revisions a permitted git command names (REV, REV:PATH, A..B).
+    Options, '--' and the pathspecs after it are not revisions."""
+    words = cmd.split()[2:]
+    if '--' in words:
+        words = words[:words.index('--')]
+    revs = []
+    for word in words:
+        if word.startswith('-') or word.isdigit():
+            continue
+        word = word.split(':', 1)[0]
+        for rev in word.split('..'):
+            if rev and _REV_TOKEN.match(rev):
+                revs.append(rev)
+    return revs
+
+
+def run_of_worktree(root):
+    """The run a candidate worktree belongs to: .agentic/runs/<run>/iter-N/..."""
+    parts = os.path.normpath(root).replace('\\', '/').split('/')
+    for i in range(len(parts) - 2):
+        if parts[i] == '.agentic' and parts[i + 1] == 'runs':
+            return parts[i + 2]
+    return os.environ.get('AGENTIC_RUN') or None
+
+
+def rev_in_run(root, rev, run=None):
+    """Whether a session may look at ``rev``: it must be in this run's own
+    history, i.e. reachable from the session's HEAD or from one of the run's
+    branches (the best, its candidates, its tracks). The repository is shared
+    with everything else ever built in it, and a commit id works without any
+    branch name: in i59 a session read a hand-built design that is not part
+    of this run by `git show <its commit>:rtl/...` and copied it."""
+    def git(*args):
+        try:
+            res = subprocess.run(['git', '-C', root] + list(args), capture_output=True,
+                                 text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return res.stdout.strip() if res.returncode == 0 else None
+    sha = git('rev-parse', '--verify', '--quiet', rev + '^{commit}')
+    if not sha:
+        return True        # not a commit; git itself will say so, and print nothing
+    if git('merge-base', '--is-ancestor', sha, 'HEAD') is not None:
+        return True
+    run = run or run_of_worktree(root)
+    if not run:
+        return False
+    refs = git('for-each-ref', '--contains', sha, '--format=%(refname)',
+               'refs/heads/agentic/%s' % run, 'refs/heads/agentic-cand/%s' % run,
+               'refs/heads/agentic-track/%s' % run)
+    return bool(refs)
+
+
 def command_kind(cmd):
     """What a session's shell command is: 'check', 'packmodel', 'git',
     'checkout', or None (refused)."""
@@ -600,7 +657,15 @@ def make_gate(worktree, manifest_path=None, writable=WRITABLE):
         if tool_name == 'Bash':
             cmd = (tool_input.get('command') or '').strip()
             kind = command_kind(cmd)
-            if kind in ('git', 'checkout'):
+            if kind == 'git':
+                outside = [rev for rev in git_revs(cmd) if not rev_in_run(root, rev)]
+                if outside:
+                    return PermissionResultDeny(
+                        message=('%s is not part of this run\'s history. You may look at '
+                                 'your own HEAD and its ancestors, and at the run\'s '
+                                 'best, candidate and track branches.' % outside[0]))
+                return PermissionResultAllow()
+            if kind == 'checkout':
                 return PermissionResultAllow()
             if kind is None:
                 return PermissionResultDeny(

@@ -2302,6 +2302,50 @@ def test_track_sessions_get_their_own_limits():
           prompt.startswith('YOU HAVE ALREADY STARTED THIS DESIGN') and 'docs/track-wide/' in prompt)
 
 
+def test_git_revisions_confined_to_the_run():
+    import shutil
+    import subprocess
+    import tempfile
+    import propose
+    check('gate: git_revs finds REV, REV:PATH and both ends of a range, never options or paths',
+          propose.git_revs('git show abc123:rtl/x.vhd') == ['abc123']
+          and propose.git_revs('git log --oneline -n 5 a..b') == ['a', 'b']
+          and propose.git_revs('git diff --stat HEAD~2 -- rtl docs') == ['HEAD~2']
+          and propose.git_revs('git status') == [])
+    check('gate: the run is read from the worktree path',
+          propose.run_of_worktree('C:/x/.agentic/runs/r7/iter-3/c1') == 'r7')
+    tmp = tempfile.mkdtemp(prefix='ktest-revs-')
+    try:
+        def git(*args):
+            return subprocess.run(['git', '-C', tmp] + list(args), capture_output=True,
+                                  text=True, check=True).stdout.strip()
+        git('init', '-q')
+        git('config', 'user.email', 't@t')
+        git('config', 'user.name', 't')
+        git('commit', '-q', '--allow-empty', '-m', 'base')
+        git('branch', '-m', 'agentic/r1')
+        base = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-b', 'elsewhere')
+        git('commit', '-q', '--allow-empty', '-m', 'not this run')
+        outside = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-b', 'agentic-cand/r1/i2-c1', base)
+        git('commit', '-q', '--allow-empty', '-m', 'a candidate')
+        cand = git('rev-parse', 'HEAD')
+        git('checkout', '-q', 'agentic/r1')
+        check('gate: a commit outside the run is refused by id and by branch name; '
+              'HEAD, its ancestors and the run\'s candidate branches are allowed '
+              '(i59 copied a design from outside the run by its commit id)',
+              not propose.rev_in_run(tmp, outside[:7], 'r1')
+              and not propose.rev_in_run(tmp, 'elsewhere', 'r1')
+              and propose.rev_in_run(tmp, 'HEAD', 'r1')
+              and propose.rev_in_run(tmp, base, 'r1')
+              and propose.rev_in_run(tmp, cand[:7], 'r1')
+              and propose.rev_in_run(tmp, 'agentic-cand/r1/i2-c1', 'r1')
+              and not propose.rev_in_run(tmp, cand, 'r2'))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_gate_writable_for_tracks():
     import asyncio
     import propose
