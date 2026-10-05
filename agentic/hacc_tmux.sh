@@ -76,11 +76,13 @@ BACKFILE="$LOCAL/.agentic-backup-$SESSION.sh"
 cat > "$BACKFILE" <<EOF
 mkdir -p "$BACKUP/runs"
 while true; do
-  rsync -a "$REPO/.agentic/runs/" "$BACKUP/runs/" \\
-    && git -C "$REPO" bundle create "$BACKUP/agenticRTL.bundle.tmp" --all 2>/dev/null \\
-    && mv "$BACKUP/agenticRTL.bundle.tmp" "$BACKUP/agenticRTL.bundle" \\
-    && echo "\$(date '+%F %T') runs and branches copied to $BACKUP" \\
-    || echo "\$(date '+%F %T') BACKUP FAILED"
+  # -rlt, not -a: the NFS home refuses the host's group (chgrp: Invalid
+  # argument), and that failure used to skip the branches as well.
+  rsync -rlt "$REPO/.agentic/runs/" "$BACKUP/runs/"; r=\$?
+  git -C "$REPO" bundle create "$BACKUP/agenticRTL.bundle.tmp" --all 2>/dev/null \\
+    && mv "$BACKUP/agenticRTL.bundle.tmp" "$BACKUP/agenticRTL.bundle"; g=\$?
+  echo "\$(date '+%F %T') runs: rsync rc \$r (24 = files vanished mid-copy, harmless);" \\
+       "branches: \$([ \$g -eq 0 ] && echo ok || echo FAILED)"
   sleep 3600
 done
 EOF
