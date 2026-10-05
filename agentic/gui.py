@@ -38,6 +38,8 @@ ROOT = os.path.dirname(KIT)
 RUNS = os.path.join(ROOT, '.agentic', 'runs')
 
 POLL_MS = 1000
+# A mirrored run (mirror.py) counts as alive only while its copy is this fresh.
+MIRROR_STALE_S = 120
 
 # ---------------------------------------------------------------------------
 # palette
@@ -178,6 +180,20 @@ class Store(object):
     def status(self):
         return self._status or {}
 
+    def mirror(self):
+        """mirror.json of a run copied here from the host by mirror.py, or None."""
+        seen, _ = _read_json(os.path.join(self.dir, 'mirror.json'), None)
+        return seen
+
+    def alive(self):
+        """Is the loop process running? For a mirrored run the pid in
+        status.json is the host's, so mirror.py's own check is used instead,
+        and only while the copy is fresh."""
+        seen = self.mirror()
+        if seen is None:
+            return pid_alive(self.status.get('pid'))
+        return bool(seen.get('alive')) and time.time() - seen.get('checked', 0) < MIRROR_STALE_S
+
     def liveness(self):
         """(label, colour). Honest about a dead process holding a live file."""
         st, state = self.status, self.state
@@ -187,7 +203,12 @@ class Store(object):
             return ('FINISHED: ' + done, C['crit'] if bad else C['accent'])
         if st.get('phase') == 'waiting':
             return ('WAITING: ' + (st.get('detail') or 'usage limit'), C['warn'])
-        if pid_alive(st.get('pid')):
+        seen = self.mirror()
+        if seen is not None and time.time() - seen.get('checked', 0) >= MIRROR_STALE_S:
+            return ('NO NEWS: mirror.py has not reached the host since %s'
+                    % time.strftime('%H:%M', time.localtime(seen.get('checked', 0))),
+                    C['warn'])
+        if self.alive():
             return ('RUNNING', C['accent'])
         return ('STOPPED (the loop process is gone; resume with --resume)', C['crit'])
 
@@ -798,7 +819,7 @@ class Dashboard(tk.Tk):
             when = st.get('finished') or ''
             tail = 'stopped %s ago%s' % (hhmmss(secs),
                                          ', at ' + when[11:16] if len(when) >= 16 else '')
-        elif not pid_alive(st.get('pid')) and not self.demo:
+        elif not self.store.alive() and not self.demo:
             tail = 'no loop process; last wrote %s ago' % hhmmss(secs)
         else:
             tail = '%s in this step' % hhmmss(secs)
@@ -858,8 +879,14 @@ def main():
                     help='replay the phases of a finished run, one a second')
     ap.add_argument('--selftest', action='store_true',
                     help='build the window, render once, exit (no display needed beyond Tk)')
+    ap.add_argument('--runs-dir', default=None,
+                    help='read runs from here instead of .agentic/runs '
+                         '(mirror.py keeps copies of host runs in .agentic/mirror)')
     args = ap.parse_args()
 
+    if args.runs_dir:
+        global RUNS
+        RUNS = os.path.abspath(args.runs_dir)
     if not list_runs():
         print('No runs found under %s.' % RUNS)
         print('Start one first:  python agentic/loop.py --goal "increase throughput by 50%"')

@@ -276,6 +276,41 @@ widens the `ram_command`/`ram_response` records, or declares its own
 the extra bytes and the candidate would measure smaller and faster for having
 broken its memory.
 
+## Running on the HACC host (tmux)
+
+On the laptop a run stops whenever the laptop sleeps or leaves the VPN. On
+hacc-build-02 it can run in tmux, which outlives the ssh session:
+
+```
+ssh vdixit@hacc-build-02
+cd /local/home/vdixit/agenticRTL
+agentic/hacc_tmux.sh --resume --run hacc-real200 --model opus
+tmux attach -t agentic          # watch; Ctrl-b d detaches, the loop keeps going
+```
+
+There `hacc_host` is `local` (Vivado runs on the same machine, no ssh), GHDL
+comes from an OSS CAD Suite of the same release as the laptop's, and 22
+simulators run at once instead of 8. Everything lives in `/local/home/vdixit`
+(local disk: `eda/`, `venv/` with `claude-agent-sdk` and its bundled CLI,
+`agenticRTL/` with `agentic/data` and `.agentic/` copied in, because they are
+git-ignored). That folder is not backed up, so the script's second tmux
+window copies the run folders and a bundle of every branch to
+`~/agentic-backup` (NFS home) every hour. The Claude login is a token from
+`claude setup-token`, kept in `/local/home/vdixit/.claude-oauth-token`. A
+reboot of the host ends the session: run the script again with `--resume`.
+
+The dashboard needs a display, so it stays on the laptop:
+`python agentic/mirror.py --run hacc-real200 --gui` copies state.json and
+status.json from the host every 10 s into `.agentic/mirror/` and opens
+`gui.py --runs-dir .agentic/mirror` on the copy.
+
+To move a live run from the laptop: stop it at a phase boundary, copy
+`.agentic/runs/<run>/` without `base/` (the loop recreates that worktree on
+resume), bring the branches over with a `git bundle` of the kit branch and
+every ref that names the run, and resume on the host. Kit changes go to the
+host with `git push` (its repo has `receive.denyCurrentBranch updateInstead`),
+and the loop restarts itself on them as it does on the laptop.
+
 ## What a session costs, measured
 
 `python agentic/compare.py --breakdown <run>` prices a run's tokens at the
@@ -360,6 +395,7 @@ resets.
 | `hacc.py`, `syn/vivado.tcl`, `syn/ram_xilinx.vhd` | the Vivado backend on the HACC host |
 | `report.py` | status.json and report.html |
 | `gui.py` | the live dashboard window (Tkinter) |
+| `hacc_tmux.sh`, `mirror.py` | the loop in tmux on the HACC host, and its dashboard on the laptop |
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |
 | `setup.py` | doctor + preparation |
 | `tools.py`, `config.json` | shared helpers and settings |
