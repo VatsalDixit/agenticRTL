@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     # The two are separate series: a run is measured by one of them from its
     # baseline to its end, and the loop refuses to resume under the other.
     "synth_backend": "yosys",
+    # ssh destination, or "local" when the loop itself runs on the host.
     "hacc_host": "vdixit@hacc-build-02",
     "hacc_vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh",
     "hacc_part": "xcu55c-fsvh2892-2L-e",

@@ -114,17 +114,31 @@ def _host():
     return CONFIG['hacc_host']
 
 
+def _local():
+    """True when the loop runs on the host itself (hacc_host "local").
+
+    Then every command below runs in a local bash instead of over ssh: the
+    same scripts, the same scratch directories under /tmp, the same watchdog.
+    That is how the loop runs in a tmux session on the host, where it no
+    longer depends on a laptop staying awake on the VPN.
+    """
+    return _host() == 'local'
+
+
 def _ssh(command, data=None, timeout=QUICK_TIMEOUT_S):
     """Run ``command`` on the host. Bytes in, bytes out.
 
     Text mode on Windows rewrites line endings in anything passing through,
     harmless for a log and fatal for a tar stream.
     """
-    argv = [os.environ.get('HACC_SSH', 'ssh')] + SSH_OPTS + [_host(), command]
+    if _local():
+        argv = ['bash', '-c', command]
+    else:
+        argv = [os.environ.get('HACC_SSH', 'ssh')] + SSH_OPTS + [_host(), command]
     res = tools_run(argv, timeout=timeout, stdin_bytes=data, binary=True)
     if res.timed_out:
         raise Transient('ssh to %s did not finish within %d s' % (_host(), timeout))
-    if res.rc == 255:
+    if res.rc == 255 and not _local():
         err = res.err.decode('utf-8', 'replace').strip().splitlines()
         reason = err[-1] if err else 'no message'
         if 'Permission denied' in reason:
