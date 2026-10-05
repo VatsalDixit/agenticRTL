@@ -125,7 +125,12 @@ def child_env():
         os.environ.pop('ANTHROPIC_API_KEY', None)
     for name in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION'):
         os.environ.pop(name, None)
-    return {}
+    # No auto memory. Claude Code keys its memory folder on the repository, and
+    # the run's worktrees share the repository the engineer works in, so every
+    # planner call and session was handed the engineer's own memory index:
+    # in i61 the planner cited "memory: wide4-dsw4 branch, 20.60 B/c" and
+    # opened a track to port that design. setting_sources=[] does not cover it.
+    return {'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}
 
 
 def availability():
