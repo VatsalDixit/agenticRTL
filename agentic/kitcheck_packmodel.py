@@ -356,7 +356,7 @@ def test_packmodel_calibration_mapping():
 
 
 def test_packmodel_cache_is_outside_worktrees():
-    loop = os.path.join('C:' + os.sep, 'work', 'kit')
+    loop = os.path.join(os.path.abspath(os.sep), 'work', 'kit')
     cand = os.path.join(loop, '.agentic', 'runs', 'r1', 'iter-5', 'c1')
     base = os.path.join(loop, '.agentic', 'runs', 'r1', 'base')
     got = [pm.loop_root(p) for p in (loop, cand, base)]
