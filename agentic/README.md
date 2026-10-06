@@ -310,8 +310,12 @@ A reboot ends the tmux session. Each start records its arguments in
 loop at boot:
 
 ```
+HOME=/local/home/vdixit
 @reboot /local/home/vdixit/agenticRTL/agentic/hacc_tmux.sh --reboot >> /local/home/vdixit/agentic-reboot.log 2>&1
 ```
+
+(cron would otherwise start in the NFS home and point `XDG_CONFIG_HOME`
+there, where git and tmux cannot read their config without a ticket.)
 
 `--reboot` resumes only a run the reboot cut off (its status.json is still
 mid-phase). A run stopped with Ctrl-C, finished or crashed says `finished`

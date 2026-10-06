@@ -15,17 +15,20 @@
 #                               cores, ~350 GB; the laptop had 8 slots)
 #   CLAUDE_CODE_OAUTH_TOKEN     read from /local/home/$USER/.claude-oauth-token
 #                               (make one with `claude setup-token`)
-#   HOME=/local/home/$USER      not the NFS home, which is Kerberos-secured
-#                               and unreadable without a ticket (after a
-#                               reboot, or once the last password login's
-#                               ticket expires); Claude Code keeps its files
-#                               in $HOME
+#   HOME=/local/home/$USER      and the XDG_*_HOME folders under it, not the
+#                               NFS home, which is Kerberos-secured and
+#                               unreadable without a ticket (after a reboot,
+#                               or once the last password login's ticket
+#                               expires); Claude Code, git and Vivado keep
+#                               files there
 # Window "backup" copies the run folders and every branch to the NFS home
 # every hour, because /local/home is not backed up.
 #
 # A reboot of the host ends the tmux session. Every start records its
 # arguments, and `hacc_tmux.sh --reboot` starts again with them unless that
-# run was stopped on purpose, finished or crashed. cron calls it at boot:
+# run was stopped on purpose, finished or crashed. The crontab calls it at
+# boot, with HOME set so cron does not start in the NFS home:
+#   HOME=/local/home/vdixit
 #   @reboot /local/home/vdixit/agenticRTL/agentic/hacc_tmux.sh --reboot >> /local/home/vdixit/agentic-reboot.log 2>&1
 
 set -e
@@ -64,11 +67,14 @@ if [ "$1" = "--reboot" ]; then
   DELAY=${AGENTIC_REBOOT_DELAY:-120}
   echo "  run '$RUN' was in phase '$PHASE'; resuming in $DELAY s: loop.py $*"
   sleep "$DELAY"                 # let the network come up first
+  # cron points these at the NFS home, where tmux and git would find their
+  # config unreadable until someone logs in.
+  export HOME="$LOCAL" XDG_CONFIG_HOME="$LOCAL/.config"
   export TERM=${TERM:-xterm-256color}
 fi
 
 if [ $# -eq 0 ]; then
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -93,6 +99,8 @@ ENVFILE="$LOCAL/.agentic-env-$SESSION.sh"
 cat > "$ENVFILE" <<EOF
 . "$LOCAL/venv/bin/activate"
 export HOME="$LOCAL"
+export XDG_CONFIG_HOME="$LOCAL/.config" XDG_CACHE_HOME="$LOCAL/.cache"
+export XDG_DATA_HOME="$LOCAL/.local/share" XDG_STATE_HOME="$LOCAL/.local/state"
 export AGENTIC_HACC_HOST=local
 export AGENTIC_EDA_SUITE="$LOCAL/eda/oss-cad-suite"
 export AGENTIC_SIM_SLOTS=$SLOTS
