@@ -296,8 +296,28 @@ simulators run at once instead of 8. Everything lives in `/local/home/vdixit`
 git-ignored). That folder is not backed up, so the script's second tmux
 window copies the run folders and a bundle of every branch to
 `~/agentic-backup` (NFS home) every hour. The Claude login is a token from
-`claude setup-token`, kept in `/local/home/vdixit/.claude-oauth-token`. A
-reboot of the host ends the session: run the script again with `--resume`.
+`claude setup-token`, kept in `/local/home/vdixit/.claude-oauth-token`.
+
+The loop's `HOME` is `/local/home/vdixit` too. The NFS home is
+Kerberos-secured: without a ticket it cannot be read, and there is none
+after a reboot (until a password login) or once the last login's ticket
+expires. On 2026-10-06 the host rebooted for maintenance and refused even
+key-based ssh until a password login. Claude Code keeps its files in
+`$HOME`, so a loop living there would stall when the ticket ran out.
+
+A reboot ends the tmux session. Each start records its arguments in
+`/local/home/vdixit/.agentic-args-agentic`, and a crontab entry restarts the
+loop at boot:
+
+```
+@reboot /local/home/vdixit/agenticRTL/agentic/hacc_tmux.sh --reboot >> /local/home/vdixit/agentic-reboot.log 2>&1
+```
+
+`--reboot` resumes only a run the reboot cut off (its status.json is still
+mid-phase). A run stopped with Ctrl-C, finished or crashed says `finished`
+or `failed` and is left alone, so stop the loop with Ctrl-C in its window,
+not by killing the tmux session. After a reboot the hourly backup to the
+NFS home fails until you log in once with your password.
 
 The dashboard needs a display, so it stays on the laptop:
 `python agentic/mirror.py --run hacc-real200 --gui` copies state.json and
