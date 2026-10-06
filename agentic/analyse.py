@@ -20,20 +20,19 @@ Usable cores is the core count, capped by the draw's chunk count and by its
 bytes over its largest chunk (usable_cores below).
 
 A transfer carries one copy and one literal, so the two element kinds have
-SEPARATE ceilings. Pooling them hides a saturated copy slot behind an idle
-literal slot: on the 32-byte design the copy slot ran at 82-93% of its ceiling
-on five of eight scored draws while the pooled number read 63-74% and the loop
-concluded "no stage saturated".
+SEPARATE ceilings. Pooling them can hide one saturated slot behind an idle
+one, so that the pooled number reads well below the ceiling and the verdict
+says "no stage saturated".
 
 Also reads worst slack when synthesis numbers are given, and answers which
 factor of throughput (bytes/cycle or f_max) is the one worth moving.
 
 When the simulation ran with the internal probe (agentic/probe.py), the
 handshakes between stages are read too, and they decide what output idle
-means. The port counters alone cannot: on i35 the output was idle 40% of
-cycles and the verdict said "internal latency", while the probe showed the
-decoder moving on 99% of cycles and nothing after it ever waiting. Idle
-there was the decoder's rate, not bubbles. Every probe path here is guarded:
+means. The port counters alone cannot: an output idle for a large share of
+cycles reads as "internal latency" even when one stage is moving on almost
+every cycle and nothing after it ever waits, so that the idle is that
+stage's rate, not bubbles. Every probe path here is guarded:
 a probe bug falls back to the port-counter verdict and never fails a
 measurement.
 """
@@ -110,10 +109,10 @@ def rtl_widths(rtl_dir):
            'elements_per_transfer': DEFAULT_ELEMENTS_PER_TRANSFER,
            'unresolved': []}
     # Which of those are still the defaults above because the RTL did not
-    # say. A design that declares its widths elsewhere (DSW-4 keeps them in
-    # its own package) would otherwise read as K2/L8 with nothing to tell a
-    # caller that it was guessed; whoever needs a width it can trust (the
-    # packing model's calibration) checks out['defaulted'].
+    # say. A design that declares its widths elsewhere (in a package of its
+    # own) would otherwise read as the defaults with nothing to tell a caller
+    # that they were guessed; whoever needs a width it can trust checks
+    # out['defaulted'].
     read = set()
 
     def width(port):
@@ -237,8 +236,8 @@ def usable_cores(cores, shape):
     A chunk runs on one core from its first byte to its last, so the other
     cores can only take the bytes outside the largest chunk: the bound is
     total bytes / largest chunk, as well as the chunk count. On whole Parquet
-    row groups the byte bound is the tight one. A 15.7 MB page in a 20 MB row
-    group leaves a second core 1.3x at most, however many pages there are.
+    row groups the byte bound is the tight one: one very large page bounds
+    the gain however many pages there are.
     """
     by_bytes = shape['expanded_bytes'] / float(max(1, shape.get('largest_chunk_bytes')
                                                    or shape['expanded_bytes']))
@@ -546,8 +545,8 @@ def describe(report, name=None):
     return '\n'.join(lines)
 
 
-# Handshake lines shown at most; DSW-4 has about forty, most of them registers
-# without a ready, and every pair is always shown.
+# Handshake lines shown at most; a large design can have dozens, most of them
+# registers without a ready, and every pair is always shown.
 PROBE_LINES = 24
 
 

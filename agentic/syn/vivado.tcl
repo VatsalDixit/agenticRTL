@@ -30,9 +30,8 @@ add_files -fileset constrs_1 -norecurse clock.xdc
 
 # Out of context: this block decompresses a stream for other logic on the same
 # die, and its buses never go near a package pin. In the default mode every
-# port bit needs one, and a widened candidate in an earlier campaign ran out
-# of them and died in placement with the design otherwise sound. Measured then,
-# out of context cost -1.9% f_max and -2 LUTs against top-down.
+# port bit needs one, and a design with wide ports can run out of them and
+# die in placement while otherwise sound.
 synth_design -top $top -part $part -mode out_of_context
 opt_design
 place_design

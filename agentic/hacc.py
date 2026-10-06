@@ -3,12 +3,10 @@
 Synthesis on the HACC build host at ETH: Vivado, over ssh, for an FPGA part.
 
 The Yosys backend (syn/synth.sh) measures the design on a 45nm ASIC library it
-will never be built on, and it blackboxes the history RAM. campaign1's final
-design clocks at 641.8 MHz there and at 263.0 MHz under Vivado on the U55C;
-an older, larger revision missed 250 MHz under Vivado with half of its ten
-worst paths starting at a URAM output -- paths the Yosys flow cannot see. So
-f_max, and with it throughput, means something different on each; this is the
-one that matches the hardware.
+will never be built on, and it blackboxes the history RAM, so paths that
+start at a URAM output cannot be seen there. f_max, and with it throughput,
+means something different on each; this is the one that matches the
+hardware.
 
 For one candidate:
 

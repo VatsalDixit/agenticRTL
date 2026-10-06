@@ -2,8 +2,8 @@
 """
 Watch a run that lives on the HACC host from this machine.
 
-    python agentic/mirror.py --run hacc-real200          keep a copy, every 10 s
-    python agentic/mirror.py --run hacc-real200 --gui    ...and open the dashboard on it
+    python agentic/mirror.py --run <run>          keep a copy, every 10 s
+    python agentic/mirror.py --run <run> --gui    ...and open the dashboard on it
 
 When the loop runs in tmux on the host (agentic/hacc_tmux.sh), the dashboard
 cannot: the host has no display and no tkinter. So this copies what the

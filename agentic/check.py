@@ -58,7 +58,7 @@ def write_golden(ddir, shapes=None):
                     kind 0 = literal, 1 = copy, pos the header's byte offset
                     in its chunk; then "EOC" after each chunk
     """
-    import packmodel                 # pure parsing of invented bytes; no cache
+    import snappy_elements           # pure parsing of invented bytes
     from snappy import decompress_raw
     chunks = []
     for _name, chunk in (shapes or stim.SELFTEST_SHAPES):
@@ -75,7 +75,7 @@ def write_golden(ddir, shapes=None):
             fil.write('EOC\n')
     with open(os.path.join(ddir, 'elements.tv'), 'w', encoding='ascii', newline='\n') as fil:
         for chunk in chunks:
-            for pos, kind, hdr, length, offset in packmodel.parse(chunk):
+            for pos, kind, hdr, length, offset in snappy_elements.parse(chunk):
                 fil.write('%d %d %d %d %d\n' % (pos, 0 if kind == 'L' else 1, hdr, length,
                                                 offset))
             fil.write('EOC\n')

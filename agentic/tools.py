@@ -80,7 +80,7 @@ DEFAULT_CONFIG = {
     "sim_slots": 8,
     # Tool timeouts. One simulation call covers every long draw of one
     # candidate: whole Parquet row groups take 18 minutes on the original
-    # design and over half an hour on a two-core one.
+    # design and can take much longer on a larger one.
     "sim_timeout_s": 10800,
     "synth_timeout_s": 2400,
     # Vivado's own. Three hours, from the earlier flow: at 20k LUTs one
@@ -99,8 +99,6 @@ DEFAULT_CONFIG = {
     # declined it with a proof that it is empty or wrong for the design...
     "roadmap_dispute_limit": 2,
     # ...or after this many measured results within roadmap_zero_pct of zero.
-    # hacc-real200 spent 12 iterations on one step that sessions had proved
-    # could not move bytes/cycle, because the old rule made it compulsory.
     "roadmap_zero_limit": 2,
     "roadmap_zero_pct": 1.0,
     # The internal probe (agentic/probe.py): counts every inter-stage
@@ -110,13 +108,6 @@ DEFAULT_CONFIG = {
     # are per this many cycles (0 = totals only).
     "probe_enabled": True,
     "probe_window_cycles": 4096,
-    # The packing model (agentic/packmodel.py). calib_rules is the model a
-    # design outside the i35 and DSW-4 families is calibrated with; widths
-    # is a hand override {"commit", "rules", "K", "L", "N"} that applies only
-    # to that very best commit; jobs is its worker count (~0.5 GB each).
-    "packmodel_calib_rules": "ideal",
-    "packmodel_widths": None,
-    "packmodel_jobs": 3,
     # Fast and guard iterations (loop.iteration_kind). With both set, every
     # guard_every-th iteration simulates every draw and synthesises (a
     # GUARD); the others simulate the small draws plus fast_draws (a comma
@@ -124,10 +115,10 @@ DEFAULT_CONFIG = {
     # every iteration measures everything, as before.
     "fast_draws": "",
     "guard_every": 0,
-    # Build tracks: an architecture change too big for one session (the
-    # hand-built DSW-4 took a design plus about four build steps, each of
-    # which measured about zero until the last), built step by step on its
-    # own branch while the other slot runs normal candidates. A kill switch:
+    # Build tracks: an architecture change too big for one session (a
+    # design plus several build steps, each of which may measure about zero
+    # until the last), built step by step on its own branch while the other
+    # slot runs normal candidates. A kill switch:
     "tracks_enabled": True,
     # Failed attempts on one step before the track is abandoned.
     "track_max_attempts_per_step": 2,

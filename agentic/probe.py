@@ -4,11 +4,9 @@ A probe inside the design: how often each stage handshake moves, waits or
 idles, counted in simulation.
 
 The testbench only sees the ports, and the ports could not tell "the output
-is idle because something inside stalls" from "the output is idle because the
-decoder makes one element per cycle and that is all it can make". On i35 the
-loop read the second as the first for eighteen iterations: a hand probe then
-showed the decoder moving on 99% of cycles, its input waiting 22% of the
-time, and nothing after it ever blocking.
+is idle because something inside stalls" from "the output is idle because
+one stage makes all it can make every cycle". Read from the ports alone, the
+second looks like the first.
 
 This module makes that probe for any design, without knowing its names:
 
@@ -41,8 +39,8 @@ draw folder):
                              from it, which is fine because fractions are
                              what is read; a 3.5M-cycle draw costs about 200
                              file writes. FLUSH_MIN is 32, not the 256 first
-                             planned: one self-test shape lasts 152 cycles
-                             on DSW-4 and was never written at all.
+                             planned: a short self-test shape on a wide
+                             design would never be written at all.
   agentic_probe.<path>.win   per 4096-cycle window counts, only when the file
                              agentic_probe.windows exists in the folder at
                              time 0. measure.py creates that marker in visible
@@ -69,10 +67,9 @@ FLUSH_MAX = 65536       # largest gap between two totals writes
 # output moves on nearly every cycle and never waits, while its input does
 # wait, is running at its own rate. Nothing downstream holds it back and
 # nothing upstream starves it, so only more work per cycle in THAT stage helps.
-# "Never waits" is 5%, not 0: on the real tables i35's decoder output (el)
-# moves on 95.8% of cycles and waits on 4.2% (cmd_gen_1 refuses now and then)
-# while its input waits on 42%; a 2% bar missed the stage the probe exists to
-# find and handed the verdict to the backpressure rule.
+# "Never waits" is 5%, not 0: a stage running at its own rate is still
+# refused now and then by the next one, and a 2% bar would miss the stage
+# the probe exists to find and hand the verdict to the backpressure rule.
 LIMIT_OUT_MOVED = 0.85
 LIMIT_OUT_BLOCKED = 0.05
 LIMIT_IN_BLOCKED = 0.10
@@ -1263,9 +1260,9 @@ def stage_io(handshakes):
 def stalled_by(handshakes):
     """The handshake whose consumer holds the pipe back, or None: the one that
     waits most. On a tie (within SAME_STALL) the most downstream one of the
-    inner stages wins: i35's co, cs and cd all wait 41.6% because one stall
-    (the decoder refusing cd) backs up through the FIFO and the pre-decoder,
-    and co's consumer is only the wrapper datapath_inst around all of them."""
+    inner stages wins: one stall deep inside backs up through every stage
+    before it, so they all wait about as much, and the outermost consumer is
+    only the wrapper around all of them."""
     pairs = [h for h in handshakes if h['kind'] == 'pair']
     if not pairs:
         return None

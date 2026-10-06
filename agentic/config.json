@@ -25,5 +25,7 @@
   "limit_wait_min": 20,
   "tracks_enabled": true,
   "track_session_budget_usd": 40.0,
-  "track_session_timeout_min": 120
+  "track_session_timeout_min": 120,
+  "fast_draws": "held-lineitem,held-supplier",
+  "guard_every": 5
 }

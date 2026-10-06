@@ -23,9 +23,8 @@ decompress correctly and never enter the score; an earlier loop let one
 synthetic draw outvote every real one.
 
 An earlier corpus drew 12 random pages of at most 64 KiB from each table. It
-rewarded what small chunks reward: a design the loop took to +182% on it
-measures +67% on the taxi row group, and the second core the small pages
-paid for adds 3.6% there.
+rewarded what small chunks reward, and its gains did not carry over to whole
+row groups.
 
 cs.tv format (one line per 8-byte granule):
     64 chars   data bits, byte 0 first, MSB of each byte first

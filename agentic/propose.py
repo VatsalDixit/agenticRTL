@@ -12,9 +12,8 @@ Two kinds of call:
   write_candidates()  N coding sessions in parallel, one per direction, each
                       inside its own git worktree. The session may read and
                       edit files there, and may run only the check
-                      (`python agentic/check.py`), the packing model
-                      (`python agentic/packmodel.py`, aggregates only) and a
-                      few read-only git forms. It cannot read outside the
+                      (`python agentic/check.py`) and a few read-only git
+                      forms. It cannot read outside the
                       worktree and it never sees the scoring stimulus. It
                       ends by writing PROPOSAL.json.
 
@@ -127,9 +126,8 @@ def child_env():
         os.environ.pop(name, None)
     # No auto memory. Claude Code keys its memory folder on the repository, and
     # the run's worktrees share the repository the engineer works in, so every
-    # planner call and session was handed the engineer's own memory index:
-    # in i61 the planner cited "memory: wide4-dsw4 branch, 20.60 B/c" and
-    # opened a track to port that design. setting_sources=[] does not cover it.
+    # planner call and session was handed the engineer's own memory index,
+    # notes about other runs included. setting_sources=[] does not cover it.
     return {'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}
 
 
@@ -163,9 +161,9 @@ def extract_json(text):
 def _drop_trailing_commas(text):
     """``text`` without commas that directly close an object or array.
 
-    A model writes `{...},\\n]` now and then; i69 of hacc-real200 lost its
-    whole plan to one and fell back to the generic directions. Only commas
-    outside strings are touched, so no value changes.
+    A model writes `{...},\\n]` now and then, and one comma used to cost
+    the whole plan, replaced by the generic directions. Only commas outside
+    strings are touched, so no value changes.
     """
     out = []
     in_str = escaped = False
@@ -253,7 +251,7 @@ async def _ask_async(prompt, system, cwd, model, max_turns, budget, tools,
         permission_mode='default' if gate else 'dontAsk',
         can_use_tool=gate, setting_sources=[],
         # The SDK merges this over the parent's environment, so only what
-        # differs per session goes in (the packing model's calibration).
+        # differs per session goes in.
         env=dict(child_env(), **(env_extra or {})),
         # strict-mcp-config keeps the machine's MCP servers out of the child.
         # Whatever connectors the user has (mail, drive, calendar) are useless
@@ -434,16 +432,9 @@ def track_writable(track_id, kind):
 # test's entity and file: rtl/unit/<name>.vhd.
 UNIT_RE = re.compile(r'^python3? agentic/check\.py --unit [A-Za-z0-9_]{1,40}$')
 
-# The packing model, with its what-if flags and nothing else. Its loop-only
-# flags (--prepare, --extra, --json, --selfcheck) cannot match, and neither
-# can anything chained, piped or redirected.
-PACKMODEL_RE = re.compile(
-    r'^python3? agentic/packmodel\.py'
-    r'(?: --(?:k|l|n|litrate) \d{1,3}| --(?:hazard|split|rules) [a-z0-9]{1,10})*$')
-
 # Read-only git, as an explicit grammar. The old rule (any git show/diff/log/
 # status without shell metacharacters) let `git diff --no-index <abs path> x`
-# print any file on disk (the run's state.json, the packing model's cache) and
+# print any file on disk (the run's state.json, for one) and
 # `--output=<path>` write any file. Here a revision cannot start with '-' or
 # '/', a path is relative and under rtl/ or docs/ with no segment starting
 # with '.', and every form that prints file contents needs such a pathspec, so
@@ -510,8 +501,8 @@ def rev_in_run(root, rev, run=None):
     history, i.e. reachable from the session's HEAD or from one of the run's
     branches (the best, its candidates, its tracks). The repository is shared
     with everything else ever built in it, and a commit id works without any
-    branch name: in i59 a session read a hand-built design that is not part
-    of this run by `git show <its commit>:rtl/...` and copied it."""
+    branch name, so `git show <commit>:rtl/...` could read a design that is
+    not part of this run."""
     def git(*args):
         try:
             res = subprocess.run(['git', '-C', root] + list(args), capture_output=True,
@@ -534,13 +525,11 @@ def rev_in_run(root, rev, run=None):
 
 
 def command_kind(cmd):
-    """What a session's shell command is: 'check', 'packmodel', 'git',
-    'checkout', or None (refused)."""
+    """What a session's shell command is: 'check', 'git', 'checkout', or
+    None (refused)."""
     cmd = (cmd or '').strip()
     if cmd in PERMITTED_COMMANDS or UNIT_RE.match(cmd):
         return 'check'
-    if PACKMODEL_RE.match(cmd):
-        return 'packmodel'
     if any(form.match(cmd) for form in GIT_FORMS):
         return 'git'
     if CHECKOUT_RE.match(cmd):
@@ -553,10 +542,10 @@ def command_kind(cmd):
 #
 # A candidate worktree starts from the run's base commit, and adoptions change
 # only rtl/, so without this a session would run the kit as it was when the
-# run started: a new packmodel.py or a fixed measure.py would never reach it.
+# run started: a fixed measure.py would never reach it.
 # Only this allowlist is copied; never the data, the tests or anything else.
 
-SYNC_FILES = ('check.py', 'measure.py', 'analyse.py', 'probe.py', 'packmodel.py',
+SYNC_FILES = ('check.py', 'measure.py', 'analyse.py', 'probe.py', 'snappy_elements.py',
               'stim.py', 'oracle.py', 'tools.py', 'hacc.py', 'freeze.py',
               'config.json', 'frozen.json')
 SYNC_DIRS = ('ref', 'syn', 'tb')
@@ -673,7 +662,7 @@ def harness_clean(root, manifest=None):
 def make_gate(worktree, manifest_path=None, writable=WRITABLE):
     """The permission gate for one candidate session.
 
-    Bash: the check and the packing model, only while the harness inside the
+    Bash: the check, only while the harness inside the
     worktree is the one the loop synced (a session could otherwise edit
     check.py and run anything through the permitted command); plus the
     read-only git forms above. Edit/Write: only rtl/, the proposal and a
@@ -707,8 +696,6 @@ def make_gate(worktree, manifest_path=None, writable=WRITABLE):
                     message=('Only these commands are permitted, exactly as written: '
                              '`python agentic/check.py` (or with --quick, or '
                              '--unit NAME for a build-track unit test); '
-                             '`python agentic/packmodel.py` with any of --k K, --l L, '
-                             '--n N, --hazard H, --litrate B, --split S, --rules R; '
                              'and these read-only git forms (no other flags, no pipes or '
                              'redirects; paths under rtl/ or docs/):\n' + GIT_FORMS_TEXT +
                              '\nUse the Read, Grep, Glob, Edit and Write tools for '
@@ -818,22 +805,6 @@ THE COMMANDS YOU MAY RUN (exactly as written, nothing else)
                                     you were already told, so do not: your
                                     first check comes after your first edit.
   python agentic/check.py --quick   the first three shapes.
-  python agentic/packmodel.py [--k K] [--l L] [--n N] [--hazard window|none|strict16]
-                              [--litrate B] [--split on|off] [--rules ideal|dsw4]
-                                    the packing model. It replays the Snappy
-                                    elements of the real scored pages through
-                                    an ideal packer that issues K elements
-                                    (literals or copies) per cycle into an
-                                    L-byte output line from N input bytes per
-                                    cycle, calibrated to the current best
-                                    design's measured bytes/cycle. It prints
-                                    the visible table and one geomean for the
-                                    held-out tables. With no arguments: the
-                                    current widths and the standard what-ifs.
-                                    A new setting takes a few minutes; repeated
-                                    ones are instant. Run it before building a
-                                    widening, to see whether that widening can
-                                    pay on its own or only together with others.
   Read-only git, in these forms only (no other flags, no pipes or redirects;
   paths are relative, under rtl/ or docs/):
 @@GITFORMS@@
@@ -917,8 +888,8 @@ WHEN YOU ARE DONE
   {"id": "none", "rationale": "why"} and leave the RTL as you found it.
 
   If your assignment names a roadmap step and you can show that step is
-  empty or wrong for this design (the probe, the packing model or the RTL
-  shows it cannot move bytes/cycle), write
+  empty or wrong for this design (the probe or the RTL shows it cannot
+  move bytes/cycle), write
   {"id": "none", "roadmap_step": "<id>",
    "dispute": "the proof: what you ran or read, with numbers and file:line",
    "rationale": "what you would build instead"}
@@ -1014,19 +985,16 @@ DESIGN_BRIEF = """\
 THIS SESSION DESIGNS A BUILD TRACK. Do not change rtl/.
   Track @@ID@@: @@GOAL@@ (why: @@WHY@@).
   Write docs/track-@@ID@@/SPEC.md: the target architecture (stages, records,
-  widths, handshakes, RAMs), why it pays (run agentic/packmodel.py at the
-  target widths and quote its aggregate), the interfaces between the new
-  modules, and an order of building in which every step leaves a design
-  that passes the check. Write docs/track-@@ID@@/steps.json:
+  widths, handshakes, RAMs), why it pays (an estimate you can defend from
+  the profile and the RTL), the interfaces between the new modules, and an
+  order of building in which every step leaves a design that passes the
+  check. Write docs/track-@@ID@@/steps.json:
     [{"text": "...", "kind": "golden|ports|throughput", "module": "rtl/...",
-      "widths": {"K": k, "L": l, "N": n, "rules": "ideal|dsw4"} (throughput steps),
       "predicted_bpc": <number for throughput steps, else null>}]
   1 to @@MAXSTEPS@@ steps, the last of kind throughput with the
   target bytes/cycle, which must beat the current best's @@BASE@@.
-  Predictions come from the packing model at the widths each step has
-  reached; a step that widens one dimension alone is expected to gain
-  about nothing, so predict that honestly. A prediction below 90% of the
-  packing model at the declared widths is rejected.
+  A throughput step is judged against its own prediction, so predict
+  honestly: a step that changes one part alone may gain about nothing.
   SPEC.md must be at least 1500 characters. The planner's first sketch of
   the steps, which you may change:
 @@PLANNED@@
@@ -1119,10 +1087,6 @@ def build_user_prompt(ctx, direction, others, resumed=False):
     lines.append('STAGE PROFILE (rate vs ceiling read from the RTL)')
     lines.append(ctx['profile_text'])
     lines.append('')
-    if ctx.get('packmodel_text'):
-        lines.append(PACKMODEL_HEADER)
-        lines.append(ctx['packmodel_text'])
-        lines.append('')
     if ctx.get('guide_text'):
         lines.append('A MAP OF THE DESIGN, GENERATED FROM THE RTL YOU HAVE')
         lines.append('Use its line numbers to read the part you need instead of '
@@ -1182,13 +1146,9 @@ parallel RTL-writing sessions should each attempt this iteration. Reply with
 JSON only."""
 
 
-PACKMODEL_HEADER = ('PACKING MODEL (bytes/cycle the real pages allow at other widths; '
-                    'aggregate only)')
-
 TRACKS_HELP = """\
-A track is for an architecture change that the packing model says pays only
-when several parts change together, and that one session cannot build and
-verify. Its first step is a design session that writes
+A track is for an architecture change that pays only when several parts
+change together, and that one session cannot build and verify. Its first step is a design session that writes
 docs/track-<id>/SPEC.md and the step list. Each later step builds one module
 plus its unit test and must be byte-exact on every draw; a throughput step
 must also reach 90% of its predicted bytes/cycle (golden-model and port steps
@@ -1213,9 +1173,6 @@ STAGE PROFILE
 
 LEVER: %s -- %s
 
-%s
-%s
-
 ROADMAP FROM THE ENGINEER (advice ranked by modelled gain, not orders)
 %s
 
@@ -1234,8 +1191,8 @@ HISTORY (most recent last)
 
 Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
 - The ROADMAP is the engineer's advice, ranked by modelled gain, not an
-  order. Prefer its highest-ranked OPEN step when the profile and the
-  packing model agree it moves the binding limit. A DISPUTED step comes
+  order. Prefer its highest-ranked OPEN step when the profile says it
+  moves the binding limit. A DISPUTED step comes
   with a session's proof that it is empty or wrong: assign it again only
   if you say what that proof missed. DROPPED steps must not be assigned.
   The skill library's AVOID marks hold for roadmap steps too. When a
@@ -1244,11 +1201,8 @@ Choose %d DIFFERENT directions for %d parallel candidate sessions. Rules:
   never an idle stage. Prefer high-confidence skills that fit the profile.
 - One direction should raise the per-cycle capacity of the stage the probe
   names as the limit (a structural change: more elements per cycle, a
-  wider line or port). Check it with the PACKING MODEL first: if that
-  widening alone models under +3%% because another limit takes over, do not
-  assign it alone. Assign the combination the model says pays, or open a
-  TRACK when the combination is more than one session can build. Timing
-  tweaks are for the other directions. Spell out the steps: which records,
+  wider line or port). Open a TRACK when the change is more than one
+  session can build. Timing tweaks are for the other directions. Spell out the steps: which records,
   which stages, which files, in what order.
 - A stage can usually be relieved two ways: more BYTES PER COMMAND (a wider
   line or port) or more ELEMENTS PER CYCLE (another slot, dual issue). They
@@ -1273,20 +1227,18 @@ Reply with JSON only:
    "skill_ids": ["ids from the library"],
    "where_to_look": "files/entities to read first",
    "risk": "what could go wrong",
-   "roadmap_step": "the roadmap step id this direction carries out, or null",
-   "modelled_gain_pct": <the packing model's bytes/cycle gain for it, or null>}
+   "roadmap_step": "the roadmap step id this direction carries out, or null"}
  ],
  "note": "one or two sentences on the overall state",
  "open_track": (optional; only when no track is open)
    {"id": "kebab-case-name", "goal": "the target architecture in one line",
-    "why": "what the packing model says it pays, and why one session cannot build it",
+    "why": "why it pays, and why one session cannot build it",
     "steps": [{"text": "...", "kind": "golden|ports|throughput",
                "predicted_bpc": <number or null>}]},
  "abandon_track": (optional) "why the open track should stop"}
 """ % (ctx['goal_text'], ctx['iteration'], ctx['max_iters'], ctx['progress_text'],
        ctx['state_text'], ctx['profile_text'], ctx['lever']['lever'],
-       ctx['lever']['reason'], PACKMODEL_HEADER,
-       ctx.get('packmodel_text') or '(not available)',
+       ctx['lever']['reason'],
        ctx.get('roadmap_text') or '(none)',
        ctx.get('tracks_text') or 'none', TRACKS_HELP, ctx['skills_text'],
        ctx.get('facts_text') or '(none recorded yet)',
@@ -1551,8 +1503,7 @@ def burn_rate(state, model):
 def session_limits(track, ctx):
     """(budget in dollars, timeout in minutes, calibration commit) for one
     session. A track step builds a module and its unit test, which does not
-    fit a normal session; its packing model stays calibrated to the design
-    the track opened on, so its step predictions keep their meaning."""
+    fit a normal session."""
     if track:
         return (float(CONFIG.get('track_session_budget_usd', 40.0)),
                 int(CONFIG.get('track_session_timeout_min', 120)),
@@ -1578,7 +1529,7 @@ def write_candidates(ctx, assignments, log, rate=None):
                 log('    %s | %s' % (label, first[:110]))
 
         # Bring the worktree's harness up to the current kit (check.py,
-        # packmodel.py, ...). The manifest sits next to the worktree, outside
+        # measure.py, ...). The manifest sits next to the worktree, outside
         # it, and is what this session's gate checks agentic/ against.
         manifest = asg.get('harness_manifest') or (
             os.path.normpath(asg['worktree']) + '.harness.json')
@@ -1615,9 +1566,8 @@ def write_candidates(ctx, assignments, log, rate=None):
             timeout_s=timeout_min * 60,
             effort=CONFIG.get('effort') or None,
             on_text=on_text, restricted=True,
-            # The packing model calibrated to the design this session starts
-            # from (a track's: the best when it opened); AGENTIC_RUN comes
-            # with the loop's own environment.
+            # The design this session starts from (a track's: the best when
+            # it opened); AGENTIC_RUN comes with the loop's own environment.
             env_extra=({'AGENTIC_CALIB': calib} if calib else None)))
 
     results = ask_many(jobs)

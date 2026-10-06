@@ -2,7 +2,7 @@
 # Run the loop on the HACC build host inside tmux, so it keeps going when the
 # ssh session, the laptop or the VPN goes away.
 #
-#   agentic/hacc_tmux.sh --resume --run hacc-real200 --model opus
+#   agentic/hacc_tmux.sh --resume --run <run> --model opus
 #
 # Detach with Ctrl-b d; come back with `tmux attach -t agentic`. Everything
 # after the script name is passed to agentic/loop.py unchanged. To stop the
@@ -40,6 +40,9 @@ SESSION=${AGENTIC_TMUX_SESSION:-agentic}
 REALHOME=$(getent passwd "$ME" | cut -d: -f6)
 BACKUP=${AGENTIC_BACKUP:-${REALHOME:-$HOME}/agentic-backup}
 SLOTS=${AGENTIC_SIM_SLOTS:-22}
+# The loop's HOME (Claude Code's transcripts and config live there): its own
+# folder per run that must not share them with another.
+HOMEDIR=${AGENTIC_HOME:-$LOCAL}
 ARGSFILE="$LOCAL/.agentic-args-$SESSION"
 
 if [ "$1" = "--reboot" ]; then
@@ -69,7 +72,7 @@ if [ "$1" = "--reboot" ]; then
   sleep "$DELAY"                 # let the network come up first
   # cron points these at the NFS home, where tmux and git would find their
   # config unreadable until someone logs in.
-  export HOME="$LOCAL" XDG_CONFIG_HOME="$LOCAL/.config"
+  export HOME="$HOMEDIR" XDG_CONFIG_HOME="$HOMEDIR/.config"
   export TERM=${TERM:-xterm-256color}
 fi
 
@@ -98,9 +101,10 @@ fi
 ENVFILE="$LOCAL/.agentic-env-$SESSION.sh"
 cat > "$ENVFILE" <<EOF
 . "$LOCAL/venv/bin/activate"
-export HOME="$LOCAL"
-export XDG_CONFIG_HOME="$LOCAL/.config" XDG_CACHE_HOME="$LOCAL/.cache"
-export XDG_DATA_HOME="$LOCAL/.local/share" XDG_STATE_HOME="$LOCAL/.local/state"
+mkdir -p "$HOMEDIR"
+export HOME="$HOMEDIR"
+export XDG_CONFIG_HOME="$HOMEDIR/.config" XDG_CACHE_HOME="$HOMEDIR/.cache"
+export XDG_DATA_HOME="$HOMEDIR/.local/share" XDG_STATE_HOME="$HOMEDIR/.local/state"
 export AGENTIC_HACC_HOST=local
 export AGENTIC_EDA_SUITE="$LOCAL/eda/oss-cad-suite"
 export AGENTIC_SIM_SLOTS=$SLOTS

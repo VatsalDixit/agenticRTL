@@ -59,12 +59,7 @@ from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: 
                    area_of, area_unit, backend_of, geomean)
 from tools import run as tools_run                                    # noqa: E402
 from tools import kill_all as tools_kill_all                          # noqa: E402
-try:
-    # The packing model is advice for the prompts. A broken copy must never
-    # stop the loop, so it is optional here and every use is guarded.
-    import packmodel                   # noqa: E402
-except Exception:                      # pragma: no cover
-    packmodel = None
+packmodel = None
 
 # The scoring data (agentic/data, test_data) is not tracked by git, so a new
 # worktree never contains it. These are removed only if someone committed
@@ -348,9 +343,8 @@ def retry_eligible(c, retried):
     """Whether a candidate may be offered again (git aside).
 
     A retry is its original candidate again, on its own new branch, and the
-    original has had its one retry. Without this check the same design came
-    back after every adoption: hacc-real200 measured one 32-byte line three
-    times, in iterations 9, 10 and 11.
+    original has had its one retry. Without this check the same design
+    could come back after every adoption and be measured again each time.
     """
     if not c.get('branch') or c['branch'] in retried \
             or str(c.get('id') or '').startswith('retry-'):
@@ -534,11 +528,9 @@ def evaluate(metrics, parent, goal):
     gain = meas['gain_pct']
     # Throughput alone decides; area is measured and shown, never scored.
     # The user wants single-stream speed, and one decompressor fits the U55C
-    # many times over, so area does not limit it. The old rule (a price on
-    # area growth plus a floor on gain per percent of area) rejected exactly
-    # the widening the goal needs: the hand-built DSW-4 reached +228.7% at
-    # about 8x the LUTs, and every partial step towards it would have been
-    # refused.
+    # many times over, so area does not limit it. A price on area growth
+    # would reject large structural changes along with every partial step
+    # towards them.
     score = -gain
     out['score'] = round(score, 4)
     if gain < float(CONFIG['min_gain_pct']):
@@ -610,9 +602,9 @@ def state_text(metrics, base):
                      % (worst.get('from'), worst.get('to')))
     for rec in metrics.get('draws', []):
         if rec.get('visible') and rec.get('oracle_pass'):
-            # "output port idle": the port counters alone. On i35 that was
-            # 40% and read as bubbles; the probe showed the decoder moving
-            # every cycle, so where there is a probe its limit is named.
+            # "output port idle": the port counters alone, which can read a
+            # busy stage as bubbles; where there is a probe its limit is
+            # named instead.
             limit = limit_phrase((rec.get('analysis') or {}).get('probe'))
             lines.append('  draw %-16s %7.3f bytes/cycle, output port idle %5.1f%%, input stalled '
                          '%5.1f%%%s  (%s)'
@@ -795,10 +787,9 @@ def progress_text(state):
 # ---------------------------------------------------------------------------
 # the roadmap: the engineer's advice, ranked by modelled gain
 #
-# roadmap.md used to be orders: "direction 1 MUST carry out the next
-# unfinished step, even where the library marks it AVOID". hacc-real200 spent
-# 12 iterations on one step that sessions had proved empty, declining with a
-# proof each time. Now each step carries a modelled gain, a session can
+# roadmap.md is advice, not orders: a step that sessions have proved empty
+# must not hold the loop for iterations. Each step carries a modelled gain, a
+# session can
 # dispute its step with a proof, and a step disputed twice (or measured at
 # about zero twice) is dropped and says so in the log. The engineer overrules
 # a drop by editing the step's text.
@@ -812,9 +803,9 @@ _TAG_BPC = re.compile(r'^(\d+(?:\.\d+)?)\s*B/cycle$', re.I)
 def parse_roadmap(text):
     """(preamble, [{'id', 'title', 'body', 'text', 'tag'}]) from roadmap.md.
 
-    A step starts at a line 'STEP <id>: title' or 'STEP <id>, title' (the
-    hacc-real200 file has 'STEP 4, if step 2-3 ...'; a colon-only rule folded
-    it into step 3). tag is the text of a '[model ...]' tag, or None.
+    A step starts at a line 'STEP <id>: title' or 'STEP <id>, title' (a
+    colon-only rule would fold 'STEP 4, if ...' into the step before). tag is
+    the text of a '[model ...]' tag, or None.
     """
     pre, steps = [], []
     for line in (text or '').splitlines():
@@ -838,11 +829,8 @@ def parse_roadmap(text):
 
 
 def roadmap_specs(steps):
-    """The K/L/N tags of the steps, for the packing model to evaluate.
-
-    Only tags the model accepts: one mistyped tag passed as --extra would
-    fail the whole packmodel run, and the planner would lose the standard
-    what-ifs over a typo. A tag left out here leaves its step unmodelled."""
+    """The tags of the steps an optional model can evaluate (none in this
+    kit). A tag left out here leaves its step unmodelled."""
     out = []
     for st in steps:
         tag = st.get('tag')
@@ -861,10 +849,8 @@ def roadmap_specs(steps):
 def model_step(tag, best_bpc, extra):
     """(modelled bytes/cycle, modelled gain %) for one tag, or (None, None).
 
-    '[model +x%]' and '[model y B/cycle]' are taken literally; a
-    '[model K4/L32/N32]' tag is the packing model's calibrated geomean for
-    the current best (extra, from the loop's packmodel run). An uncalibrated
-    model number is not comparable with the measured best, so it is unused.
+    '[model +x%]' and '[model y B/cycle]' are taken literally; any other
+    tag is an optional model's number (extra), unused unless calibrated.
     """
     if not tag or not best_bpc:
         return None, None
@@ -1101,128 +1087,18 @@ def apply_roadmap_events(state, events, log=None):
 
 
 # ---------------------------------------------------------------------------
-# the packing model, for the prompts
-
-PACKMODEL_TIMEOUT_S = 900
-
+# optional models for the prompts: none in this kit
 
 def run_packmodel(run_name, commit, specs):
-    """One loop-side packmodel run, as a subprocess (it uses a process pool,
-    and tools.run kills the whole tree on a timeout). Evaluates the standard
-    what-ifs plus the roadmap's K/L/N tags in one pass.
-    -> {'ok', 'text', 'extra': {spec: {'all', 'held', 'calibrated'}}, ...}"""
-    out = {'ok': False, 'text': '', 'extra': {}, 'commit': commit,
-           'specs': sorted(specs)}
-    if packmodel is None:
-        out['text'] = '(packing model unavailable: it does not import)'
-        return out
-    try:
-        cdir = packmodel.cache_dir()
-        os.makedirs(cdir, exist_ok=True)
-        jpath = os.path.join(cdir, 'loop-%s-%d.json' % (run_name, os.getpid()))
-        cmd = [sys.executable, os.path.join(KIT, 'packmodel.py'), '--prepare']
-        for spec in specs:
-            cmd += ['--extra', spec]
-        cmd += ['--json', jpath]
-        env = dict(os.environ, AGENTIC_RUN=run_name, AGENTIC_CALIB=commit)
-        res = tools_run(cmd, timeout=PACKMODEL_TIMEOUT_S, cwd=ROOT, env=env)
-        data = None
-        if res.ok:
-            try:
-                data = read_json(jpath, None)
-            except ValueError:
-                data = None
-        try:
-            os.remove(jpath)
-        except OSError:
-            pass
-        if res.ok and isinstance(data, dict) and data.get('text'):
-            out.update(ok=True, text=data['text'], extra=data.get('extra') or {})
-        else:
-            tail = (res.out or '').strip().splitlines()
-            last = tail[-1] if tail else ('timed out' if res.timed_out else 'no output')
-            out['text'] = '(packing model unavailable: %s)' % last[:200]
-    except Exception as exc:
-        out['text'] = '(packing model unavailable: %s)' % str(exc)[:200]
-    return out
+    return {'text': '', 'extra': {}}
 
 
 def calibrate_packmodel(run, log):
-    """Record the best design's packing-model calibration and point the run
-    at it (after the baseline, on resume, after every adoption). Logs a
-    change of model or widths: numbers made under two calibrations are
-    never compared. Never fatal."""
-    if packmodel is None:
-        return None
-    state = run.state
-    try:
-        rtl = os.path.join(run.base_dir, 'rtl')
-        widths = analyse.rtl_widths(rtl)
-        got = packmodel.write_calibration(run.name, state['best']['metrics'],
-                                          state['best']['commit'], widths, rtl_dir=rtl)
-    except Exception as exc:
-        log('packing model calibration skipped: %s' % str(exc)[:200])
-        return None
-    cal = got['calib']
-    log('packing model calibrated to %s: %s rules at K%s/L%s/N%s (%s)'
-        % (str(state['best']['commit'])[:10], cal.get('rules') or 'no', cal.get('K'),
-           cal.get('L'), cal.get('N'), cal.get('source')))
-    if got.get('changed'):
-        prev = got.get('previous') or {}
-        log('packing model calibration changed: %s rules K%s/L%s/N%s (%s) -> %s rules '
-            'K%s/L%s/N%s (%s). Numbers made under the two are not comparable.'
-            % (prev.get('rules'), prev.get('K'), prev.get('L'), prev.get('N'),
-               str(prev.get('commit'))[:10], cal.get('rules'), cal.get('K'), cal.get('L'),
-               cal.get('N'), str(cal.get('commit'))[:10]))
-        try:
-            old = read_json(packmodel_text_path(prev.get('commit')), None)
-        except Exception:
-            old = None
-        if old and old.get('text'):
-            log('  the standard what-ifs under the old calibration:\n' + old['text'])
-    return got
-
-
-def packmodel_text_path(commit):
-    return os.path.join(packmodel.cache_dir(), 'text-%s.json' % packmodel._commit_name(commit))
+    return None
 
 
 def packmodel_context(run, specs, log, timing):
-    """(text, extra) for the prompts: the packing model's standard what-ifs
-    for the current best, and its numbers for the roadmap's tags.
-
-    Computed once per best commit and set of tags, success or failure, and
-    kept in memory and in the cache folder, so a failing model costs one
-    attempt per best design, not one per iteration."""
-    if packmodel is None:
-        return '(packing model unavailable: it does not import)', {}
-    commit = run.state['best']['commit']
-    specs = sorted(specs)
-    mem = getattr(run, 'packmodel_cache', None)
-    if mem and mem.get('commit') == commit and set(specs) <= set(mem.get('specs') or []):
-        return mem['text'], mem.get('extra') or {}
-    try:
-        path = packmodel_text_path(commit)
-        disk = read_json(path, None)
-    except Exception:
-        path, disk = None, None
-    if isinstance(disk, dict) and disk.get('commit') == commit \
-            and set(specs) <= set(disk.get('specs') or []):
-        run.packmodel_cache = disk
-        return disk['text'], disk.get('extra') or {}
-    run.status.set(phase='plan', detail='packing model for the current best')
-    t0 = time.time()
-    got = run_packmodel(run.name, commit, specs)
-    timing['packmodel_s'] = round(time.time() - t0, 1)
-    log('packing model for %s (%.0f s):\n%s' % (commit[:10], timing['packmodel_s'],
-                                                got['text']))
-    run.packmodel_cache = got
-    if path:
-        try:
-            write_json(path, got)
-        except Exception as exc:
-            log('  could not cache the packing model text: %s' % str(exc)[:160])
-    return got['text'], got.get('extra') or {}
+    return '', {}
 
 
 # A fixed line before the skill library. Its notes are the learner's own text
@@ -1271,8 +1147,6 @@ class Run(object):
         self.state = read_json(self.state_path, None)
         self.limit_message = ''
         self.check_text = ''
-        # The packing model's text for the current best: {commit, specs,
-        # text, extra, ok}, so it is computed once per best design.
         self.packmodel_cache = None
 
     def save(self):
@@ -1295,7 +1169,7 @@ class Run(object):
             return ''
 
     def context(self, skills_data, k, log, timing):
-        """build_ctx with the roadmap and the packing model brought up to date:
+        """build_ctx with the roadmap brought up to date:
         the roadmap's steps synced into state (new steps, edits, modelled
         gains for the current best) and ranked by modelled gain."""
         state = self.state
@@ -1480,7 +1354,7 @@ def restart(name, log):
     # The child owns the run from here and saves it itself. This process must
     # never save again: its state is older than the child's. It used to fall
     # through to the interrupt handler when the window closed and write its
-    # copy last, which rolled hacc-real200 back from 24 iterations to 10.
+    # copy last, which rolled a run back by many iterations.
     # subprocess.call would also kill the child on Ctrl+C before it saved.
     child = subprocess.Popen(cmd, env=env)
     while True:
@@ -1535,7 +1409,7 @@ def prepare_base(run, log):
     """The base worktree with the current harness in it, for the starting
     check. The worktree holds the kit as committed at the run's start, and
     every `git reset --hard` of it (adopt, resume) puts that back; without
-    this the check would run without the probe and the packing model. Same
+    this the check would run without the probe. Same
     allowlist and manifest as a session's worktree. Returns the base dir."""
     try:
         propose.sync_harness(run.base_dir, os.path.join(run.dir, 'base.harness.json'))
@@ -2145,7 +2019,7 @@ def adopt(run, winner, metrics, k, log):
     state['guide_notes'] = propose.notes_section(winner.get('notes') or '', 'how it works')
     run.write_guide(notes=state['guide_notes'], facts=state.get('design_facts'))
     run.check_text = ''            # the design changed; the check must too
-    calibrate_packmodel(run, log)  # the packing model follows the new best
+    calibrate_packmodel(run, log)
 
 
 # Outcomes that say nothing about the mechanism a candidate tried: no change
@@ -2280,11 +2154,10 @@ def append_record(run, record, log, events=None):
 # ---------------------------------------------------------------------------
 # build tracks (change 4) and their step sessions (change 5)
 #
-# hacc-real200 stalled 18 iterations at +74.8% while a hand-built design
-# reached +228.7%. The widening it needed paid only when four parts changed
-# together; each part measured about zero (or worse) on its own, every
-# partial step was judged against the best and discarded, and one session
-# could not build it all. A track is such a change. A design session writes a
+# Some changes pay only when several parts change together: each part
+# measures about zero (or worse) on its own, every partial step judged
+# against the best is discarded, and one session cannot build it all. A
+# track is such a change. A design session writes a
 # spec and a step list; each later step builds one module plus its unit test
 # on the track's own branch, and is judged against its own prediction, never
 # against the best. Only the finished track is scored like a candidate.
@@ -2527,7 +2400,7 @@ def track_mark(asg):
 
 
 def track_history_line(k, c):
-    """e.g. '- i57 t2a1 track k4-l32 step 2 (ports): passed -- byte-exact'."""
+    """e.g. '- i7 t2a1 track my-track step 2 (ports): passed -- byte-exact'."""
     tr = c.get('track') or {}
     line = '- i%s %s track %s step %s (%s): %s' % (
         k, c.get('label'), tr.get('id'), tr.get('step'), tr.get('kind'),
@@ -2535,23 +2408,6 @@ def track_history_line(k, c):
     if c.get('reason'):
         line += ' -- ' + withheld(c['reason'])[:160]
     return line
-
-
-def width_spec(widths):
-    """'K4/L32/N32' (plus ' rules=dsw4') for a step's declared widths, or
-    None when they are not a setting the packing model accepts."""
-    try:
-        rules = str(widths.get('rules') or 'ideal').lower()
-        if rules not in ('ideal', 'dsw4'):
-            return None
-        spec = 'K%d/L%d/N%d' % (int(widths['K']), int(widths['L']), int(widths['N']))
-        if rules == 'dsw4':
-            spec += ' rules=dsw4'
-        if packmodel is not None:
-            packmodel.parse_spec(spec)
-        return spec
-    except Exception:
-        return None
 
 
 def judge_session(sess, has_commit, kind):
@@ -2582,11 +2438,8 @@ def judge_design(worktree, trk, model_fn, min_gain_pct=None):
 
     SPEC.md of at least 1500 characters; a steps.json of 1 to track_max_steps
     steps of valid kinds, ending with a throughput step; every throughput step
-    with widths {K, L, N, rules} and a prediction. Predictions cannot be
-    sandbagged: each must be at least 90% of the packing model at its
-    declared widths, under the track's own calibration (model_fn(specs) ->
-    {spec: {'all', 'calibrated'}}, one call for all steps), and the final one
-    must beat the base the track opened on."""
+    with a prediction, and the final one must beat the base the track opened
+    on. model_fn is unused in this kit."""
     tid = trk['id']
     docs = os.path.join(worktree, 'docs', 'track-' + tid)
     try:
@@ -2608,37 +2461,14 @@ def judge_design(worktree, trk, model_fn, min_gain_pct=None):
     steps, why = propose.sanitize_track_steps(raw, int(CONFIG.get('track_max_steps', 6)))
     if steps is None:
         return False, 'steps.json: %s' % why, None
-    specs = {}
     for j, st in enumerate(steps, 1):
-        if st['kind'] != 'throughput':
-            continue
-        if not st['predicted_bpc']:
+        if st['kind'] == 'throughput' and not st['predicted_bpc']:
             return False, 'step %d (throughput) has no predicted_bpc' % j, None
-        spec_j = width_spec(st['widths'] or {})
-        if not spec_j:
-            return False, ('step %d (throughput) has no valid widths {"K", "L", "N", '
-                           '"rules"}' % j), None
-        specs[j] = spec_j
     gain = float(CONFIG['min_gain_pct'] if min_gain_pct is None else min_gain_pct)
     need = (trk.get('base_bpc') or 0) * (1.0 + gain / 100.0)
     if steps[-1]['predicted_bpc'] <= need:
         return False, ('the final step predicts %.2f B/cycle, not above the %.2f the track '
                        'opened on' % (steps[-1]['predicted_bpc'], trk.get('base_bpc') or 0)), None
-    try:
-        got = model_fn(sorted(set(specs.values()))) if specs else {}
-    except Exception:
-        got = {}
-    unchecked = []
-    for j, spec_j in sorted(specs.items()):
-        mod = (got or {}).get(spec_j) or {}
-        if mod.get('calibrated') and mod.get('all'):
-            if steps[j - 1]['predicted_bpc'] < 0.9 * float(mod['all']):
-                return False, ('step %d predicts %.2f B/cycle, under 90%% of the packing '
-                               'model\'s %.2f at %s' % (j, steps[j - 1]['predicted_bpc'],
-                                                         float(mod['all']), spec_j)), None
-            steps[j - 1]['model_bpc'] = round(float(mod['all']), 3)
-        else:
-            unchecked.append(str(j))
     out = []
     for j, st in enumerate(steps, 1):
         out.append({'n': j, 'kind': st['kind'], 'text': st['text'],
@@ -2646,9 +2476,7 @@ def judge_design(worktree, trk, model_fn, min_gain_pct=None):
                     'module': st.get('module') or '', 'model_bpc': st.get('model_bpc'),
                     'source': 'spec', 'status': 'pending', 'ref': None, 'attempts': [],
                     'notes': ''})
-    note = ('%d steps accepted' % len(out)) + (
-        '; predictions of step %s not checked (no calibrated packing model)'
-        % ', '.join(unchecked) if unchecked else '')
+    note = '%d steps accepted' % len(out)
     return True, note, out
 
 
@@ -3092,8 +2920,7 @@ def prepare_track_slot(run, trk, k, iter_dir, log):
 
 
 def track_model_fn(run, trk):
-    """The packing model under the track's own calibration, for judging a
-    design's predictions: one subprocess call for all the step widths."""
+    """An optional model for judging a design's predictions (none here)."""
     def model(specs):
         return run_packmodel(run.name, trk.get('calib_commit'), specs).get('extra') or {}
     return model
@@ -3271,7 +3098,7 @@ def apply_track_command(run, trk, cmd, k, events, log, dry_run=False):
 
 
 # Simulation and synthesis overlap inside measure, so they are not its parts.
-TIMING_ORDER =(('packmodel_s', 'packing model'), ('plan_s', 'plan'), ('check_s', 'check'),
+TIMING_ORDER =(('packmodel_s', 'model'), ('plan_s', 'plan'), ('check_s', 'check'),
                 ('write_s', 'write'),
                 ('measure_s', 'measure'), ('sim_s', 'simulating'),
                 ('synth_s', 'synthesising alongside'), ('learn_s', 'learn'))
@@ -3774,8 +3601,7 @@ def main():
 
     run = Run(name)
     log = run.log
-    # The packing model a session runs finds this run's calibration through
-    # it; sessions inherit the loop's environment.
+    # Sessions inherit the loop's environment.
     os.environ['AGENTIC_RUN'] = name
     log('agentic loop starting: run %s in %s' % (name, ROOT))
     problems = preflight(log, need_model=not args.dry_run)
