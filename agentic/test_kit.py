@@ -578,6 +578,134 @@ def test_a_lost_host_is_not_a_design_verdict():
           ev['outcome'] == 'measure_error' and not ev['adoptable'], str(ev))
 
 
+def _fast_guard_fixture(tmp):
+    """Draws with real cs.tv sizes (two small, three long) and a best design
+    measured on all of them."""
+    import stim
+    draws = []
+    for name, size, scored in (('synth-512B', 600, False), ('held-tiny', 900, False),
+                               ('train-visible', 2 << 20, True), ('held-alpha', 2 << 20, True),
+                               ('held-beta', 2 << 20, True)):
+        ddir = os.path.join(tmp, name)
+        os.makedirs(ddir, exist_ok=True)
+        with open(os.path.join(ddir, 'cs.tv'), 'wb') as fil:
+            fil.truncate(size)
+        draw = stim.Draw.__new__(stim.Draw)
+        draw.name, draw.scored = name, scored
+        draws.append((draw, ddir, 1))
+    per = {'train-visible': 10.0, 'held-alpha': 12.0, 'held-beta': 15.0,
+           'synth-512B': 25.0, 'held-tiny': 11.0}
+    best = {'bytes_per_cycle': 12.164, 'f_max_mhz': 250.0, 'throughput_gbps': 3.041,
+            'synth_backend': 'hacc', 'oracle_pass': True, 'luts': 9000, 'area': 9000,
+            'draws': [{'name': n, 'bytes_per_cycle': v,
+                       'scored': n in ('train-visible', 'held-alpha', 'held-beta')}
+                      for n, v in per.items()]}
+    return draws, best
+
+
+def test_fast_and_guard_iterations():
+    import shutil
+    import tempfile
+    import loop
+    tmp = tempfile.mkdtemp()
+    saved = dict(loop.CONFIG)
+    try:
+        loop.CONFIG.update(fast_draws='held-alpha, held-beta', guard_every=5,
+                           min_gain_pct=0.2, pnr_noise_pct=1.0)
+        draws, best = _fast_guard_fixture(tmp)
+        kinds = [loop.iteration_kind({}, k) for k in range(1, 11)]
+        check('fast/guard: four fast iterations, then a guard',
+              kinds == ['fast'] * 4 + ['guard'] + ['fast'] * 4 + ['guard'], str(kinds))
+        check('fast/guard: a due clock repair and a due guard take precedence',
+              loop.iteration_kind({'clock_due': {'iteration': 5}}, 6) == 'clock'
+              and loop.iteration_kind({'guard_due': True, 'clock_due': {}}, 7) == 'guard')
+        loop.CONFIG['guard_every'] = 0
+        check('fast/guard: off unless both are set', loop.iteration_kind({}, 5) == 'full')
+        loop.CONFIG['guard_every'] = 5
+        names = [d[0].name for d in loop.kind_draws(draws, 'fast')]
+        check('fast/guard: a fast iteration simulates the small draws and fast_draws',
+              names == ['synth-512B', 'held-tiny', 'held-alpha', 'held-beta']
+              and len(loop.kind_draws(draws, 'guard')) == 5, str(names))
+        fast = loop.kind_draws(draws, 'fast')
+        ref = loop.subset_view(best, fast)
+        check('fast/guard: the reference is the best on the same scored draws',
+              abs(ref['bytes_per_cycle'] - (12.0 * 15.0) ** 0.5) < 1e-3
+              and abs(ref['throughput_gbps'] - ref['bytes_per_cycle'] * 0.25) < 1e-3, str(ref))
+        cand = {'oracle_pass': True, 'bytes_per_cycle': round(ref['bytes_per_cycle'] * 1.01, 4),
+                'f_max_mhz': None, 'draws': []}
+        carried = loop.carry_clock(cand, ref)
+        ev = loop.evaluate(carried, ref, {'metric': 'throughput'})
+        check('fast/guard: an unsynthesised +1% bytes/cycle is a +1% adoptable gain',
+              carried.get('f_max_carried') and carried['f_max_mhz'] == 250.0
+              and ev['adoptable'] and abs(ev['measured']['gain_pct'] - 1.0) < 0.01, str(ev))
+        broken = loop.carry_clock({'oracle_pass': False, 'draws': []}, ref)
+        check('fast/guard: a failing candidate is not given a clock',
+              'f_max_mhz' not in broken)
+
+        class FakeRun(object):
+            def __init__(self, state):
+                self.state, self.base_dir, self.check_text = state, tmp, 'x'
+
+            def set_progress(self):
+                pass
+
+            def write_guide(self, notes=None, facts=None):
+                pass
+
+        logged = []
+        resets = []
+        saved_git = loop.git
+        loop.git = lambda args, **kw: resets.append(args) or ''
+        try:
+            def state_with_fast_best():
+                st = {'best': {'commit': 'g0', 'id': 'guarded', 'iteration': 3,
+                               'metrics': dict(best), 'guarded': True}}
+                st['last_guarded'] = loop.guard_snapshot(st, 5)
+                st['best'] = {'commit': 'f1', 'id': 'fast-win', 'iteration': 7,
+                              'metrics': dict(best, bytes_per_cycle=13.0), 'guarded': False}
+                return st
+            st = state_with_fast_best()
+            ref2, ev2 = loop.settle_guard(FakeRun(st), {'oracle_pass': False,
+                                                        'first_problem': 'held-part byte 9'},
+                                          10, logged.append)
+            check('fast/guard: a best that breaks a draw at the guard is rolled back',
+                  ev2['kind'] == 'rollback' and st['best']['commit'] == 'g0'
+                  and resets[-1] == ['reset', '--hard', 'g0'] and ref2 is not None, str(ev2))
+            st = state_with_fast_best()
+            got = dict(best, bytes_per_cycle=12.0, f_max_mhz=240.0)
+            _r, ev3 = loop.settle_guard(FakeRun(st), got, 10, logged.append)
+            check('fast/guard: gains that do not hold on every draw are rolled back',
+                  ev3['kind'] == 'rollback' and st['best']['commit'] == 'g0', str(ev3))
+            st = state_with_fast_best()
+            got = dict(best, bytes_per_cycle=12.9, f_max_mhz=240.0, throughput_gbps=3.096)
+            ref4, ev4 = loop.settle_guard(FakeRun(st), got, 10, logged.append)
+            check('fast/guard: a best that holds is confirmed with its real numbers',
+                  ev4['kind'] == 'guard_held' and st['best']['guarded']
+                  and st['best']['metrics']['f_max_mhz'] == 240.0
+                  and ref4['bytes_per_cycle'] == 12.9, str(ev4))
+            loop.close_guard(st, 10, logged.append)
+            check('fast/guard: a guard that finds f_max fell schedules a clock iteration',
+                  (st.get('clock_due') or {}).get('to_mhz') == 240.0
+                  and st['last_guarded']['best']['commit'] == 'f1'
+                  and loop.iteration_kind(st, 11) == 'clock', str(st.get('clock_due')))
+            st = state_with_fast_best()
+            _r, ev5 = loop.settle_guard(FakeRun(st), {'measure_error': 'oom', 'draws': []},
+                                        10, logged.append)
+            check('fast/guard: an unmeasurable best is guarded again, not judged',
+                  ev5['kind'] == 'guard_unmeasured' and st['guard_due']
+                  and st['best']['commit'] == 'f1' and not st['best']['guarded'])
+        finally:
+            loop.git = saved_git
+        note = loop.kind_note({}, 'fast', 7)
+        check('fast/guard: the brief says what is measured and when the guard is',
+              'FAST' in note and 'Iteration 10 is a GUARD' in note
+              and 'alpha' not in note and 'beta' not in note, note)
+    finally:
+        loop.CONFIG.clear()
+        loop.CONFIG.update(saved)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_simulators_are_shared_out():
     import loop
     saved = loop.CONFIG['sim_slots']

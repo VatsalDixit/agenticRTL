@@ -117,6 +117,13 @@ DEFAULT_CONFIG = {
     "packmodel_calib_rules": "ideal",
     "packmodel_widths": None,
     "packmodel_jobs": 3,
+    # Fast and guard iterations (loop.iteration_kind). With both set, every
+    # guard_every-th iteration simulates every draw and synthesises (a
+    # GUARD); the others simulate the small draws plus fast_draws (a comma
+    # list of draw names) and are judged on bytes/cycle alone. Empty or 0:
+    # every iteration measures everything, as before.
+    "fast_draws": "",
+    "guard_every": 0,
     # Build tracks: an architecture change too big for one session (the
     # hand-built DSW-4 took a design plus about four build steps, each of
     # which measured about zero until the last), built step by step on its

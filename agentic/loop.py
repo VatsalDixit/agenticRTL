@@ -56,7 +56,7 @@ import report                          # noqa: E402
 import skills as skills_mod            # noqa: E402
 from tools import (CONFIG, ROOT, GitError, Logger, eda_available, git,  # noqa: E402
                    git_ok, now_iso, pct, read_json, rmtree, write_json,
-                   area_of, area_unit, backend_of)
+                   area_of, area_unit, backend_of, geomean)
 from tools import run as tools_run                                    # noqa: E402
 from tools import kill_all as tools_kill_all                          # noqa: E402
 try:
@@ -1776,6 +1776,203 @@ def measure_one(args):
 
 
 # ---------------------------------------------------------------------------
+# fast and guard iterations
+#
+# With fast_draws set and guard_every > 0, most iterations are FAST: they
+# simulate the small draws plus fast_draws only and do not synthesise.
+# Candidates are judged on bytes/cycle over those tables, the parent's last
+# synthesised f_max being carried for both sides, so the gain is exactly the
+# bytes/cycle gain. Every guard_every-th iteration is a GUARD: every draw and
+# synthesis, for the candidates and, when the best was adopted in a fast
+# iteration, for the best too. A best that breaks any draw, cannot be
+# synthesised, or whose bytes/cycle over all scored draws fell below the last
+# guarded design's is rolled back to that design. When a guard finds f_max
+# lower than the guard before it, the next iteration is a CLOCK one: the fast
+# draws plus synthesis, judged on throughput, so a clock repair can win.
+
+def fast_names():
+    """fast_draws as a list: a JSON list in config.json, or a comma list
+    (AGENTIC_FAST_DRAWS)."""
+    val = CONFIG.get('fast_draws') or []
+    if isinstance(val, str):
+        val = val.split(',')
+    return [v.strip() for v in val if v and v.strip()]
+
+
+def iteration_kind(state, k):
+    """'full' (scheme off), 'guard', 'clock' or 'fast' for iteration k."""
+    every = int(CONFIG.get('guard_every') or 0)
+    if not fast_names() or every <= 0:
+        return 'full'
+    if state.get('guard_due') or k % every == 0:
+        return 'guard'
+    if state.get('clock_due'):
+        return 'clock'
+    return 'fast'
+
+
+def kind_draws(draws, kind):
+    """The draws an iteration of this kind simulates: all of them, or the
+    small ones (cheap, and they catch most breakage) plus fast_draws."""
+    if kind in ('full', 'guard'):
+        return draws
+    keep = set(fast_names())
+    return [d for d in draws
+            if d[0].name in keep or measure.draw_bytes(d) <= measure.QUICK_DRAW_BYTES]
+
+
+def throughput_of(bpc, f_max_mhz):
+    if not bpc or not f_max_mhz:
+        return None
+    return round(bpc * f_max_mhz / 1000.0, 4)
+
+
+def subset_view(metrics, draws):
+    """``metrics`` as measured on ``draws`` alone: bytes/cycle is the geomean
+    of the scored draws among them, throughput that times the f_max last
+    synthesised. Every draw's bytes/cycle is deterministic, so the best's
+    recorded per-draw numbers stand in for a re-run of it."""
+    names = set(d[0].name for d in draws)
+    scored = [r['bytes_per_cycle'] for r in (metrics.get('draws') or [])
+              if r.get('name') in names and r.get('scored') and r.get('bytes_per_cycle')]
+    bpc = geomean(scored)
+    out = dict(metrics)
+    out['bytes_per_cycle'] = round(bpc, 4) if bpc else None
+    out['throughput_gbps'] = throughput_of(out['bytes_per_cycle'], metrics.get('f_max_mhz'))
+    return out
+
+
+def carry_clock(metrics, ref):
+    """A candidate simulated but not synthesised, given the parent's f_max
+    (marked as carried) so that its throughput gain is its bytes/cycle gain.
+    Area and timing stay unmeasured."""
+    if (metrics.get('f_max_mhz') is not None or not metrics.get('oracle_pass')
+            or not metrics.get('bytes_per_cycle') or not ref.get('f_max_mhz')):
+        return metrics
+    out = dict(metrics)
+    out['f_max_mhz'] = ref['f_max_mhz']
+    out['f_max_from'] = ref.get('f_max_from', 0)
+    out['f_max_carried'] = True
+    out['synth_backend'] = backend_of(ref)
+    out['throughput_gbps'] = throughput_of(out['bytes_per_cycle'], out['f_max_mhz'])
+    return out
+
+
+def guard_snapshot(state, k):
+    """What a rollback returns to: the best as a guard confirmed it."""
+    return {'best': copy.deepcopy(state['best']), 'iteration': k,
+            'guide_notes': state.get('guide_notes')}
+
+
+def rollback(run, why, k, log):
+    """Back to the last guarded design: its branch, its numbers, its guide."""
+    state = run.state
+    last = state['last_guarded']
+    lost = state['best']
+    git(['reset', '--hard', last['best']['commit']], cwd=run.base_dir)
+    state['best'] = copy.deepcopy(last['best'])
+    state['guide_notes'] = last.get('guide_notes')
+    run.set_progress()
+    run.write_guide(notes=state.get('guide_notes'), facts=state.get('design_facts'))
+    run.check_text = ''
+    banner(log, 'GUARD: rolled back from %s (i%s) to %s (i%s): %s'
+           % (lost.get('id'), lost.get('iteration'), state['best'].get('id'),
+              state['best'].get('iteration'), why))
+    return {'kind': 'rollback', 'iteration': k, 'from': lost.get('commit'),
+            'from_id': lost.get('id'), 'to': state['best'].get('commit'), 'why': why}
+
+
+def settle_guard(run, got, k, log):
+    """Judge the best's own guard measurement (None: it was already guarded).
+    Returns (the metrics this iteration's candidates are scored against,
+    an event for the record or None)."""
+    state = run.state
+    if got is None:
+        return state['best']['metrics'], None
+    last = state['last_guarded']['best']['metrics']
+    if got.get('measure_error'):
+        # The tools failed, not the design: guard again next iteration, and
+        # score this iteration's candidates against the guarded design.
+        state['guard_due'] = True
+        log('  GUARD: the best could not be measured (%s); guarding again next iteration'
+            % got['measure_error'][:200])
+        return last, {'kind': 'guard_unmeasured', 'iteration': k}
+    if got.get('error') or not got.get('oracle_pass'):
+        why = 'it breaks a draw: %s' % (got.get('error') or got.get('first_problem')
+                                        or 'oracle failed')[:200]
+        return last, rollback(run, why, k, log)
+    if got.get('synth_error') or not got.get('f_max_mhz'):
+        why = 'it cannot be synthesised: %s' % (got.get('synth_error') or 'no f_max')[:200]
+        return last, rollback(run, why, k, log)
+    floor = (last.get('bytes_per_cycle') or 0) * (1 - float(CONFIG['min_gain_pct']) / 100.0)
+    if (got.get('bytes_per_cycle') or 0) < floor:
+        why = ('bytes/cycle over all scored draws is %.4f, below the guarded %.4f: '
+               'the fast-iteration gains did not hold'
+               % (got.get('bytes_per_cycle') or 0, last.get('bytes_per_cycle') or 0))
+        return last, rollback(run, why, k, log)
+    fast_bpc = state['best']['metrics'].get('bytes_per_cycle')
+    got = dict(got, f_max_from=k)
+    state['best']['metrics'] = best_view(got)
+    state['best']['guarded'] = True
+    run.set_progress()
+    log('  GUARD: %s holds on every draw: bytes/cycle %.4f (fast estimate %.4f), '
+        'f_max %.1f MHz (guarded design %.1f MHz), throughput %.3f GB/s'
+        % (state['best'].get('id'), got['bytes_per_cycle'], fast_bpc or 0,
+           got['f_max_mhz'], last.get('f_max_mhz') or 0, got.get('throughput_gbps') or 0))
+    return state['best']['metrics'], {'kind': 'guard_held', 'iteration': k,
+                                      'commit': state['best'].get('commit')}
+
+
+def close_guard(state, k, log):
+    """After a guard iteration (and its adoption, if any): the best is
+    confirmed; if its f_max fell below the previous guard's, the next
+    iteration repairs the clock."""
+    if not state['best'].get('guarded', True):
+        return
+    prev = state['last_guarded']['best']['metrics'].get('f_max_mhz') or 0
+    now = state['best']['metrics'].get('f_max_mhz') or 0
+    noise = float(CONFIG['pnr_noise_pct']) / 100.0
+    state['clock_due'] = None
+    if prev and now and now < prev * (1 - noise):
+        state['clock_due'] = {'iteration': k, 'from_mhz': prev, 'to_mhz': now,
+                              'path': state['best']['metrics'].get('critical_path')}
+        log('  GUARD: f_max fell from %.1f to %.1f MHz; the next iteration repairs the clock'
+            % (prev, now))
+    state['last_guarded'] = guard_snapshot(state, k)
+    state['guard_due'] = False
+
+
+def kind_note(state, kind, k):
+    """What this iteration measures, for the planner and the sessions."""
+    every = int(CONFIG.get('guard_every') or 0)
+    nxt = (k // every + 1) * every if every else 0
+    if kind == 'fast':
+        return ('MEASUREMENT THIS ITERATION: FAST. Candidates are simulated on the small '
+                'draws and two held-out tables only and judged on bytes/cycle alone. '
+                'Synthesis does not run, so f_max and area are not measured (the f_max '
+                'shown is from the last synthesis) and a change that only helps the clock '
+                'cannot win. Iteration %d is a GUARD: every table is simulated and every '
+                'design synthesised; a best design that breaks any table there, or whose '
+                'bytes/cycle over all tables does not hold, is rolled back.' % nxt)
+    if kind == 'guard':
+        return ('MEASUREMENT THIS ITERATION: GUARD. Every table is simulated and every '
+                'candidate synthesised; candidates are judged on throughput '
+                '(bytes/cycle x f_max).')
+    if kind == 'clock':
+        due = state.get('clock_due') or {}
+        path = due.get('path') or {}
+        return ('MEASUREMENT THIS ITERATION: CLOCK. The guard at iteration %s measured '
+                'f_max at %.1f MHz, down from %.1f MHz at the guard before%s. Candidates '
+                'are simulated on the small draws and two held-out tables and '
+                'synthesised, and judged on throughput (bytes/cycle x f_max): recovering '
+                'the clock without losing bytes/cycle wins.'
+                % (due.get('iteration'), due.get('to_mhz') or 0, due.get('from_mhz') or 0,
+                   (' (worst path %s -> %s)' % (path.get('from'), path.get('to')))
+                   if path.get('from') else ''))
+    return ''
+
+
+# ---------------------------------------------------------------------------
 # the steps of an iteration, shared by both schedules
 
 def new_assignment(state, k, label, direction, start, iter_dir):
@@ -1930,7 +2127,10 @@ def adopt(run, winner, metrics, k, log):
     # included) because the next brief is built from it; the iteration
     # record keeps the stripped copy.
     state['best'] = {'commit': winner['commit'], 'metrics': best_view(metrics),
-                     'iteration': k, 'id': winner['id']}
+                     'iteration': k, 'id': winner['id'],
+                     # Measured on every draw and synthesised, or only on a
+                     # fast or clock iteration's draws (the next guard checks).
+                     'guarded': metrics.get('measured_on', 'full') in ('full', 'guard')}
     if winner.get('track'):
         # The track that won. Its closing is saved only with the iteration
         # record; an interrupt in between saves this best alone, and the
@@ -2950,7 +3150,7 @@ def adopted_unsaved(run, trk, k, events, log):
     return cand
 
 
-def rescore_final_pending(run, trk, k, draws, events, log):
+def rescore_final_pending(run, trk, k, draws, events, log, ref_draws=None):
     """At the start of an iteration: a final step that beat the best but lost
     to a sibling is compared with the best again (no session, no
     measurement: throughput is absolute). Adopted if it still wins, after
@@ -2978,7 +3178,12 @@ def rescore_final_pending(run, trk, k, draws, events, log):
         events.append({'kind': 'track_final', 'track': trk['id'], 'outcome': 'adopted',
                        'iteration': k})
         return cand
-    ev = evaluate(fin.get('metrics') or {}, state['best']['metrics'], state['goal'])
+    fin_metrics, best_metrics = fin.get('metrics') or {}, state['best']['metrics']
+    if ref_draws is not None:
+        # A fast or clock iteration: both sides on the same draws.
+        fin_metrics = subset_view(fin_metrics, ref_draws)
+        best_metrics = subset_view(best_metrics, ref_draws)
+    ev = evaluate(fin_metrics, best_metrics, state['goal'])
     best_ram = ram_latency(os.path.join(run.base_dir, 'rtl'))
     if ev['adoptable'] and ram_latency_at(fin['commit']) not in (best_ram,):
         ev['adoptable'] = False
@@ -3133,11 +3338,19 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         resuming = keep_track_slots(resuming, trk, log)
     run.status.set(phase='plan', iteration=k, detail='choosing %d directions' % n_cands)
     log('== iteration %d of %d ==' % (k, state['max_iters']))
+    kind = iteration_kind(state, k)
+    it_draws = kind_draws(draws, kind)
+    synth_on = kind in ('full', 'guard', 'clock')
+    if kind != 'full':
+        log('measurement: %s -- %d draws%s' % (
+            kind.upper(), len(it_draws), ', with synthesis' if synth_on else ', no synthesis'))
     early = []
     if trk is not None and not dry_run:
         got = adopted_unsaved(run, trk, k, events, log)
         if got is None and trk['status'] == 'final_pending':
-            got = rescore_final_pending(run, trk, k, draws, events, log)
+            got = rescore_final_pending(run, trk, k, draws, events, log,
+                                        ref_draws=None if kind in ('full', 'guard')
+                                        else it_draws)
         if got:
             early.append(got)
     parent = state['best']['metrics']
@@ -3148,6 +3361,15 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
     ctx = run.context(skills_data, k, log, timing)
     ctx['check_text'] = run.check_text
     ctx['tracks_text'] = tracks_text(state, trk)
+    note = kind_note(state, kind, k)
+    if note:
+        ctx['state_text'] = note + '\n\n' + ctx['state_text']
+    if kind == 'clock':
+        ctx['lever'] = {'lever': 'clock', 'reason': 'this is a CLOCK iteration: the last '
+                        'guard found f_max lower than the guard before it'}
+    elif kind == 'fast' and (ctx.get('lever') or {}).get('lever') == 'clock':
+        ctx['lever'] = {'lever': 'bytes/cycle', 'reason': 'the profile points at the clock, '
+                        'but this is a FAST iteration and only bytes/cycle is measured'}
     tracks_on = bool(CONFIG.get('tracks_enabled', True))
     track_cmd = {}
     if resuming:
@@ -3352,14 +3574,28 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                   if c['commit'] and c['outcome'] != 'no_proposal'
                   and (c is not track_c or (pre or {}).get('measure'))]
     raw = {}
-    run.status.set(phase='measure', detail='%d candidates: simulate + synthesise' % len(to_measure))
-    if to_measure:
-        log('measuring %d candidate(s)...' % len(to_measure))
-        per = sim_jobs(len(to_measure))
+    guard_ev = None
+    # A guard measures a best adopted in fast iterations alongside the
+    # candidates; its verdict sets what they are scored against.
+    guard_best = kind == 'guard' and not state['best'].get('guarded', True)
+    run.status.set(phase='measure', detail='%s%d candidates: %s' % (
+        '' if kind == 'full' else kind + ': ', len(to_measure),
+        'simulate + synthesise' if synth_on else 'simulate %d draws' % len(it_draws)))
+    ref = parent
+    if kind in ('fast', 'clock'):
+        ref = subset_view(parent, it_draws)
+    if to_measure or guard_best:
+        log('measuring %d candidate(s)%s...' % (
+            len(to_measure), ' and the best design (guard)' if guard_best else ''))
         jobs = [(os.path.join(asg['worktree'], 'rtl'),
-                 os.path.join(iter_dir, c['label'] + '-measure'), draws, per,
-                 pre['synth'] if c is track_c else True)
+                 os.path.join(iter_dir, c['label'] + '-measure'), it_draws, 0,
+                 synth_on and (pre['synth'] if c is track_c else True))
                 for c, asg in to_measure]
+        if guard_best:
+            jobs.append((os.path.join(run.base_dir, 'rtl'),
+                         os.path.join(iter_dir, 'guard-best-measure'), draws, 0, True))
+        per = sim_jobs(len(jobs))
+        jobs = [(j[0], j[1], j[2], per, j[4]) for j in jobs]
         t0 = time.time()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs))
         try:
@@ -3375,14 +3611,27 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
             vals = [m.get(src) for m in metrics_list if m.get(src) is not None]
             if vals:
                 timing[key] = max(vals)
+        for metrics in metrics_list:
+            metrics['measured_on'] = kind
+            if metrics.get('f_max_mhz') is not None:
+                metrics['f_max_from'] = k
+        guard_got = None
+        if guard_best:
+            guard_got = metrics_list.pop()
+            guard_got['measured_on'] = 'guard'
+            rmtree(os.path.join(iter_dir, 'guard-best-measure', 'sim'))
+        if kind == 'guard':
+            ref, guard_ev = settle_guard(run, guard_got, k, log)
         parent_ram = ram_latency(os.path.join(run.base_dir, 'rtl'))
         parent_model = ram_model_of(os.path.join(run.base_dir, 'rtl'))
         for (c, asg), metrics in zip(to_measure, metrics_list):
+            if not synth_on:
+                metrics = carry_clock(metrics, ref)
             raw[c['label']] = metrics
             sim_only = c is track_c and not pre['synth']
             # A step simulated without synthesis would read 'failed_synth'
             # here; its verdict comes from the track's own judging below.
-            score_candidate(c, asg, metrics, parent, goal, parent_ram,
+            score_candidate(c, asg, metrics, ref, goal, parent_ram,
                             os.path.join(iter_dir, c['label'] + '-measure'),
                             (lambda m: None) if sim_only else log, parent_model)
             if sim_only:
@@ -3412,7 +3661,7 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                        % winner['label'])
         differs = probe_clean_check(os.path.join(asg['worktree'], 'rtl'),
                                     os.path.join(iter_dir, winner['label'] + '-measure'),
-                                    raw[winner['label']], draws,
+                                    raw[winner['label']], it_draws,
                                     sim_jobs(1), log)
         if differs:
             probe_disagreed(run, cands, differs, log)
@@ -3430,6 +3679,10 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         # and most iterations adopt nothing.
         if state.get('design_facts') != facts_before:
             run.write_guide(notes=state.get('guide_notes'), facts=state.get('design_facts'))
+    if kind == 'guard':
+        close_guard(state, k, log)
+    elif kind == 'clock':
+        state['clock_due'] = None
 
     # the track: the step's verdict, applied to the working copy
     if track_c is not None:
@@ -3460,6 +3713,11 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         record['track'] = {'id': trk['id'], 'status': trk['status'],
                            'current': trk['current'],
                            'iterations_used': trk.get('iterations_used')}
+    if kind != 'full':
+        record['measure_kind'] = kind
+        record['best_guarded'] = bool(state['best'].get('guarded', True))
+    if guard_ev:
+        record['guard'] = guard_ev
     append_record(run, record, log, events=roadmap_events(cands, k) + events)
     keep = (trk or {}).get('pending_slot') or {}
     for asg in assignments:
@@ -3608,6 +3866,14 @@ def main():
             run.status.set(phase='failed', detail=problem[:200], finished=now_iso())
             return 1
         state['draw_names'] = sorted(d.name for d, _p, _c in draws)
+        missing = [n for n in fast_names() if n not in state['draw_names']]
+        if missing and int(CONFIG.get('guard_every') or 0) > 0:
+            problem = ('fast_draws names %s, which the corpus does not have (it has %s)'
+                       % (', '.join(missing), ', '.join(state['draw_names'])))
+            log('PROBLEM: %s' % problem)
+            state['stopped'] = 'corpus check failed'
+            run.status.set(phase='failed', detail=problem[:200], finished=now_iso())
+            return 1
         log('corpus: %d draws (%d scored, %d synthetic)%s' % (
             len(draws), sum(1 for d, _p, _c in draws if d.scored),
             sum(1 for d, _p, _c in draws if d.kind == 'synthetic'),
@@ -3661,8 +3927,10 @@ def main():
                 return 1
             base = best_view(base)
             state['baseline'] = base
+            base['f_max_from'] = 0
             state['best'] = {'commit': state['base_commit'], 'metrics': base,
-                             'iteration': 0, 'id': 'baseline'}
+                             'iteration': 0, 'id': 'baseline', 'guarded': True}
+            state['last_guarded'] = guard_snapshot(state, 0)
             run.set_progress()
             run.save()
             run.write_guide(facts=state.get('design_facts'))
@@ -3677,6 +3945,8 @@ def main():
         else:
             calibrate_packmodel(run, log)
 
+        if 'last_guarded' not in state and state['best'].get('guarded', True):
+            state['last_guarded'] = guard_snapshot(state, len(state['iterations']))
         target = state['goal'].get('target_pct')
         since_winner = 0
         limit_waits = 0
@@ -3686,8 +3956,14 @@ def main():
         while k <= state['max_iters']:
             gain = goal_gain(state['best']['metrics'], state['baseline'], state['goal'])
             if target and gain is not None and gain >= target:
-                state['stopped'] = 'target met: %+.2f%% on %s' % (gain, state['goal']['metric'])
-                break
+                if state['best'].get('guarded', True):
+                    state['stopped'] = 'target met: %+.2f%% on %s' % (gain, state['goal']['metric'])
+                    break
+                if not state.get('guard_due'):
+                    # Met on a fast measurement only: confirm it on every
+                    # draw, with synthesis, before stopping.
+                    log('the goal is met on a fast measurement; iteration %d guards it' % k)
+                    state['guard_due'] = True
             if args.patience and since_winner >= args.patience:
                 state['stopped'] = '%d iterations without a winner' % since_winner
                 break
