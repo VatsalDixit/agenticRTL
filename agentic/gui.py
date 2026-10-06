@@ -194,11 +194,26 @@ class Store(object):
             return pid_alive(self.status.get('pid'))
         return bool(seen.get('alive')) and time.time() - seen.get('checked', 0) < MIRROR_STALE_S
 
+    def stopped(self):
+        """Why the run is over, or None while it runs.
+
+        The live loop rewrites status.json at every phase but state.json only
+        when an iteration ends, so a resumed run keeps its last stop
+        ("interrupted") in state.json until then. That flag counts only when
+        status.json agrees, or when no loop process is alive to contradict it.
+        """
+        st, state = self.status, self.state
+        if st.get('finished'):
+            return state.get('stopped') or st.get('detail') or 'finished'
+        if state.get('stopped') and not self.alive():
+            return state.get('stopped')
+        return None
+
     def liveness(self):
         """(label, colour). Honest about a dead process holding a live file."""
-        st, state = self.status, self.state
-        if state.get('stopped') or st.get('finished'):
-            done = state.get('stopped') or st.get('detail') or 'finished'
+        st = self.status
+        done = self.stopped()
+        if done:
             bad = any(w in done.lower() for w in ('crash', 'fail', 'interrupt'))
             return ('FINISHED: ' + done, C['crit'] if bad else C['accent'])
         if st.get('phase') == 'waiting':
@@ -350,7 +365,8 @@ class FlowDiagram(tk.Canvas):
         st = self.store.status
         state = self.store.state
         phase = st.get('phase') or ''
-        stopped = bool(state.get('stopped') or st.get('finished'))
+        why_stopped = self.store.stopped()
+        stopped = bool(why_stopped)
         waiting = phase == 'waiting'
         done_setup = bool(state.get('baseline'))
 
@@ -400,7 +416,7 @@ class FlowDiagram(tk.Canvas):
             y = self._banner(x1, x2, y, 'WAITING', st.get('detail') or
                              'the model provider reports a usage limit', C['warn'], C['warnbg'])
         if stopped:
-            done = state.get('stopped') or st.get('detail') or 'finished'
+            done = why_stopped
             bad = any(wd in done.lower() for wd in ('crash', 'fail', 'interrupt'))
             y = self._banner(x1, x2, y, 'STOPPED', done,
                              C['crit'] if bad else C['accent'],
@@ -814,7 +830,7 @@ class Dashboard(tk.Tk):
         k = st.get('iteration') or len(state.get('iterations', []))
         phase = st.get('phase') or '-'
         pretty = {key: title for key, title, _ in SETUP_STEPS + LOOP_STEPS}.get(phase, phase)
-        over = bool(state.get('stopped') or st.get('finished'))
+        over = bool(self.store.stopped())
         if over:
             when = st.get('finished') or ''
             tail = 'stopped %s ago%s' % (hhmmss(secs),
