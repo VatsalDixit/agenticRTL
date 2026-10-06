@@ -152,11 +152,41 @@ def extract_json(text):
     if start >= 0 and end > start:
         candidates.append(text[start:end + 1])
     for cand in candidates:
-        try:
-            return json.loads(cand)
-        except ValueError:
-            continue
+        for attempt in (cand, _drop_trailing_commas(cand)):
+            try:
+                return json.loads(attempt)
+            except ValueError:
+                continue
     return None
+
+
+def _drop_trailing_commas(text):
+    """``text`` without commas that directly close an object or array.
+
+    A model writes `{...},\\n]` now and then; i69 of hacc-real200 lost its
+    whole plan to one and fell back to the generic directions. Only commas
+    outside strings are touched, so no value changes.
+    """
+    out = []
+    in_str = escaped = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == ',':
+            j = i + 1
+            while j < len(text) and text[j] in ' \t\r\n':
+                j += 1
+            if j < len(text) and text[j] in '}]':
+                continue
+        out.append(ch)
+    return ''.join(out)
 
 
 def _looks_like_limit(text):

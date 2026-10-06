@@ -718,6 +718,23 @@ def test_area_era_records_are_relabelled():
           and plan.index(loop.AREA_ERA_NOTE) < plan.index(ctx['skills_text'][-40:]))
 
 
+def test_a_trailing_comma_does_not_lose_the_plan():
+    import propose
+    # The shape of hacc-real200 i69's planner reply, which fell back to the
+    # generic directions.
+    text = ('Here is the plan:\n{"directions": [\n  {"focus": "a, b", "x": "],}",\n'
+            '   "modelled_gain_pct": 98},\n  ],\n "note": "n"}')
+    data = propose.extract_json(text)
+    check('a trailing comma in a reply is tolerated',
+          isinstance(data, dict) and len(data.get('directions', [])) == 1, str(data)[:200])
+    check('commas inside strings are left alone',
+          data is not None and data['directions'][0]['focus'] == 'a, b'
+          and data['directions'][0]['x'] == '],}', str(data)[:200])
+    check('valid JSON is unchanged and garbage is still None',
+          propose.extract_json('{"a": [1, 2]}') == {'a': [1, 2]}
+          and propose.extract_json('no json here') is None)
+
+
 def test_plan_prompt_has_no_override_rule():
     import propose
     ctx = {'goal_text': 'g', 'iteration': 1, 'max_iters': 2, 'progress_text': 'p',
