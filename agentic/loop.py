@@ -752,6 +752,10 @@ def history_text(state):
     for it in state['iterations'][-12:]:
         for c in it.get('candidates', []):
             m = c.get('measured') or {}
+            if it.get('measure_kind') == 'fast':
+                # Not synthesised; records written before evaluate() said so
+                # hold a carried f_max's +0.00%.
+                m = dict(m, fmax_gain_pct=None, area_gain_pct=None)
             outcome = c.get('outcome', '')
             if c.get('track'):
                 lines.append(track_history_line(it['iteration'], c))
