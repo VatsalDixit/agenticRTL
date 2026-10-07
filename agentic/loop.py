@@ -509,6 +509,10 @@ def evaluate(metrics, parent, goal):
         'area_gain_pct': pct(area_of(metrics), area_of(parent)),
         'gain_pct': goal_gain(metrics, parent, goal),
     }
+    if metrics.get('f_max_carried'):
+        # Not synthesised (a fast iteration): f_max is the parent's, carried
+        # so that throughput compares; neither it nor area was measured.
+        meas['fmax_gain_pct'] = meas['area_gain_pct'] = None
     meas = {k: (round(v, 3) if v is not None else None) for k, v in meas.items()}
     out['measured'] = meas
     if metrics.get('synth_error') or meas['gain_pct'] is None:
@@ -751,9 +755,10 @@ def history_text(state):
                            'throughput alone it was %+.1f%%' % (m.get('gain_pct') or 0))
             bits = ['i%d %s' % (it['iteration'], c.get('id') or 'no proposal'), outcome]
             if m.get('throughput_gain_pct') is not None:
-                bits.append('throughput %+.2f%%, bytes/cycle %+.2f%%, f_max %+.2f%%, area %+.2f%%'
+                bits.append('throughput %+.2f%%, bytes/cycle %+.2f%%, f_max %s, area %s'
                             % (m['throughput_gain_pct'], m.get('bpc_gain_pct') or 0,
-                               m.get('fmax_gain_pct') or 0, m.get('area_gain_pct') or 0))
+                               gain_text(m.get('fmax_gain_pct')),
+                               gain_text(m.get('area_gain_pct'))))
             if c.get('expected_gain_pct') is not None:
                 bits.append('predicted %+.1f%%' % c['expected_gain_pct'])
             if c.get('adopted'):
@@ -775,13 +780,22 @@ def history_text(state):
     return '\n'.join(lines)
 
 
+def gain_text(v):
+    """A percentage, or 'not measured' (a fast iteration does not synthesise)."""
+    return 'not measured' if v is None else '%+.2f%%' % v
+
+
 def progress_text(state):
     p = state.get('progress') or {}
     if not p:
         return 'baseline (nothing adopted yet)'
-    return ('throughput %+.2f%% (%.3f GB/s), bytes/cycle %+.2f%%, f_max %+.2f%%, area %+.2f%%'
-            % (p.get('throughput_gain_pct') or 0, (state['best']['metrics'].get('throughput_gbps') or 0),
-               p.get('bpc_gain_pct') or 0, p.get('fmax_gain_pct') or 0, p.get('area_gain_pct') or 0))
+    best = state['best']['metrics']
+    fmax = gain_text(p.get('fmax_gain_pct'))
+    if best.get('f_max_carried'):
+        fmax += ' (as synthesised at iteration %s)' % best.get('f_max_from', 0)
+    return ('throughput %+.2f%% (%.3f GB/s), bytes/cycle %+.2f%%, f_max %s, area %s'
+            % (p.get('throughput_gain_pct') or 0, (best.get('throughput_gbps') or 0),
+               p.get('bpc_gain_pct') or 0, fmax, gain_text(p.get('area_gain_pct'))))
 
 
 # ---------------------------------------------------------------------------
@@ -1947,7 +1961,9 @@ def score_candidate(c, asg, metrics, parent, goal, parent_ram, measure_dir, log,
               # Kept in the saved record (unlike 'metrics', which is
               # stripped) so the dashboard can plot a candidate's real
               # numbers instead of rebuilding them from percentages.
-              'absolute': {kk: metrics.get(kk) for kk in ABSOLUTE_KEYS},
+              # A carried f_max was not measured: no f_max dot for it.
+              'absolute': {kk: (None if kk == 'f_max_mhz' and metrics.get('f_max_carried')
+                                else metrics.get(kk)) for kk in ABSOLUTE_KEYS},
               'measure_seconds': {'sim': metrics.get('sim_seconds'),
                                   'synth': metrics.get('synth_seconds')},
               'metrics': {kk: vv for kk, vv in metrics.items() if kk != 'draws'},
@@ -1975,10 +1991,10 @@ def score_candidate(c, asg, metrics, parent, goal, parent_ram, measure_dir, log,
         log('  %s: probe %s' % (c['label'], status[:200]))
     m = ev['measured']
     if m:
-        log('  %s %s: %s  throughput %+.2f%% (bytes/cycle %+.2f%%, f_max %+.2f%%), area %+.2f%%, score %s'
+        log('  %s %s: %s  throughput %+.2f%% (bytes/cycle %+.2f%%, f_max %s), area %s, score %s'
             % (c['label'], c['id'], c['outcome'], m.get('throughput_gain_pct') or 0,
-               m.get('bpc_gain_pct') or 0, m.get('fmax_gain_pct') or 0,
-               m.get('area_gain_pct') or 0, ev['score']))
+               m.get('bpc_gain_pct') or 0, gain_text(m.get('fmax_gain_pct')),
+               gain_text(m.get('area_gain_pct')), ev['score']))
     else:
         log('  %s %s: %s -- %s' % (c['label'], c['id'], c['outcome'], ev['reason'][:200]))
     rmtree(os.path.join(measure_dir, 'sim'))
