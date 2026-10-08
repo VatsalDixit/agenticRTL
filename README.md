@@ -56,18 +56,100 @@ earlier runs removed, so that the run has to find its designs on its own:
 | `fast-guard-blind` | The blind kit used for the two runs above |
 | `agentic-snappy` | Earlier hand-written optimisation work (July) |
 
-## What's here
+## What's where
 
-```
-agentic/    The optimisation loop (see agentic/README.md)
-rtl/        Synthesizable VHDL-2008: the design being optimised
-tb/         Self-checking per-stage testbenches from upstream
-model/      Python golden model + self-contained test-vector generator
-vectors/    Pre-generated *.tv test vectors
-sim/        GHDL runner for a single testbench
-flow/       The original verification ladder
-docs/       Attribution, upstream license, the loop's v3 design plan
-```
+### Where to start
+
+To follow the work without reading everything, these five files are enough:
+
+1. [`agentic/README.md`](agentic/README.md): how the loop works, what it
+   costs, and what was learned the hard way.
+2. [`agentic/loop.py`](agentic/loop.py): the loop itself. The docstring at
+   the top lists the seven steps of one iteration.
+3. [`agentic/measure.py`](agentic/measure.py): how a candidate is judged
+   (correctness, bytes/cycle, f_max, area).
+4. [`agentic/propose.py`](agentic/propose.py): what the Claude coding
+   sessions are told, and what they may and may not do.
+5. [`docs/loop-v3-plan.md`](docs/loop-v3-plan.md): the design of the current
+   loop and the reasons behind each change.
+
+### Top level
+
+| Path | What it is |
+|---|---|
+| [`agentic/`](agentic/) | **The optimisation loop.** Everything below in "The loop" |
+| [`rtl/`](rtl/) | The original `vhsnunzip` design, which is the loop's starting point |
+| [`docs/`](docs/) | The loop's v3 design plan, attribution, upstream license |
+| [`tb/`](tb/), [`vectors/`](vectors/), [`model/`](model/), [`flow/`](flow/), [`sim/`](sim/) | **Upstream's original tests, not used by the loop.** See the last section |
+
+### The loop (`agentic/`)
+
+The loop's main files:
+
+| File | Role |
+|---|---|
+| [`loop.py`](agentic/loop.py) | The main loop: analyse, plan, write, measure, select, learn, record |
+| [`propose.py`](agentic/propose.py) | Plans the directions and runs the Claude coding sessions, one git worktree each |
+| [`measure.py`](agentic/measure.py) | Measures a design: simulation on every draw, then synthesis |
+| [`analyse.py`](agentic/analyse.py) | Finds where throughput is lost: the rate of each stage against its ceiling |
+| [`learn.py`](agentic/learn.py), [`skills.py`](agentic/skills.py), [`skills.json`](agentic/skills.json) | The skill library: what has worked, what has not, updated after every iteration |
+| [`guide.py`](agentic/guide.py) | A description of the current design generated from its RTL, given to every session |
+| [`packmodel.py`](agentic/packmodel.py) | Predicts the bytes/cycle a decoder shape allows on the real data, before anyone builds it |
+| [`config.json`](agentic/config.json) | Settings: model, number of candidates, budgets, synthesis backend, FPGA part |
+
+Correctness and the measuring instrument (frozen, so a candidate cannot change how it is judged):
+
+| File | Role |
+|---|---|
+| [`oracle.py`](agentic/oracle.py) | Compares every output byte against the reference decompressor |
+| [`ref/snappy.py`](agentic/ref/snappy.py) | The reference Snappy compressor and decompressor |
+| [`ref/parquet_pages.py`](agentic/ref/parquet_pages.py) | Extracts the Snappy pages from a Parquet file |
+| [`stim.py`](agentic/stim.py), [`make_data.py`](agentic/make_data.py) | The scoring data: real Parquet row groups (NYC taxi, TPC-H SF1) |
+| [`tb/vhsnunzip_perf_tc.sim.08.vhd`](agentic/tb/vhsnunzip_perf_tc.sim.08.vhd) | The throughput testbench, which works with any port widths |
+| [`probe.py`](agentic/probe.py) | Counts, in simulation, how often each internal stage moves, waits or idles |
+| [`freeze.py`](agentic/freeze.py), [`frozen.json`](agentic/frozen.json) | Hashes of the files above, checked before every scoring pass |
+| [`check.py`](agentic/check.py) | The one command a coding session may run: "does my design still work?" |
+
+Synthesis ([`agentic/syn/`](agentic/syn/)):
+
+| File | Role |
+|---|---|
+| [`hacc.py`](agentic/hacc.py), [`syn/vivado.tcl`](agentic/syn/vivado.tcl), [`syn/ram_xilinx.vhd`](agentic/syn/ram_xilinx.vhd) | Vivado place and route on the HACC host (Alveo U55C) over ssh |
+| [`syn/synth.sh`](agentic/syn/synth.sh), [`syn/ram_stub.vhd`](agentic/syn/ram_stub.vhd), [`syn/lib/`](agentic/syn/lib/), [`syn/get_lib.sh`](agentic/syn/get_lib.sh) | Open-source alternative: GHDL + Yosys on the Nangate 45nm cell library |
+| [`syn/sim_draws.sh`](agentic/syn/sim_draws.sh), [`syn/unit.sh`](agentic/syn/unit.sh) | GHDL simulation scripts |
+
+Running and watching a run:
+
+| File | Role |
+|---|---|
+| [`setup.py`](agentic/setup.py) | Checks the machine and prepares everything, once |
+| [`gui.py`](agentic/gui.py), [`report.py`](agentic/report.py) | Live dashboard window, and status.json / report.html |
+| [`hacc_tmux.sh`](agentic/hacc_tmux.sh), [`mirror.py`](agentic/mirror.py) | Running the loop on the HACC host, and watching it from a laptop |
+| [`compare.py`](agentic/compare.py) | Compares two runs, including cost per percent gained |
+| [`tools.py`](agentic/tools.py) | Shared helpers: config, timeouts, git, logging |
+
+Tests (no model or simulator needed):
+
+| File | Role |
+|---|---|
+| [`test_kit.py`](agentic/test_kit.py) | The loop's checks: run with `python agentic/test_kit.py` |
+| [`kitcheck_packmodel.py`](agentic/kitcheck_packmodel.py), [`kitcheck_probe.py`](agentic/kitcheck_probe.py) | Checks for the packing model and the probe, run by `test_kit.py` |
+
+### The best design (on the [`dsw4-design`](https://github.com/VatsalDixit/agenticRTL/tree/dsw4-design) branch)
+
+| Path | What it is |
+|---|---|
+| [`sim/dsw4/results-b3/RESULTS.md`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/sim/dsw4/results-b3/RESULTS.md) | **The measured result**: per-table bytes/cycle, f_max, LUTs, worst path |
+| [`rtl/vhsnunzip_core.vhd`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/rtl/vhsnunzip_core.vhd) | The DSW-4 core, which replaces the original pipeline |
+| [`rtl/vhsnunzip_parser.vhd`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/rtl/vhsnunzip_parser.vhd) with `blkrd`, `pt`, `walker` | The table parser: finds four Snappy elements per cycle |
+| [`rtl/vhsnunzip_writer.vhd`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/rtl/vhsnunzip_writer.vhd), `elq`, `agen`, `dpath` | The back end: element queue, command issue, address generation, datapath |
+| [`rtl/vhsnunzip_cbuf.vhd`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/rtl/vhsnunzip_cbuf.vhd), `cofifo`, `defifo` | Input buffer and the 32-byte input/output FIFOs |
+| [`rtl/vhsnunzip_dsw4_pkg.vhd`](https://github.com/VatsalDixit/agenticRTL/blob/dsw4-design/rtl/vhsnunzip_dsw4_pkg.vhd) | Shared records and constants |
+| [`sim/dsw4/`](https://github.com/VatsalDixit/agenticRTL/tree/dsw4-design/sim/dsw4) | Unit testbenches, mutation checks and regression runs, one folder per block (`front`, `parser`, `writer`, `dpath`, `core`, `regress`) |
+
+On that branch, `vhsnunzip_pipeline`, `pre_decoder`, `decoder`,
+`decoder_long`, `cmd_gen_1` and `cmd_gen_2` are the loop's iteration-35
+design. DSW-4 no longer instantiates them.
 
 ## Running the loop
 
@@ -105,11 +187,26 @@ vhsnunzip_unbuffered
 `vhsnunzip_ram.sim.vhd` is used for simulation and `vhsnunzip_ram.syn.vhd`
 (same entity) for synthesis.
 
-## Manual verification (upstream testbenches)
+## Upstream's original tests, not used by the loop
 
-These steps run on Linux or WSL with GHDL installed. The loop does not use
-them: it has its own testbench and oracle. They are still a quick way to
-check the original design stage by stage.
+`tb/`, `vectors/`, `model/`, `flow/` and `sim/` came with the upstream
+`vhsnunzip` code. They check each pipeline stage cycle by cycle against a
+model of the original design. They show the starting design was verified
+before the loop began.
+
+The loop does not use them. Its changes alter the internal timing, so these
+tests fail even when the output is correct. The loop has its own testbench
+and oracle in `agentic/` (see above), which check only the bytes that come
+out of the design.
+
+| Path | What it is |
+|---|---|
+| [`tb/`](tb/) | Seven self-checking testbenches, one per pipeline stage plus the top |
+| [`model/`](model/) | Python model of the original design; `gen_vectors.py` writes the test data |
+| [`vectors/`](vectors/) | The test data it generated |
+| [`flow/run_verify.sh`](flow/run_verify.sh), [`sim/run.sh`](sim/run.sh) | Run the testbenches, from the bottom stage up |
+
+To run them, you need Linux or WSL with GHDL installed:
 
 ```bash
 python3 model/gen_vectors.py            # regenerate vectors/*.tv from the golden model
