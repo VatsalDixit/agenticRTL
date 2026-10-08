@@ -3,7 +3,8 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 library work;
-use work.vhsnunzip_int_pkg.all;
+use work.vhsnunzip_dsw4_pkg.all;
+use work.vhsnunzip_int_pkg.vhsnunzip_ram;
 
 -- Streaming toplevel for vhsnunzip. This version of the decompressor doesn't
 -- include any large-scale input and output stream buffering, so the streams
@@ -14,13 +15,24 @@ use work.vhsnunzip_int_pkg.all;
 entity vhsnunzip_unbuffered is
   generic (
 
-    -- Whether long chunks (>64kiB) should be supported. If this is disabled,
-    -- the core will be a couple hundred LUTs smaller.
+    -- Unused since DSW-4 (kept for the component declaration in
+    -- vhsnunzip_pkg): long chunks (>64kiB) are always supported.
     LONG_CHUNKS : boolean := true;
 
-    -- This block can use either 2 UltraRAMs or 16 Xilinx 36k block RAMs.
+    -- This block uses 32 UltraRAMs or 32 x 8 Xilinx 36k block RAMs.
     -- Select "ultra" for UltraRAMs or "block" for block RAMs.
-    RAM_STYLE   : string := "ultra"
+    RAM_STYLE   : string := "ultra";
+
+    -- Simulation-only test knobs (SPEC 7), all off by default; every one
+    -- must give bit-identical output. See vhsnunzip_core.
+    TEST_SLOTS     : natural := 4;
+    TEST_CUT       : boolean := false;
+    TEST_NOREP     : boolean := false;
+    TEST_LITP1     : boolean := false;
+    TEST_RETGT     : boolean := false;
+    TEST_ST_LINES  : natural := 32;
+    TEST_STALL_PCT : natural := 0;
+    TEST_PROBE     : boolean := false
 
   );
   port (
@@ -38,29 +50,32 @@ entity vhsnunzip_unbuffered is
     -- Copies from further back in history will result in garbage for that
     -- copy.
     --
-    -- The input stream must be normalized; that is, all 8 bytes must be valid
-    -- for all but the last transfer, and the last transfer must contain at
-    -- least one byte. The number of valid bytes is indicated by cnt; 8 valid
-    -- bytes is represented as 0 (implicit MSB). The LSB of the first transfer
-    -- corresponds to the first byte in the chunk. This is compatible with the
-    -- stream library components in vhlib.
+    -- The input stream must be normalized; that is, all 32 bytes must be
+    -- valid for all but the last transfer, and the last transfer must contain
+    -- at least one byte. Each chunk starts on a new transfer. The number of
+    -- valid bytes is indicated by cnt; 32 valid bytes is represented as 0
+    -- (implicit MSB). The LSB of the first transfer corresponds to the first
+    -- byte in the chunk. This is compatible with the stream library
+    -- components in vhlib.
     co_valid    : in  std_logic;
     co_ready    : out std_logic;
-    co_data     : in  std_logic_vector(63 downto 0);
-    co_cnt      : in  std_logic_vector(2 downto 0);
+    co_data     : in  std_logic_vector(255 downto 0);
+    co_cnt      : in  std_logic_vector(4 downto 0);
     co_last     : in  std_logic;
 
-    -- Decompressed output stream. This stream is almost normalized, with the
-    -- exception of the last transfer; the size of this transfer may be zero,
-    -- even if the packet is non-empty. An empty line is signalled using cnt=0
-    -- and dvalid=0. This is compatible with the stream library components in
-    -- vhlib. If you need a fully normalized stream, you could add a
-    -- StreamReshaper with element size 1 on both the input and the output.
+    -- Decompressed output stream, 32 bytes per transfer. Valid bytes are
+    -- packed from the LSB; cnt is the literal number of valid bytes (0..32)
+    -- and dvalid is set when cnt is nonzero. This stream is almost
+    -- normalized, with the exception of the last transfer; the size of this
+    -- transfer may be zero, even if the packet is non-empty. There is exactly
+    -- one last transfer per chunk, and an empty chunk is signalled using a
+    -- single transfer with cnt=0, dvalid=0 and last=1. This is compatible with
+    -- the stream library components in vhlib.
     de_valid    : out std_logic;
     de_ready    : in  std_logic;
     de_dvalid   : out std_logic;
-    de_data     : out std_logic_vector(63 downto 0);
-    de_cnt      : out std_logic_vector(3 downto 0);
+    de_data     : out std_logic_vector(255 downto 0);
+    de_cnt      : out std_logic_vector(5 downto 0);
     de_last     : out std_logic
 
   );
@@ -68,152 +83,78 @@ end vhsnunzip_unbuffered;
 
 architecture behavior of vhsnunzip_unbuffered is
 
-  -- Pipeline interface signals.
-  signal co           : compressed_stream_single;
+  -- Core interface.
+  signal co           : cbeat_t;
   signal de           : decompressed_stream;
-  signal lt_rd_valid  : std_logic;
-  signal lt_rd_val_r  : std_logic;
-  signal lt_rd_adev   : unsigned(11 downto 0);
-  signal lt_rd_adod   : unsigned(11 downto 0);
-  signal lt_rd_next   : std_logic;
-  signal lt_rd_even   : byte_array(0 to 7);
-  signal lt_rd_odd    : byte_array(0 to 7);
 
-  -- RAM interface signals.
-  signal wr_ptr       : unsigned(12 downto 0);
-  signal ev_wr_cmd    : ram_command;
-  signal ev_rd_cmd    : ram_command;
-  signal ev_rd_resp   : ram_response;
-  signal od_wr_cmd    : ram_command;
-  signal od_rd_cmd    : ram_command;
-  signal od_rd_resp   : ram_response;
+  -- History RAMs: 32 instances, index i = m*8 + par*4 + w (SPEC 6): mirror
+  -- m = writer slot 0..3, par = output-line parity, w = 8-byte word of the
+  -- 32-byte line. Port a = history write, port b = LT read.
+  signal ram_a_cmd    : ram_command_array(0 to 31);
+  signal ram_a_resp   : ram_response_array(0 to 31);
+  signal ram_b_cmd    : ram_command_array(0 to 31);
+  signal ram_b_resp   : ram_response_array(0 to 31);
 
 begin
 
-  -- Datapath.
-  datapath_inst: vhsnunzip_pipeline
+  -- Input beat: byte i = co_data(8i+7 downto 8i); co_cnt 0 means 32 bytes,
+  -- so the index of the last valid byte is co_cnt - 1 (mod 32).
+  co.valid <= co_valid;
+  co.last  <= co_last;
+  co.endi  <= unsigned(co_cnt) - 1;
+  co_data_gen: for i in 0 to 31 generate
+    co.data(i) <= co_data(8*i+7 downto 8*i);
+  end generate;
+
+  core_inst: entity work.vhsnunzip_core
     generic map (
-      LONG_CHUNKS => LONG_CHUNKS
+      TEST_SLOTS     => TEST_SLOTS,
+      TEST_CUT       => TEST_CUT,
+      TEST_NOREP     => TEST_NOREP,
+      TEST_LITP1     => TEST_LITP1,
+      TEST_RETGT     => TEST_RETGT,
+      TEST_ST_LINES  => TEST_ST_LINES,
+      TEST_STALL_PCT => TEST_STALL_PCT,
+      TEST_PROBE     => TEST_PROBE
     )
     port map (
       clk         => clk,
       reset       => reset,
       co          => co,
       co_ready    => co_ready,
-      lt_rd_valid => lt_rd_valid,
-      lt_rd_adev  => lt_rd_adev,
-      lt_rd_adod  => lt_rd_adod,
-      lt_rd_next  => lt_rd_next,
-      lt_rd_even  => lt_rd_even,
-      lt_rd_odd   => lt_rd_odd,
       de          => de,
-      de_ready    => de_ready
+      de_ready    => de_ready,
+      ram_a_cmd   => ram_a_cmd,
+      ram_a_resp  => ram_a_resp,
+      ram_b_cmd   => ram_b_cmd,
+      ram_b_resp  => ram_b_resp
     );
 
-  -- To improve tool compatibility, avoid non-std_logic types on the toplevel.
-  -- Also convert to/from vhlib's stream interface where applicable.
-  co_connect_proc: process (co_valid, co_data, co_cnt, co_last) is
+  -- Output line: valid bytes packed from lane 0, cnt literal 0..32.
+  de_valid  <= de.valid;
+  de_last   <= de.last;
+  de_cnt    <= std_logic_vector(de.cnt);
+  de_dvalid <= '0' when de.cnt = 0 else '1';
+  de_data_gen: for i in 0 to 31 generate
+    de_data(8*i+7 downto 8*i) <= de.data(i);
+  end generate;
+
+  -- The RAMs holding the decompression history (4 mirrors x 2 parities x
+  -- 4 words).
+  ram_gen: for idx in 0 to 31 generate
   begin
-    co.valid <= co_valid;
-    for byte in 0 to 7 loop
-      co.data(byte) <= co_data(byte*8+7 downto byte*8);
-    end loop;
-    co.endi <= unsigned(co_cnt) - 1;
-    co.last <= co_last;
-  end process;
-
-  de_connect_proc: process (de) is
-  begin
-    de_valid <= de.valid;
-    for byte in 0 to 7 loop
-      de_data(byte*8+7 downto byte*8) <= de.data(byte);
-    end loop;
-    de_cnt <= std_logic_vector(de.cnt);
-    if de.cnt > 0 then
-      de_dvalid <= '1';
-    else
-      de_dvalid <= '0';
-    end if;
-    de_last <= de.last;
-  end process;
-
-  -- Write the decompressed output to the memory for long-term history
-  -- storage.
-  ev_wr_cmd <= (
-    valid => de.valid and de_ready and not wr_ptr(0),
-    addr  => wr_ptr(12 downto 1),
-    wren  => '1',
-    wdat  => de.data,
-    wctrl => "00000000");
-
-  od_wr_cmd <= (
-    valid => de.valid and de_ready and wr_ptr(0),
-    addr  => wr_ptr(12 downto 1),
-    wren  => '1',
-    wdat  => de.data,
-    wctrl => "00000000");
-
-  wr_ptr_proc: process (clk) is
-  begin
-    if rising_edge(clk) then
-      if de.valid = '1' and de_ready = '1' then
-        if de.last = '0' then
-          wr_ptr <= wr_ptr + 1;
-        else
-          wr_ptr <= (others => '0');
-        end if;
-      end if;
-      if reset = '1' then
-        wr_ptr <= (others => '0');
-      end if;
-    end if;
-  end process;
-
-  -- Connect the long-term memory read request signals.
-  ev_rd_cmd <= (
-    valid => lt_rd_valid,
-    addr  => lt_rd_adev,
-    wren  => '0',
-    wdat  => (others => X"00"),
-    wctrl => "00000000");
-
-  od_rd_cmd <= (
-    valid => lt_rd_valid,
-    addr  => lt_rd_adod,
-    wren  => '0',
-    wdat  => (others => X"00"),
-    wctrl => "00000000");
-
-  lt_rd_even <= ev_rd_resp.rdat;
-  lt_rd_odd  <= od_rd_resp.rdat;
-  lt_rd_next <= od_rd_resp.valid_next;
-
-  -- RAM containing the even 8-byte lines of decompression history.
-  ram_even_inst: vhsnunzip_ram
-    generic map (
-      RAM_STYLE => RAM_STYLE
-    )
-    port map (
-      clk       => clk,
-      reset     => reset,
-      a_cmd     => ev_wr_cmd,
-      a_resp    => open,
-      b_cmd     => ev_rd_cmd,
-      b_resp    => ev_rd_resp
-    );
-
-  -- RAM containing the odd 8-byte lines of decompression history.
-  ram_odd_inst: vhsnunzip_ram
-    generic map (
-      RAM_STYLE => RAM_STYLE
-    )
-    port map (
-      clk       => clk,
-      reset     => reset,
-      a_cmd     => od_wr_cmd,
-      a_resp    => open,
-      b_cmd     => od_rd_cmd,
-      b_resp    => od_rd_resp
-    );
+    ram_inst: vhsnunzip_ram
+      generic map (
+        RAM_STYLE => RAM_STYLE
+      )
+      port map (
+        clk       => clk,
+        reset     => reset,
+        a_cmd     => ram_a_cmd(idx),
+        a_resp    => ram_a_resp(idx),
+        b_cmd     => ram_b_cmd(idx),
+        b_resp    => ram_b_resp(idx)
+      );
+  end generate;
 
 end behavior;

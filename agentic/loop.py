@@ -102,12 +102,13 @@ def parse_goal(text):
         elif 'double' in low or 'twice' in low:
             target = 100.0
     metric = 'throughput'
-    if 'bytes per cycle' in low or 'bytes/cycle' in low:
+    if ('area' in low or 'lut' in low) and any(
+            w in low for w in ('reduc', 'decreas', 'shrink', 'minimi', 'smaller')):
+        metric = 'area'
+    elif 'bytes per cycle' in low or 'bytes/cycle' in low:
         metric = 'bytes_per_cycle'
     elif 'f_max' in low or 'fmax' in low or 'clock' in low or 'frequency' in low:
         metric = 'fmax'
-    elif 'area' in low and 'throughput' not in low:
-        metric = 'area'
     return {'text': text.strip(), 'metric': metric, 'target_pct': target}
 
 
@@ -561,6 +562,267 @@ def evaluate(metrics, parent, goal):
     out['outcome'] = 'candidate'
     out['adoptable'] = True
     return out
+
+
+# ---------------------------------------------------------------------------
+# the area goal: fewer LUTs, throughput held in a band around the start
+#
+# Area decides, but a smaller design that has lost its speed is no win: the
+# run must end within area_band_pct of the starting throughput. A step may
+# drop below the band only as a planned "debt": its session names the
+# follow-up change that wins the throughput back and what that costs, the
+# planned end state must still be smaller than the best design inside the
+# band, and the debt is repaid within area_recovery_iters iterations or the
+# run goes back to the best in-band design. Registers and URAM may not grow:
+# a LUT cut bought with flip-flops or memories is not a smaller design.
+
+def area_cfg():
+    return {'band': float(CONFIG.get('area_band_pct', 10.0)),
+            'floor': float(CONFIG.get('area_floor_pct', 30.0)),
+            'recovery': int(CONFIG.get('area_recovery_iters', 3)),
+            'min_gain': float(CONFIG.get('area_min_gain_pct', 0.5)),
+            'debt_min_gain': float(CONFIG.get('area_debt_min_gain_pct', 5.0)),
+            'regs_slack': float(CONFIG.get('area_regs_slack_pct', 2.0))}
+
+
+def is_area(state):
+    return ((state or {}).get('goal') or {}).get('metric') == 'area'
+
+
+def area_snapshot(best):
+    """The part of a design record the area state keeps."""
+    return {'commit': best['commit'], 'metrics': best['metrics'],
+            'iteration': best.get('iteration'), 'id': best.get('id')}
+
+
+def area_init(state):
+    """The area state, created from the baseline on first use."""
+    if not is_area(state) or not state.get('best'):
+        return None
+    st = state.get('area')
+    if st is None:
+        st = state['area'] = {'band_best': area_snapshot(state['best']), 'debt': None,
+                              'debts': []}
+    return st
+
+
+def area_ctx(state, k):
+    st = area_init(state)
+    return {'t0': state['baseline'].get('throughput_gbps'),
+            'band_best_luts': area_of(st['band_best']['metrics']),
+            'band_best_mem': {kk: st['band_best']['metrics'].get(kk) for kk in ('regs', 'uram')},
+            'debt': copy.deepcopy(st.get('debt')), 'iteration': k,
+            'max_iters': state['max_iters']}
+
+
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def recovery_problem(plan, t0, band_best_luts, cfg):
+    """Why a recovery plan cannot carry a throughput debt, or None."""
+    if not isinstance(plan, dict) or len(str(plan.get('steps') or '').strip()) < 80:
+        return ('it drops throughput below the band without a recovery_plan in '
+                'PROPOSAL.json (steps of at least a few sentences, '
+                'expected_throughput_gbps, expected_luts_after)')
+    tp, la = _num(plan.get('expected_throughput_gbps')), _num(plan.get('expected_luts_after'))
+    if tp is None or la is None:
+        return 'its recovery_plan gives no expected_throughput_gbps or expected_luts_after'
+    if tp < t0 * (1 - cfg['band'] / 100.0):
+        return ('its recovery_plan ends at %.3f GB/s, still below the band floor %.3f'
+                % (tp, t0 * (1 - cfg['band'] / 100.0)))
+    if la >= band_best_luts * (1 - cfg['min_gain'] / 100.0):
+        return ('its recovery_plan ends at %.0f LUTs, no smaller than the best design '
+                'inside the band (%.0f)' % (la, band_best_luts))
+    return None
+
+
+def area_judge(ev, metrics, parent, c, actx):
+    """The area rules on top of evaluate(): adoptable, outcome, score."""
+    m = ev.get('measured') or {}
+    if not m or ev['outcome'] not in ('candidate', 'no_gain', 'regressed'):
+        return ev
+    cfg = area_cfg()
+    t, th, t0 = (metrics.get('throughput_gbps'), parent.get('throughput_gbps'), actx['t0'])
+    lu = area_of(metrics)
+    gain = m.get('gain_pct') or 0.0
+    rel = pct(t, t0)
+    m['throughput_vs_start_pct'] = round(rel, 3) if rel is not None else None
+    ev.update(adoptable=False, score=None, debt_open=None)
+
+    def refuse(outcome, reason):
+        ev['outcome'], ev['reason'] = outcome, reason
+        return ev
+    if t is None or rel is None:
+        return refuse('failed_synth', 'no throughput')
+    # While a debt is open the recovery may win back some of what the debt
+    # cut; flip-flops and memories are then held to the best in-band design.
+    ref = actx.get('band_best_mem') if actx.get('debt') else parent
+    if (metrics.get('uram') or 0) > (ref.get('uram') or 0):
+        return refuse('area_grew', 'URAM %s -> %s: memories may not grow'
+                      % (ref.get('uram'), metrics.get('uram')))
+    regs = pct(metrics.get('regs'), ref.get('regs'))
+    if regs is not None and regs > cfg['regs_slack']:
+        return refuse('area_grew', 'registers %+.1f%% (more than %+.1f%%): a LUT cut '
+                      'bought with flip-flops is not a smaller design'
+                      % (regs, cfg['regs_slack']))
+    if rel < -cfg['floor']:
+        return refuse('throughput_floor', 'throughput %+.1f%% vs the start, below the '
+                      'hard floor of -%.0f%%' % (rel, cfg['floor']))
+    in_band = rel >= -cfg['band']
+    debt = actx.get('debt')
+    if debt is None:
+        if in_band:
+            if gain < cfg['min_gain']:
+                return refuse('no_gain' if gain > -cfg['min_gain'] else 'regressed',
+                              'LUTs %+.2f%% (needs at least -%.2f%%)'
+                              % (-gain, cfg['min_gain']))
+            ev.update(outcome='candidate', reason='', adoptable=True, score=float(lu))
+            return ev
+        # Below the band: only as a planned debt.
+        if gain < cfg['debt_min_gain']:
+            return refuse('throughput_debt_refused',
+                          'throughput %+.1f%% vs the start (below the -%.0f%% band) '
+                          'for only %.1f%% fewer LUTs; a debt needs at least %.0f%%'
+                          % (rel, cfg['band'], gain, cfg['debt_min_gain']))
+        if actx['iteration'] > actx['max_iters'] - cfg['recovery']:
+            return refuse('throughput_debt_refused',
+                          'below the band with too few iterations left to win it back')
+        problem = recovery_problem(c.get('recovery_plan'), t0, actx['band_best_luts'], cfg)
+        if problem:
+            return refuse('throughput_debt_refused', problem)
+        plan = c['recovery_plan']
+        planned = max(float(plan['expected_luts_after']), float(lu))
+        ev.update(outcome='candidate', reason='opens a throughput debt', adoptable=True,
+                  # A planned end state is a prediction: it must beat a sure
+                  # in-band cut by 5% to be preferred over it.
+                  score=planned * 1.05,
+                  debt_open={'plan': plan, 'from_id': c.get('id'),
+                             'start_luts': lu, 'start_gbps': t,
+                             'budget_luts': min(planned * 1.10, actx['band_best_luts']
+                                                * (1 - cfg['min_gain'] / 100.0))})
+        return ev
+    # A debt is open: the head is below the band. Win throughput back
+    # within the budget, or cut LUTs without losing more.
+    if lu > debt['budget_luts']:
+        return refuse('over_debt_budget', '%.0f LUTs is over the open debt\'s budget of '
+                      '%.0f' % (lu, debt['budget_luts']))
+    up = pct(t, th) or 0.0
+    if not (up >= 1.0 or (up >= -1.0 and gain >= cfg['min_gain'])):
+        return refuse('no_recovery', 'throughput %+.2f%% vs the current design with a '
+                      'debt open: it must win at least +1%% back, or cut LUTs without '
+                      'losing more than 1%%' % up)
+    score = float(lu) if in_band else 1e7 - 1e4 * t
+    ev.update(outcome='candidate', reason='', adoptable=True, score=score)
+    return ev
+
+
+def area_set_best(run, snap, log, why):
+    """Move the run back to a recorded design (the best inside the band)."""
+    state = run.state
+    git(['reset', '--hard', snap['commit']], cwd=run.base_dir)
+    state['best'] = copy.deepcopy(snap)
+    run.set_progress()
+    log('ROLLED BACK to %s (%s): %s' % (snap.get('id'), snap['commit'][:12], why))
+    run.write_guide(notes=state.get('guide_notes'), facts=state.get('design_facts'))
+    run.check_text = ''
+    calibrate_packmodel(run, log)
+
+
+def area_after(run, winner, k, log):
+    """Book-keeping after an iteration's adoption: the band best, the debt."""
+    state = run.state
+    st = area_init(state)
+    cfg = area_cfg()
+    t0 = state['baseline'].get('throughput_gbps')
+    if winner and winner.get('debt_open'):
+        st['debt'] = dict(winner['debt_open'], opened=k,
+                          deadline=min(k + cfg['recovery'], state['max_iters']))
+        log('THROUGHPUT DEBT opened by %s: %.3f GB/s (%+.1f%% vs the start), %.0f LUTs; '
+            'plan: %s GB/s at %s LUTs by i%d; budget %.0f LUTs'
+            % (winner.get('id'), st['debt']['start_gbps'],
+               pct(st['debt']['start_gbps'], t0), st['debt']['start_luts'],
+               st['debt']['plan'].get('expected_throughput_gbps'),
+               st['debt']['plan'].get('expected_luts_after'), st['debt']['deadline'],
+               st['debt']['budget_luts']))
+    head = state['best']
+    rel = pct(head['metrics'].get('throughput_gbps'), t0) or 0.0
+    if rel >= -cfg['band']:
+        if st.get('debt'):
+            log('throughput debt from i%d REPAID at i%d' % (st['debt']['opened'], k))
+            st['debts'].append(dict(st['debt'], result='repaid', closed=k))
+            st['debt'] = None
+        if area_of(head['metrics']) < area_of(st['band_best']['metrics']):
+            st['band_best'] = area_snapshot(head)
+        return
+    debt = st.get('debt')
+    if debt is None or k >= debt['deadline'] or k >= state['max_iters']:
+        why = ('throughput %+.1f%% vs the start, below the band, and %s'
+               % (rel, 'no debt is open' if debt is None else
+                  'the debt from i%d was not repaid by i%d' % (debt['opened'], k)))
+        if debt:
+            st['debts'].append(dict(debt, result='defaulted', closed=k))
+            st['debt'] = None
+        area_set_best(run, st['band_best'], log, why)
+
+
+def area_text(state, k):
+    """The area rules and the state of the run, for the planner and sessions."""
+    st = area_init(state)
+    cfg = area_cfg()
+    base = state['baseline']
+    t0 = base.get('throughput_gbps') or 0
+    bb = st['band_best']['metrics']
+    head = state['best']['metrics']
+    lines = [
+        'START (the design this run began from): %.3f GB/s, %s LUTs, %s registers, %s URAM'
+        % (t0, base.get('luts'), base.get('regs'), base.get('uram')),
+        'THROUGHPUT BAND: the run must end at %.3f GB/s or more (-%.0f%%); no design '
+        'below %.3f GB/s (-%.0f%%) is ever adopted.'
+        % (t0 * (1 - cfg['band'] / 100), cfg['band'], t0 * (1 - cfg['floor'] / 100),
+           cfg['floor']),
+        'BEST DESIGN INSIDE THE BAND: %s LUTs (%+.1f%% vs the start) at %.3f GB/s (%+.1f%%), %s'
+        % (bb.get('luts'), pct(area_of(bb), area_of(base)) or 0, bb.get('throughput_gbps') or 0,
+           pct(bb.get('throughput_gbps'), t0) or 0, st['band_best'].get('id')),
+        'CURRENT DESIGN (what this iteration starts from): %s LUTs, %s registers, %s URAM, '
+        '%.3f GB/s (%+.1f%% vs the start), %s'
+        % (head.get('luts'), head.get('regs'), head.get('uram'),
+           head.get('throughput_gbps') or 0, pct(head.get('throughput_gbps'), t0) or 0,
+           'inside the band' if not st.get('debt') else 'BELOW THE BAND'),
+        'ITERATIONS: this is %d of %d; a new debt may be opened up to iteration %d.'
+        % (k, state['max_iters'], state['max_iters'] - cfg['recovery'])]
+    debt = st.get('debt')
+    if debt:
+        plan = debt['plan']
+        lines += ['OPEN THROUGHPUT DEBT (opened i%d by %s, must be repaid by the end of i%d, '
+                  'or the run goes back to the best design inside the band):'
+                  % (debt['opened'], debt.get('from_id'), debt['deadline']),
+                  '  recovery plan: %s' % str(plan.get('steps'))[:1500],
+                  '  planned end state: %s GB/s at %s LUTs; every design adopted while the '
+                  'debt is open must stay at or under %.0f LUTs'
+                  % (plan.get('expected_throughput_gbps'), plan.get('expected_luts_after'),
+                     debt['budget_luts'])]
+    for d in st.get('debts') or []:
+        lines.append('earlier debt i%d-i%d (%s): %s' % (d['opened'], d['closed'], d['result'],
+                                                       str(d['plan'].get('steps'))[:200]))
+    hier = head.get('area_hier') or []
+    if hier:
+        total = float(hier[0].get('luts') or 1)
+        lines.append('WHERE THE LUTS ARE (Vivado place-and-route of the current design; '
+                     'instance, module, LUTs, share, registers, LUTRAM, SRL, URAM):')
+        for r in hier:
+            small = (r.get('luts') or 0) < 0.01 * total
+            if r.get('depth', 0) > 3 or (small and r.get('depth', 0) > 0):
+                continue
+            lines.append('  %-34s %-26s %6d %5.1f%% %6d %5d %4d %3d'
+                         % (('  ' * r.get('depth', 0) + r['inst'])[:34], r['module'][:26],
+                            r.get('luts') or 0, 100.0 * (r.get('luts') or 0) / total,
+                            r.get('ffs') or 0, r.get('lutram') or 0, r.get('srl') or 0,
+                            r.get('uram') or 0))
+    return '\n'.join(lines)
 
 
 def advantages(cands):
@@ -1235,7 +1497,9 @@ AREA_ERA_NOTE = ('(Skill notes that mention efficiency, an EI floor or too_expen
 def build_ctx(state, skills_data, iteration, guide_text='', roadmap_text='',
               packmodel_text=''):
     best = state['best']['metrics']
+    area = is_area(state)
     return {
+        'area_text': area_text(state, iteration) if area else '',
         'guide_text': guide_text,
         'roadmap_text': roadmap_text,
         'packmodel_text': packmodel_text,
@@ -1247,7 +1511,7 @@ def build_ctx(state, skills_data, iteration, guide_text='', roadmap_text='',
         'state_text': state_text(best, state['baseline']),
         'profile_text': profile_text(best),
         'lever': best.get('lever') or {'lever': 'unknown', 'reason': 'no profile'},
-        'skills_text': AREA_ERA_NOTE + '\n' + skills_mod.format_for_prompt(
+        'skills_text': ('' if area else AREA_ERA_NOTE + '\n') + skills_mod.format_for_prompt(
             skills_data, max_entries=30, notes_per_skill=1),
         'facts_text': '\n'.join('- %s' % f for f in (state.get('design_facts') or [])),
         'history_text': history_text(state),
@@ -1804,6 +2068,9 @@ def candidate_from_session(asg, res, k, iter_dir, log):
             # A decline that disputes the roadmap step it was given.
             'dispute': prop.get('dispute') or '',
             'dispute_step': prop.get('roadmap_step'),
+            'expected_luts': prop.get('expected_luts'),
+            'expected_throughput_gbps': prop.get('expected_throughput_gbps'),
+            'recovery_plan': prop.get('recovery_plan'),
             'truncated': sess.get('status') in ('budget', 'timeout'),
             'session': sess, 'commit': None, 'files_changed': [],
             'outcome': '', 'reason': '', 'measured': {}, 'score': None,
@@ -1868,9 +2135,12 @@ def keep_facts(state, cands):
 
 
 def score_candidate(c, asg, metrics, parent, goal, parent_ram, measure_dir, log,
-                    parent_model=None):
+                    parent_model=None, actx=None):
     """Evaluate one measured candidate against its parent, in place."""
     ev = evaluate(metrics, parent, goal)
+    if actx is not None:
+        ev = area_judge(ev, metrics, parent, c, actx)
+        c['debt_open'] = ev.get('debt_open')
     c.update({'measured': ev['measured'], 'score': ev['score'],
               'outcome': ev['outcome'], 'reason': ev['reason'],
               # Kept in the saved record (unlike 'metrics', which is
@@ -3377,6 +3647,7 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
                 timing[key] = max(vals)
         parent_ram = ram_latency(os.path.join(run.base_dir, 'rtl'))
         parent_model = ram_model_of(os.path.join(run.base_dir, 'rtl'))
+        actx = area_ctx(state, k) if is_area(state) else None
         for (c, asg), metrics in zip(to_measure, metrics_list):
             raw[c['label']] = metrics
             sim_only = c is track_c and not pre['synth']
@@ -3384,7 +3655,7 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
             # here; its verdict comes from the track's own judging below.
             score_candidate(c, asg, metrics, parent, goal, parent_ram,
                             os.path.join(iter_dir, c['label'] + '-measure'),
-                            (lambda m: None) if sim_only else log, parent_model)
+                            (lambda m: None) if sim_only else log, parent_model, actx)
             if sim_only:
                 log('  %s: simulated only (a non-final track step is not synthesised): %s'
                     % (c['label'], ('byte-exact, %.3f B/cycle' % metrics['bytes_per_cycle'])
@@ -3431,6 +3702,9 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
         if state.get('design_facts') != facts_before:
             run.write_guide(notes=state.get('guide_notes'), facts=state.get('design_facts'))
 
+    if is_area(state):
+        area_after(run, winner, k, log)
+
     # the track: the step's verdict, applied to the working copy
     if track_c is not None:
         outcome, reason = tverdict
@@ -3456,6 +3730,11 @@ def run_iteration(run, draws, skills_data, k, n_cands, dry_run=False, fake=False
 
     record = make_record(state, k, record_dirs, early + cands,
                          winner or (early[0] if early else None), changed, lessons, timing)
+    if is_area(state):
+        st = state['area']
+        record['area'] = {'band_best': st['band_best']['id'],
+                          'band_best_commit': st['band_best']['commit'],
+                          'debt': copy.deepcopy(st.get('debt'))}
     if trk is not None:
         record['track'] = {'id': trk['id'], 'status': trk['status'],
                            'current': trk['current'],

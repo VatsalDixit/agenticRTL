@@ -23,7 +23,13 @@
   "heldout_share_min": 0.15,
   "overfit_train_pct": 5.0,
   "limit_wait_min": 20,
-  "tracks_enabled": true,
+  "tracks_enabled": false,
   "track_session_budget_usd": 40.0,
-  "track_session_timeout_min": 120
+  "track_session_timeout_min": 120,
+  "area_band_pct": 10.0,
+  "area_floor_pct": 30.0,
+  "area_recovery_iters": 3,
+  "area_min_gain_pct": 0.5,
+  "area_debt_min_gain_pct": 5.0,
+  "area_regs_slack_pct": 2.0
 }

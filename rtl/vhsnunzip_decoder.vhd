@@ -40,6 +40,14 @@ begin
     -- Same as `off`, but modulo the line width and converted to integer.
     variable ofi    : natural range 0 to 7 := 0;
 
+    -- Index of the literal element header within the 16-byte pre-decoded
+    -- window; unlike `ofi` this is not taken modulo the line width, so it can
+    -- point into the lookahead half. See vhsnunzip_decoder_long for why.
+    variable lofi   : natural range 0 to 15 := 0;
+
+    -- Whether the literal element header at `lofi` can be decoded this cycle.
+    variable hdr_ok : boolean;
+
     -- Output holding register.
     variable elh    : element_stream := ELEMENT_STREAM_INIT;
 
@@ -110,21 +118,34 @@ begin
         -- Handle literal elements
         ---------------------------------------------------------------------
         ofi := to_integer(offns(2 downto 0));
+        lofi := to_integer(offns);
 
-        if offns > cdh.endi then
-          -- No element (for now); beyond end of stream or starts on the next
-          -- line.
+        -- A literal header that starts past the current line is decoded out
+        -- of the lookahead half of the window rather than being deferred to
+        -- the next cycle, so that a copy and the literal behind it can share
+        -- one command. cdh.wendi bounds how far the window reaches; only
+        -- single-byte headers are taken from the lookahead half. See
+        -- vhsnunzip_decoder_long for the full reasoning.
+        -- Given offns <= wendi, "offns <= endi" is the same test as
+        -- "offns(3) = '0'"; see vhsnunzip_decoder_long.
+        hdr_ok := offns <= cdh.wendi
+              and (offns(3) = '0' or cdh.data(lofi)(7 downto 4) /= "1111");
+
+        if not hdr_ok then
+          -- No element (for now); beyond end of stream, or starts on the next
+          -- line and we cannot reach it.
           elh.li_val := '0';
 
-        elsif cdh.data(ofi)(1 downto 0) /= "00" then
+        elsif cdh.data(lofi)(1 downto 0) /= "00" then
           -- Copy element.
           elh.li_val := '0';
 
-        elsif cdh.data(ofi)(7 downto 4) = "1111" then
+        elsif cdh.data(lofi)(7 downto 4) = "1111" then
           -- Literal with 2- to 5-byte header. Note that we ignore bytes 4 and 5,
           -- which would only be nonzero for literal lengths over 64kiB.
+          -- Only reachable for lofi <= 7.
           elh.li_val := '1';
-          offns := offns + 2 + unsigned(cdh.data(ofi)(3 downto 2));
+          offns := offns + 2 + unsigned(cdh.data(lofi)(3 downto 2));
 
         else
           -- Literal with 1-byte header.
@@ -135,17 +156,20 @@ begin
 
         elh.li_off := offns;
 
-        if std_match(cdh.data(ofi), "111100--") then
+        -- The multi-byte-header branches can only be taken with li_val set
+        -- when lofi <= 7, where lofi = ofi, so the length bytes stay indexed
+        -- by ofi and their byte mux keeps its original width.
+        if std_match(cdh.data(lofi), "111100--") then
           -- Literal with 2-byte header, or not a literal.
           elh.li_len := X"000000" & unsigned(cdh.data(ofi + 1));
 
-        elsif std_match(cdh.data(ofi), "1111----") then
+        elsif std_match(cdh.data(lofi), "1111----") then
           -- Literal with 3- to 5-byte header, or not a literal.
           elh.li_len := X"0000" & unsigned(cdh.data(ofi + 2)) & unsigned(cdh.data(ofi + 1));
 
         else
           -- Literal with 1-byte header, or not a literal.
-          elh.li_len := X"000000" & "00" & unsigned(cdh.data(ofi)(7 downto 2));
+          elh.li_len := X"000000" & "00" & unsigned(cdh.data(lofi)(7 downto 2));
 
         end if;
 

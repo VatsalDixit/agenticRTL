@@ -48,8 +48,17 @@ entity vhsnunzip_pipeline is
     -- the read data will be available in the *next* cycle. No backpressure
     -- support is needed here.
     lt_rd_next  : in  std_logic;
-    lt_rd_even  : in  byte_array(0 to 7);
-    lt_rd_odd   : in  byte_array(0 to 7);
+    lt_rd_even  : in  byte_array(0 to 15);
+    lt_rd_odd   : in  byte_array(0 to 15);
+
+    -- Second long-term read port, used for the second copy of a copy pair. It
+    -- is served by a mirror of the history RAMs that is written with exactly
+    -- the same data, and it is requested in lockstep with the first port, so it
+    -- shares lt_rd_valid/lt_rd_ready/lt_rd_next and only has its own addresses.
+    lt_rd_adev2 : out unsigned(11 downto 0);
+    lt_rd_adod2 : out unsigned(11 downto 0);
+    lt_rd_even2 : in  byte_array(0 to 15);
+    lt_rd_odd2  : in  byte_array(0 to 15);
 
     -- pragma translate_off
     -- Debug outputs.
@@ -98,10 +107,10 @@ architecture behavior of vhsnunzip_pipeline is
 
   -- Command stream FIFO write-side signals.
   signal cm_push      : std_logic;
-  signal cm_ctrl      : std_logic_vector(25 downto 0);
+  signal cm_ctrl      : std_logic_vector(47 downto 0);
 
   -- Command stream FIFO read-side signals.
-  signal s1_cm_ctrl   : std_logic_vector(25 downto 0);
+  signal s1_cm_ctrl   : std_logic_vector(47 downto 0);
   signal s1_cm        : command_stream;
   signal s1_cm_exp    : command_stream;
 
@@ -116,50 +125,97 @@ architecture behavior of vhsnunzip_pipeline is
   type srl_addr_array is array (natural range <>) of unsigned(4 downto 0);
   type rol_array is array (natural range <>) of unsigned(2 downto 0);
 
-  -- Literal SRL signals.
-  signal s2_li_addr   : srl_addr_array(0 to 7);
-  signal s2_li_data   : byte_array(0 to 7);
+  -- Literal SRL signals. The literal source window is 16 bytes: window byte w
+  -- is byte (w mod 8) of the current literal line when w < 8, and of the
+  -- lookahead line when w >= 8. The window is read through *sub-lanes*: there
+  -- are only 8 distinct compressed byte lanes, and each of them is read twice,
+  -- once for the low half of the 16-byte output line (bank a) and once for the
+  -- high half (bank b). Which of the two literal lines each read returns is
+  -- folded into the SRL read address, so no line multiplexer is needed at all.
+  signal s2_li_addr_a : srl_addr_array(0 to 7);
+  signal s2_li_addr_b : srl_addr_array(0 to 7);
+  signal s2_li_data_a : byte_array(0 to 7);
+  signal s2_li_data_b : byte_array(0 to 7);
+
+  -- Second copy of a copy pair. A paired command never carries a literal, so
+  -- the second copy takes over the literal's byte region, its rotation and its
+  -- rotator: all that is added here is its own source select (a second read port
+  -- on the short-term SRLs plus the mirrored long-term RAMs, selected exactly
+  -- like the first copy's) and a 3:1 mux in front of the literal sub-lanes.
+  -- The decoder only pairs copies reaching back 16 bytes or more, so the second
+  -- copy never overlaps itself and never reads what this command writes, but it
+  -- may be near enough to need the short-term memory. s2_cp2_hs is the
+  -- lane-pair select, which is the literal path's own half-select: both windows
+  -- index window byte p+8 against window byte p, and li_rol carries the second
+  -- copy's rotation, so the two selects are the same expression.
+  signal s2_pair      : std_logic;
+  signal s2_le2_data  : byte_array(0 to 15);
+  signal s2_lo2_data  : byte_array(0 to 15);
+  signal s2_lt_val2   : std_logic;
+  signal s2_lt2_sel   : std_logic_array(0 to 15);
+  signal s2_st2_addr  : srl_addr_array(0 to 15);
+  signal s2_st2_data  : byte_array(0 to 15);
+  signal s2_cp2_data  : byte_array(0 to 15);
+  signal s2_cp2_hs    : std_logic_array(0 to 7);
+  signal s2_li_src_a  : byte_array(0 to 7);
+  signal s2_li_src_b  : byte_array(0 to 7);
 
   -- Short-term memory SRL signals.
-  signal s2_st_addr   : srl_addr_array(0 to 7);
-  signal s2_st_data   : byte_array(0 to 7);
+  signal s2_st_addr   : srl_addr_array(0 to 15);
+  signal s2_st_data   : byte_array(0 to 15);
 
   -- Long-term memory data signals.
-  signal s2_le_data   : byte_array(0 to 7);
-  signal s2_lo_data   : byte_array(0 to 7);
+  signal s2_le_data   : byte_array(0 to 15);
+  signal s2_lo_data   : byte_array(0 to 15);
 
   -- Copy source mux.
   signal s2_lt_val    : std_logic;
-  signal s2_lt_sel    : std_logic_array(0 to 7);
-  signal s2_cp_data   : byte_array(0 to 7);
+  signal s2_lt_sel    : std_logic_array(0 to 15);
+  signal s2_cp_data   : byte_array(0 to 15);
 
-  -- Rotator and copy/literal mux.
-  signal s2_rol_sel   : rol_array(0 to 7);
-  signal s2_mux_sel   : std_logic_array(0 to 7);
-  signal s2_mux_data  : byte_array(0 to 7);
+  -- Copy source sub-lanes. Destination byte i of the 16-byte output line reads
+  -- copy lane (cp_rol + i) mod 16, and destination byte i+8 reads that lane's
+  -- partner (cp_rol + i + 8) mod 16 -- the same lane index modulo 8. So the
+  -- 16-way rotation is an 8-way rotation over lane *pairs*, shared by the two
+  -- halves of the output line, with a single per-pair line select in front of
+  -- it. That halves the rotator: two 8:1 muxes per destination byte instead of
+  -- one 16:1 mux over 16 lanes.
+  signal s2_cp_hsa    : std_logic_array(0 to 7);
+  signal s2_cp_hsb    : std_logic_array(0 to 7);
+  signal s2_cp_data_a : byte_array(0 to 7);
+  signal s2_cp_data_b : byte_array(0 to 7);
+
+  -- Rotator and copy/literal mux. s2_cp_rol is the 3-bit pair-group rotation
+  -- for the copy path; it is per destination byte only because of run-length
+  -- acceleration, and even then destination bytes i and i+8 always get the same
+  -- value, so eight entries cover all sixteen. s2_li_rol is shared outright.
+  signal s2_cp_rol    : rol_array(0 to 7);
+  signal s2_li_rol    : unsigned(2 downto 0);
+  signal s2_mux_sel   : std_logic_array(0 to 15);
+  signal s2_mux_data  : byte_array(0 to 15);
 
   -- Byte strobe signals. The internal strobe signals assert when the
   -- respective mux data output is valid for either the current line or the
   -- next line (output holding register), while the external strobe signal
   -- asserts only in the former case.
-  signal s2_int_strb  : std_logic_array(0 to 7);
-  signal s2_ext_strb  : std_logic_array(0 to 7);
+  signal s2_int_strb  : std_logic_array(0 to 15);
+  signal s2_ext_strb  : std_logic_array(0 to 15);
 
   -- Last flag and last valid byte index + one for stage 2.
   signal s2_last      : std_logic;
-  signal s2_cnt       : unsigned(2 downto 0);
+  signal s2_cnt       : unsigned(3 downto 0);
 
   -- Registered version of s2_cnt.
-  signal s3_cnt       : unsigned(2 downto 0);
+  signal s3_cnt       : unsigned(3 downto 0);
 
   -- Output holding register data, to support writing misaligned lines.
-  signal s3_hold_data : byte_array(0 to 7);
+  signal s3_hold_data : byte_array(0 to 15);
 
   -- Output data line and push signal.
   signal s3_out_push  : std_logic;
-  signal s3_out_data  : byte_array(0 to 7);
+  signal s3_out_data  : byte_array(0 to 15);
   signal s3_out_last  : std_logic;
-  signal s3_out_cnt   : unsigned(3 downto 0);
+  signal s3_out_cnt   : unsigned(4 downto 0);
 
   -- Signal which is set when the line indicated above was sent in response
   -- to the last datapath command, but isn't actually the last line because
@@ -167,8 +223,8 @@ architecture behavior of vhsnunzip_pipeline is
   signal s3_last_pend : std_logic;
 
   -- Output FIFO signals.
-  signal s3_out_ctrl  : std_logic_vector(4 downto 0);
-  signal de_ctrl      : std_logic_vector(4 downto 0);
+  signal s3_out_ctrl  : std_logic_vector(5 downto 0);
+  signal de_ctrl      : std_logic_vector(5 downto 0);
   signal de_level_s   : unsigned(5 downto 0);
   signal backpres     : std_logic;
 
@@ -217,7 +273,8 @@ begin
   ld_srl_gen: for byte in 0 to 7 generate
   begin
 
-    srl_inst: vhsnunzip_srl
+    -- Sub-lane a: serves destination bytes 0..7 of the output line.
+    srl_a_inst: vhsnunzip_srl
       generic map (
         WIDTH       => 8,
         DEPTH_LOG2  => 5
@@ -226,8 +283,22 @@ begin
         clk         => clk,
         wr_ena      => cs_strobe,
         wr_data     => cs.data(byte),
-        rd_addr     => s2_li_addr(byte),
-        rd_data     => s2_li_data(byte)
+        rd_addr     => s2_li_addr_a(byte),
+        rd_data     => s2_li_data_a(byte)
+      );
+
+    -- Sub-lane b: serves destination bytes 8..15 of the output line.
+    srl_b_inst: vhsnunzip_srl
+      generic map (
+        WIDTH       => 8,
+        DEPTH_LOG2  => 5
+      )
+      port map (
+        clk         => clk,
+        wr_ena      => cs_strobe,
+        wr_data     => cs.data(byte),
+        rd_addr     => s2_li_addr_b(byte),
+        rd_data     => s2_li_data_b(byte)
       );
 
   end generate;
@@ -357,13 +428,17 @@ begin
   -- memory before short-term runs out. This requires some tweaking, and
   -- eventually a proof of correctness, but I don't have that yet at the time
   -- of writing this comment and am unlikely to come back and update it.
-  cm_ready <= not backpres and (lt_rd_ready or not cm.lt_val);
+  cm_ready <= not backpres and (lt_rd_ready or not (cm.lt_val or cm.lt_val2));
   cm_push <= cm.valid and cm_ready;
 
-  -- Issue the long-term read command.
-  lt_rd_valid <= cm.lt_val and cm.valid and not backpres;
+  -- Issue the long-term read command. Both read ports are requested together so
+  -- their responses stay in lockstep; the mirror's data is simply ignored when
+  -- there is no second copy.
+  lt_rd_valid <= (cm.lt_val or cm.lt_val2) and cm.valid and not backpres;
   lt_rd_adev <= cm.lt_adev;
   lt_rd_adod <= cm.lt_adod;
+  lt_rd_adev2 <= cm.lt_adev2;
+  lt_rd_adod2 <= cm.lt_adod2;
 
   -- Command FIFO. This bridges the latency of the long-term storage access.
   -- The latency between long-term read request access acknowledgement and
@@ -373,17 +448,26 @@ begin
   cm_ctrl(0) <= cm.lt_val;
   cm_ctrl(1) <= cm.lt_swap;
   cm_ctrl(6 downto 2) <= std_logic_vector(cm.st_addr);
-  cm_ctrl(10 downto 7) <= std_logic_vector(cm.cp_rol);
-  cm_ctrl(11) <= cm.cp_rle;
-  cm_ctrl(15 downto 12) <= std_logic_vector(cm.cp_end);
-  cm_ctrl(19 downto 16) <= std_logic_vector(cm.li_rol);
-  cm_ctrl(23 downto 20) <= std_logic_vector(cm.li_end);
-  cm_ctrl(24) <= cm.ld_pop;
-  cm_ctrl(25) <= cm.last;
+  cm_ctrl(11 downto 7) <= std_logic_vector(cm.cp_rol);
+  cm_ctrl(12) <= cm.cp_rle;
+  cm_ctrl(17 downto 13) <= std_logic_vector(cm.cp_end);
+  cm_ctrl(21 downto 18) <= std_logic_vector(cm.li_rol);
+  cm_ctrl(26 downto 22) <= std_logic_vector(cm.li_end);
+  cm_ctrl(27) <= cm.ld_pop;
+  cm_ctrl(28) <= cm.last;
+  cm_ctrl(29) <= cm.lt_val2;
+  cm_ctrl(30) <= cm.lt_swap2;
+  cm_ctrl(31) <= cm.cp2_roh;
+  cm_ctrl(32) <= cm.cp2_val;
+  cm_ctrl(37 downto 33) <= std_logic_vector(cm.st_addr2);
+  cm_ctrl(38) <= cm.sw_val;
+  cm_ctrl(40 downto 39) <= std_logic_vector(cm.cp_rep);
+  cm_ctrl(43 downto 41) <= std_logic_vector(cm.cp_rbase);
+  cm_ctrl(47 downto 44) <= std_logic_vector(cm.cp_rsrc);
 
   cm_fifo_inst: vhsnunzip_fifo
     generic map (
-      CTRL_WIDTH  => 26
+      CTRL_WIDTH  => 48
     )
     port map (
       clk         => clk,
@@ -398,13 +482,24 @@ begin
   s1_cm.lt_val <= s1_cm_ctrl(0);
   s1_cm.lt_swap <= s1_cm_ctrl(1);
   s1_cm.st_addr <= unsigned(s1_cm_ctrl(6 downto 2));
-  s1_cm.cp_rol <= unsigned(s1_cm_ctrl(10 downto 7));
-  s1_cm.cp_rle <= s1_cm_ctrl(11);
-  s1_cm.cp_end <= unsigned(s1_cm_ctrl(15 downto 12));
-  s1_cm.li_rol <= unsigned(s1_cm_ctrl(19 downto 16));
-  s1_cm.li_end <= unsigned(s1_cm_ctrl(23 downto 20));
-  s1_cm.ld_pop <= s1_cm_ctrl(24);
-  s1_cm.last <= s1_cm_ctrl(25);
+  s1_cm.cp_rol <= unsigned(s1_cm_ctrl(11 downto 7));
+  s1_cm.cp_rle <= s1_cm_ctrl(12);
+  s1_cm.cp_end <= unsigned(s1_cm_ctrl(17 downto 13));
+  s1_cm.li_rol <= unsigned(s1_cm_ctrl(21 downto 18));
+  s1_cm.li_end <= unsigned(s1_cm_ctrl(26 downto 22));
+  s1_cm.ld_pop <= s1_cm_ctrl(27);
+  s1_cm.last <= s1_cm_ctrl(28);
+  s1_cm.lt_val2 <= s1_cm_ctrl(29);
+  s1_cm.lt_swap2 <= s1_cm_ctrl(30);
+  s1_cm.cp2_roh <= s1_cm_ctrl(31);
+  s1_cm.cp2_val <= s1_cm_ctrl(32);
+  s1_cm.st_addr2 <= unsigned(s1_cm_ctrl(37 downto 33));
+  s1_cm.sw_val <= s1_cm_ctrl(38);
+  s1_cm.cp_rep <= unsigned(s1_cm_ctrl(40 downto 39));
+  s1_cm.cp_rbase <= unsigned(s1_cm_ctrl(43 downto 41));
+  s1_cm.cp_rsrc <= unsigned(s1_cm_ctrl(47 downto 44));
+  s1_cm.lt_adev2 <= (others => '0');
+  s1_cm.lt_adod2 <= (others => '0');
 
   -- Determine whether all data sources for stage 0 are ready. We just check
   -- the command stream and the long-term storage result (if we're expecting
@@ -412,7 +507,7 @@ begin
   -- is a special case for when the previous cycle was the last command; we
   -- always insert a stall cycle afterward, so the datapath has a chance to
   -- push the contents of its output holding register. We can't backpressure
-  s1_valid <= s1_cm.valid and (lt_rd_next or not s1_cm.lt_val) and not s2_last;
+  s1_valid <= s1_cm.valid and (lt_rd_next or not (s1_cm.lt_val or s1_cm.lt_val2)) and not s2_last;
 
   -- pragma translate_off
   dbg_s1_proc: process (s1_cm, s1_valid) is
@@ -426,43 +521,46 @@ begin
   s1_reg_proc: process (clk) is
 
     -- Whether there is data from the previous cycle in the line holding
-    -- register. Bit 7 of this is always zero, but included to reduce if
+    -- register. Bit 15 of this is always zero, but included to reduce if
     -- statement spam.
-    variable hold_valid   : std_logic_array(0 to 7) := (others => '0');
+    variable hold_valid   : std_logic_array(0 to 15) := (others => '0');
 
     -- Thermometer code for the copy and literal end signals. This plus
     -- hold_valid is used to construct the strobe, mux, and hold_valid signals
-    -- for the next cycle. Bit 15 of this is always zero, but included to
+    -- for the next cycle. Bit 31 of this is always zero, but included to
     -- reduce if statement spam.
-    variable cp_end_th    : std_logic_array(0 to 15);
-    variable li_end_th    : std_logic_array(0 to 15);
+    variable cp_end_th    : std_logic_array(0 to 31);
+    variable li_end_th    : std_logic_array(0 to 31);
 
     -- Arcane stuff described in the big comment block further down.
-    variable shift        : unsigned(2 downto 0);
-    type lookahead_lookup_type is array (natural range <>) of std_logic_array(0 to 127);
-    function lookahead_lookup_fn return lookahead_lookup_type is
-      variable ret  : lookahead_lookup_type(0 to 7);
-      variable acc  : unsigned(3 downto 0);
-    begin
-      for byte in 0 to 7 loop
-        for shif in 0 to 7 loop
-          for rot in 0 to 15 loop
-            acc := to_unsigned(byte, 4) - rot - shif;
-            ret(byte)(shif * 16 + rot) := acc(3);
-          end loop;
-        end loop;
-      end loop;
-      return ret;
-    end function;
-    constant LOOKAHEAD_LOOKUP : lookahead_lookup_type := lookahead_lookup_fn;
-    variable li_ahead     : std_logic;
+    variable shift        : unsigned(3 downto 0);
+    variable t_cp         : unsigned(4 downto 0);
+    variable t_cp2        : unsigned(4 downto 0);
     variable cp_ahead     : std_logic;
+    variable cp2_ahead    : std_logic;
+
+    -- Per lane-pair line selects, see the signal declarations.
+    variable cp_hsa       : std_logic;
+    variable li_hsa       : std_logic;
+
+    -- Power-of-two self-overlap replication. rep_msk is the period minus one
+    -- (1, 3 or 7); rep_ph is the replication phase of this lane pair, i.e. the
+    -- destination byte's distance from the copy's base taken modulo the period
+    -- (and because the period divides eight, that distance modulo eight -- which
+    -- is what the lane-pair index gives -- is enough to compute it); rep_lane is
+    -- the source window byte the pair must read, whose top bit is the lane-pair
+    -- line select and whose low three bits are the lane-pair index.
+    variable rep_msk      : unsigned(2 downto 0);
+    variable rep_ph       : unsigned(2 downto 0);
+    variable rep_lane     : unsigned(3 downto 0);
+    variable rep_on       : std_logic;
 
     -- Level/state of the literal FIFO.
     variable li_level     : unsigned(4 downto 0) := (others => '1');
 
-    -- Temporary variable for computing short-term SRL address.
+    -- Temporary variables for computing short-term SRL addresses.
     variable st_addr      : unsigned(4 downto 0);
+    variable st_addr2     : unsigned(4 downto 0);
 
   begin
     if rising_edge(clk) then
@@ -471,7 +569,7 @@ begin
       s2_valid <= s1_valid;
       s2_lt_val <= s1_cm.lt_val;
       s2_last <= s1_cm.last and s1_valid;
-      s2_cnt <= s1_cm.li_end(2 downto 0);
+      s2_cnt <= s1_cm.li_end(3 downto 0);
 
       -- Update the literal FIFO level for the push action that's about to
       -- happen, before the address is used. Therefore we must do it before
@@ -481,14 +579,14 @@ begin
       end if;
 
       -- These bits are always zero!
-      hold_valid(7) := '0';
-      cp_end_th(15) := '0';
-      li_end_th(15) := '0';
+      hold_valid(15) := '0';
+      cp_end_th(31) := '0';
+      li_end_th(31) := '0';
 
       -- Convert the cp_end and li_end signals into thermometer code. Note that
       -- if both are zero, everything below becomes no-op, and we have a LUT
       -- input extra here anyway.
-      for byte in 0 to 14 loop
+      for byte in 0 to 30 loop
         if byte < s1_cm.cp_end then
           cp_end_th(byte) := s1_valid;
         else
@@ -502,33 +600,152 @@ begin
       end loop;
 
       -- Compute arcane value that we need later. See massive comment block.
-      if s1_cm.li_end(3) = '1' then
-        shift := s1_cm.li_end(2 downto 0);
+      if s1_cm.li_end(4) = '1' then
+        shift := s1_cm.li_end(3 downto 0);
       else
-        shift := "000";
+        shift := "0000";
       end if;
 
-      for byte in 0 to 7 loop
+      -- The lookahead bit of copy lane j is bit 4 of (j - cp_rol - shift) in
+      -- 5-bit arithmetic (see the massive comment block below). Writing
+      -- t = cp_rol + shift mod 32 and splitting it into t(4) and t(3..0), that
+      -- bit is exactly t(4) xor (j < t(3..0)): one shared 5-bit add plus a
+      -- 4-bit thermometer compare per lane, rather than a 512-entry lookup
+      -- table per lane.
+      t_cp := s1_cm.cp_rol + shift;
+
+      -- The same decomposition for the second copy of a copy pair, whose
+      -- rotation lives in li_rol with its top bit in cp2_roh.
+      t_cp2 := (s1_cm.cp2_roh & s1_cm.li_rol) + shift;
+
+      -- The literal rotation is the same for every destination byte. In a
+      -- paired command this is the second copy's rotation; the second copy
+      -- never uses run-length acceleration either, so it is shared the same way.
+      s2_li_rol <= s1_cm.li_rol(2 downto 0);
+      s2_pair <= s1_cm.cp2_val;
+      s2_lt_val2 <= s1_cm.lt_val2;
+
+      -- Destination byte i of the 16-byte output line reads copy lane
+      -- (cp_rol + i) mod 16; destination byte i+8 reads lane
+      -- (cp_rol + i + 8) mod 16, which is the *partner* of that lane -- same
+      -- index modulo 8, other half. So both halves of the output line share one
+      -- 8-way rotation over lane pairs, and all that is needed in front of it
+      -- is one line select per pair. For pair p the low half wants the high
+      -- lane iff cp_rol(2..0) + i carries out of bit 2, which for the unique i
+      -- that lands on pair p is cp_rol(3) xor (p < cp_rol(2..0)). In run-length
+      -- mode every destination byte reads the one same lane, so both halves
+      -- then take the same side of the pair.
+      -- Decode the replication period of a power-of-two self-overlapping copy.
+      -- rep_on says the copy writes its own source pattern repeated with period
+      -- rep_msk + 1 instead of reading sixteen consecutive source bytes.
+      rep_on := s1_cm.cp_rep(1) or s1_cm.cp_rep(0);
+      rep_msk := (s1_cm.cp_rep(1) and s1_cm.cp_rep(0)) & s1_cm.cp_rep(1) & '1';
+
+      for pair in 0 to 7 loop
+
+        if pair < s1_cm.cp_rol(2 downto 0) then
+          cp_hsa := not s1_cm.cp_rol(3);
+        else
+          cp_hsa := s1_cm.cp_rol(3);
+        end if;
+        -- The source window byte a replicating copy's destination byte must read
+        -- is cp_rsrc (the window index of the copy's first source byte) plus the
+        -- replication phase: one four-bit add whose low three bits are the
+        -- lane-pair index the rotator has to produce.
+        rep_ph := (to_unsigned(pair, 3) - s1_cm.cp_rbase) and rep_msk;
+        rep_lane := s1_cm.cp_rsrc + rep_ph;
+
+        -- The lane-pair line selects are indexed by the *source* lane pair, not
+        -- by the destination byte, so they are the same thermometer compare the
+        -- unaccelerated path uses with cp_rsrc in place of cp_rol: a replicating
+        -- copy only ever reads the `period` window bytes starting at cp_rsrc, so
+        -- the window byte whose low three bits are p is cp_rsrc + ((p - cp_rsrc)
+        -- mod 8), and bit 3 of that sum is exactly this compare. Lane pairs whose
+        -- phase lands past the period are never read and are don't-care.
+        -- Destination bytes b and b+8 share a phase (the period divides eight)
+        -- and hence a lane, so both halves of the output line take the same side
+        -- of the pair, exactly as in run-length mode.
+        if rep_on = '1' then
+          if pair < s1_cm.cp_rsrc(2 downto 0) then
+            s2_cp_hsa(pair) <= not s1_cm.cp_rsrc(3);
+            s2_cp_hsb(pair) <= not s1_cm.cp_rsrc(3);
+          else
+            s2_cp_hsa(pair) <= s1_cm.cp_rsrc(3);
+            s2_cp_hsb(pair) <= s1_cm.cp_rsrc(3);
+          end if;
+        else
+          s2_cp_hsa(pair) <= cp_hsa;
+          if s1_cm.cp_rle = '1' then
+            s2_cp_hsb(pair) <= cp_hsa;
+          else
+            s2_cp_hsb(pair) <= not cp_hsa;
+          end if;
+        end if;
+
+        -- Exactly the same decomposition for the 16-byte literal window, whose
+        -- two halves are the current literal line (SRL address li_level) and
+        -- the lookahead line (address li_level - 1). Here the line select can
+        -- be folded straight into the sub-lane read address, so the literal
+        -- path needs no line multiplexer at all.
+        if pair < s1_cm.li_rol(2 downto 0) then
+          li_hsa := not s1_cm.li_rol(3);
+        else
+          li_hsa := s1_cm.li_rol(3);
+        end if;
+        if li_hsa = '1' then
+          s2_li_addr_a(pair) <= li_level - 1;
+          s2_li_addr_b(pair) <= li_level;
+        else
+          s2_li_addr_a(pair) <= li_level;
+          s2_li_addr_b(pair) <= li_level - 1;
+        end if;
+
+        -- The second copy of a copy pair rides on the literal rotation, so its
+        -- lane-pair select is this very half-select: li_hsa = '1' means "sub-
+        -- lane a wants window byte pair+8". For the literal that is folded into
+        -- the SRL address above; for the second copy, whose 16-byte window comes
+        -- out of the mirrored history RAM in one piece, it is a real mux.
+        s2_cp2_hs(pair) <= li_hsa;
+
+        -- Compute rotate-left amounts for copy. This is only per destination
+        -- byte because of run-length acceleration, where cp_rol is an index
+        -- rather than a rotation; destination bytes pair and pair+8 always want
+        -- the same value.
+        if s1_cm.cp_rle = '1' then
+          s2_cp_rol(pair) <= s1_cm.cp_rol(2 downto 0) - pair;
+        elsif rep_on = '1' then
+
+          -- The rotator adds (byte mod 8) back, which for this lane pair is
+          -- `pair`, so the lane index computed above is handed over diminished by
+          -- it -- the same cancellation run-length mode does.
+          s2_cp_rol(pair) <= rep_lane(2 downto 0) - pair;
+
+        else
+          s2_cp_rol(pair) <= s1_cm.cp_rol(2 downto 0);
+        end if;
+
+      end loop;
+
+      for byte in 0 to 15 loop
 
         -- Determine whether this byte is a literal or a copy.
-        if (cp_end_th(byte) = '1' and li_end_th(byte + 8) = '0') or cp_end_th(byte + 8) = '1' then
+        if (cp_end_th(byte) = '1' and li_end_th(byte + 16) = '0') or cp_end_th(byte + 16) = '1' then
 
           -- Before copy end on the current line, and not used for a literal
-          -- on the next line, so this is a copied byte.
-          s2_mux_sel(byte) <= '1';
-
-          -- Compute rotate-left amounts for copy.
-          if s1_cm.cp_rle = '1' then
-            s2_rol_sel(byte) <= s1_cm.cp_rol(2 downto 0) - byte;
-          else
-            s2_rol_sel(byte) <= s1_cm.cp_rol(2 downto 0);
-          end if;
+          -- on the next line, so this byte belongs to the command's first byte
+          -- region. That region is the copy's, unless this is a literal-first
+          -- command (sw_val), in which case the two regions swap roles: the
+          -- whole of the order reversal in the datapath is this one inversion,
+          -- because the two sources arrive at the same 2:1 multiplexer either
+          -- way and each one's rotation is computed against its own
+          -- destination base in cmd_gen_2.
+          s2_mux_sel(byte) <= not s1_cm.sw_val;
 
         else
 
-          -- Not a copied byte, so it's a literal.
-          s2_mux_sel(byte) <= '0';
-          s2_rol_sel(byte) <= s1_cm.li_rol(2 downto 0);
+          -- Second byte region: the literal (or the second copy of a pair),
+          -- or the copy of a literal-first command.
+          s2_mux_sel(byte) <= s1_cm.sw_val;
 
         end if;
 
@@ -610,8 +827,11 @@ begin
         -- do what they're supposed to, they'd never be able to sell the
         -- garbage performance of certain newer, more buzzwordy tools. So we
         -- build a lookup constant for it.
-        li_ahead := LOOKAHEAD_LOOKUP(byte)(to_integer(shift & s1_cm.li_rol));
-        cp_ahead := LOOKAHEAD_LOOKUP(byte)(to_integer(shift & s1_cm.cp_rol));
+        if byte < t_cp(3 downto 0) then
+          cp_ahead := not t_cp(4);
+        else
+          cp_ahead := t_cp(4);
+        end if;
 
         -- Never lookahead in run-length mode; the index is always in the
         -- first line.
@@ -625,6 +845,15 @@ begin
         -- lookahead (swap low -> even = current). If we set the bit low, we
         -- select the even line.
         s2_lt_sel(byte) <= s1_cm.lt_swap xor cp_ahead;
+
+        -- The same lookahead decomposition for the second copy, which is always
+        -- a long-term read, so it needs no short-term address of its own.
+        if byte < t_cp2(3 downto 0) then
+          cp2_ahead := not t_cp2(4);
+        else
+          cp2_ahead := t_cp2(4);
+        end if;
+        s2_lt2_sel(byte) <= s1_cm.lt_swap2 xor cp2_ahead;
 
         -- Compute the short-term memory read address for this byte.
         st_addr := s1_cm.st_addr;
@@ -642,19 +871,31 @@ begin
 
         s2_st_addr(byte) <= st_addr;
 
-        -- Compute the literal read address for this byte.
-        if li_ahead = '1' then
-          s2_li_addr(byte) <= li_level - 1;
-        else
-          s2_li_addr(byte) <= li_level;
+        -- The very same address computation for the second copy, on the second
+        -- read port of the short-term memory. Both corrections are the same ones
+        -- the first copy needs: hold_valid is a property of the source lane (how
+        -- much of the line being assembled it already holds, which is what SRL
+        -- address 0 returns), and the lookahead bit is the second copy's own.
+        -- The second copy only ever reads bytes that were written in an earlier
+        -- cycle (its offset is at least 16 and the pair writes at most 16 bytes),
+        -- so hold_valid as it stands at the start of this cycle describes the
+        -- SRL contents it reads exactly.
+        st_addr2 := s1_cm.st_addr2;
+        if hold_valid(byte) = '1' then
+          st_addr2 := st_addr2 + 1;
         end if;
+        if cp2_ahead = '1' then
+          st_addr2 := st_addr2 - 1;
+        end if;
+
+        s2_st2_addr(byte) <= st_addr2;
 
         -- Determine hold_valid and the strobe signals for the next cycle.
         s2_int_strb(byte) <= (li_end_th(byte) and not hold_valid(byte))
-                          or li_end_th(byte + 8);
+                          or li_end_th(byte + 16);
         s2_ext_strb(byte) <= li_end_th(byte) and not hold_valid(byte);
-        hold_valid(byte)  := ((hold_valid(byte) or li_end_th(byte)) and not li_end_th(7))
-                          or li_end_th(byte + 8);
+        hold_valid(byte)  := ((hold_valid(byte) or li_end_th(byte)) and not li_end_th(15))
+                          or li_end_th(byte + 16);
 
       end loop;
 
@@ -678,7 +919,7 @@ begin
   end process;
 
   -- Short-term memory SRLs.
-  st_srl_gen: for byte in 0 to 7 generate
+  st_srl_gen: for byte in 0 to 15 generate
   begin
     srl_inst: vhsnunzip_srl
       generic map (
@@ -694,9 +935,77 @@ begin
       );
   end generate;
 
+  -- Second read port on the short-term memory, for the second copy of a copy
+  -- pair. An SRL has one read port, so the port is a duplicate set of SRLs
+  -- written with exactly the same data and enables as the set above; only the
+  -- read address differs. This is what lets a pair's second copy reach back less
+  -- than the long-term memory's write latency, which is the common case in real
+  -- column data (offsets of tens or hundreds of bytes).
+  st2_srl_gen: for byte in 0 to 15 generate
+  begin
+    srl_inst: vhsnunzip_srl
+      generic map (
+        WIDTH       => 8,
+        DEPTH_LOG2  => 5
+      )
+      port map (
+        clk         => clk,
+        wr_ena      => s2_int_strb(byte),
+        wr_data     => s2_mux_data(byte),
+        rd_addr     => s2_st2_addr(byte),
+        rd_data     => s2_st2_data(byte)
+      );
+  end generate;
+
   -- "Load" long-term memory data.
   s2_le_data <= lt_rd_even;
   s2_lo_data <= lt_rd_odd;
+  s2_le2_data <= lt_rd_even2;
+  s2_lo2_data <= lt_rd_odd2;
+
+  -- Second copy source: the short-term memory's second read port, or the
+  -- mirrored long-term lines with their even/odd select. Exactly the same 3:1
+  -- select the first copy has (one LUT6 per bit), so the second copy's path is
+  -- no deeper than the first's.
+  s2_cp2_data_proc: process (
+    s2_st2_data, s2_le2_data, s2_lo2_data, s2_lt_val2, s2_lt2_sel
+  ) is
+  begin
+    for byte in 0 to 15 loop
+      if s2_lt_val2 = '0' then
+        s2_cp2_data(byte) <= s2_st2_data(byte);
+      elsif s2_lt2_sel(byte) = '0' then
+        s2_cp2_data(byte) <= s2_le2_data(byte);
+      else
+        s2_cp2_data(byte) <= s2_lo2_data(byte);
+      end if;
+    end loop;
+  end process;
+
+  -- Feed the second copy into the literal sub-lanes. A paired command carries
+  -- no literal, so the rotator behind this mux, the half-select in front of it
+  -- and the byte region it writes are all the literal's, unchanged; this 3:1
+  -- select (literal SRL, window byte p, window byte p+8) is the entire cost of
+  -- the second copy's data path. Its depth matches the first copy's path, which
+  -- already has the long-term line select and the lane-pair select in front of
+  -- its own rotator, so stage 2 gains no critical-path depth.
+  s2_li_src_proc: process (
+    s2_li_data_a, s2_li_data_b, s2_cp2_data, s2_cp2_hs, s2_pair
+  ) is
+  begin
+    for pair in 0 to 7 loop
+      if s2_pair = '0' then
+        s2_li_src_a(pair) <= s2_li_data_a(pair);
+        s2_li_src_b(pair) <= s2_li_data_b(pair);
+      elsif s2_cp2_hs(pair) = '0' then
+        s2_li_src_a(pair) <= s2_cp2_data(pair);
+        s2_li_src_b(pair) <= s2_cp2_data(pair + 8);
+      else
+        s2_li_src_a(pair) <= s2_cp2_data(pair + 8);
+        s2_li_src_b(pair) <= s2_cp2_data(pair);
+      end if;
+    end loop;
+  end process;
 
   -- Generate the copy source multiplexer.
   s2_cp_data_proc: process (
@@ -704,7 +1013,7 @@ begin
     s2_lt_val, s2_lt_sel
   ) is
   begin
-    for byte in 0 to 7 loop
+    for byte in 0 to 15 loop
       if s2_lt_val = '0' then
         s2_cp_data(byte) <= s2_st_data(byte);
       elsif s2_lt_sel(byte) = '0' then
@@ -715,18 +1024,51 @@ begin
     end loop;
   end process;
 
-  -- Generate the main multiplexer/rotator.
-  s2_mux_data_proc: process (
-    s2_li_data, s2_cp_data, s2_rol_sel, s2_mux_sel
-  ) is
-    variable idx  : unsigned(2 downto 0);
+  -- Reduce the 16 copy lanes to 8 sub-lanes per output half. The low half of
+  -- the output line reads sub-lane set a, the high half reads set b; the two
+  -- sets are the two sides of the same 8 lane pairs, so from here on the
+  -- rotation is 8-way for both halves and its select is shared between them.
+  s2_cp_pair_proc: process (s2_cp_data, s2_cp_hsa, s2_cp_hsb) is
   begin
-    for byte in 0 to 7 loop
-      idx := s2_rol_sel(byte) + byte;
-      if s2_mux_sel(byte) = '0' then
-        s2_mux_data(byte) <= s2_li_data(to_integer(idx));
+    for pair in 0 to 7 loop
+      if s2_cp_hsa(pair) = '0' then
+        s2_cp_data_a(pair) <= s2_cp_data(pair);
       else
-        s2_mux_data(byte) <= s2_cp_data(to_integer(idx));
+        s2_cp_data_a(pair) <= s2_cp_data(pair + 8);
+      end if;
+      if s2_cp_hsb(pair) = '0' then
+        s2_cp_data_b(pair) <= s2_cp_data(pair);
+      else
+        s2_cp_data_b(pair) <= s2_cp_data(pair + 8);
+      end if;
+    end loop;
+  end process;
+
+  -- Generate the main multiplexer/rotator: two 8:1 muxes and a 2:1 per
+  -- destination byte, instead of one 32:1 mux over 16 copy lanes and 16
+  -- literal lanes.
+  s2_mux_data_proc: process (
+    s2_li_src_a, s2_li_src_b, s2_cp_data_a, s2_cp_data_b,
+    s2_cp_rol, s2_li_rol, s2_mux_sel
+  ) is
+    variable cpi  : unsigned(2 downto 0);
+    variable lii  : unsigned(2 downto 0);
+  begin
+    for byte in 0 to 15 loop
+      cpi := s2_cp_rol(byte mod 8) + (byte mod 8);
+      lii := s2_li_rol + (byte mod 8);
+      if byte < 8 then
+        if s2_mux_sel(byte) = '0' then
+          s2_mux_data(byte) <= s2_li_src_a(to_integer(lii));
+        else
+          s2_mux_data(byte) <= s2_cp_data_a(to_integer(cpi));
+        end if;
+      else
+        if s2_mux_sel(byte) = '0' then
+          s2_mux_data(byte) <= s2_li_src_b(to_integer(lii));
+        else
+          s2_mux_data(byte) <= s2_cp_data_b(to_integer(cpi));
+        end if;
       end if;
     end loop;
   end process;
@@ -742,10 +1084,10 @@ begin
       -- Assign defaults.
       s3_out_push <= '0';
       s3_out_last <= '0';
-      s3_out_cnt <= "1000";
+      s3_out_cnt <= "10000";
       s3_last_pend <= '0';
 
-      for byte in 0 to 7 loop
+      for byte in 0 to 15 loop
 
         -- Update the holding register only when the stage is valid and the
         -- byte strobe is set.
@@ -771,7 +1113,7 @@ begin
         -- Inserted cycle to push out line holding register contents.
         s3_out_push <= '1';
         s3_out_last <= '1';
-        s3_out_cnt <= resize(s3_cnt, 4);
+        s3_out_cnt <= resize(s3_cnt, 5);
 
       elsif s2_valid = '1' then
 
@@ -797,15 +1139,15 @@ begin
             -- If byte 7 was strobed, the last line happened to be a full line.
             -- If it wasn't, we need to update the count to reflect the size of
             -- the partial line.
-            if s2_ext_strb(7) = '0' then
-              s3_out_cnt <= resize(s2_cnt, 4);
+            if s2_ext_strb(15) = '0' then
+              s3_out_cnt <= resize(s2_cnt, 5);
             end if;
 
           end if;
 
-        elsif s2_ext_strb(7) = '1' then
+        elsif s2_ext_strb(15) = '1' then
 
-          -- Byte 7 was written, so we have a full line to push.
+          -- Byte 15 was written, so we have a full line to push.
           s3_out_push <= '1';
 
         end if;
@@ -822,12 +1164,12 @@ begin
 
   -- Decompressed data output FIFO.
   s3_out_ctrl(0) <= s3_out_last;
-  s3_out_ctrl(4 downto 1) <= std_logic_vector(s3_out_cnt);
+  s3_out_ctrl(5 downto 1) <= std_logic_vector(s3_out_cnt);
 
   de_fifo_inst: vhsnunzip_fifo
     generic map (
-      DATA_WIDTH  => 8,
-      CTRL_WIDTH  => 5
+      DATA_WIDTH  => 16,
+      CTRL_WIDTH  => 6
     )
     port map (
       clk         => clk,
@@ -843,7 +1185,7 @@ begin
     );
 
   de.last <= de_ctrl(0);
-  de.cnt <= unsigned(de_ctrl(4 downto 1));
+  de.cnt <= unsigned(de_ctrl(5 downto 1));
   de_level <= de_level_s;
 
   -- Determine the maximum output FIFO level for which the command generator

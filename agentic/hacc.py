@@ -53,7 +53,7 @@ RAM_FILE = os.path.join(KIT, 'syn', 'ram_xilinx.vhd')
 # plausibly collide with it (and one that does is refused, not overwritten).
 RAM_STAGED = 'agentic_kit_ram_xilinx.vhd'
 
-REPORTS = ('timing.log', 'utilization.log', 'critical_paths.log')
+REPORTS = ('timing.log', 'utilization.log', 'critical_paths.log', 'util_hier.log')
 
 # BatchMode: a missing key fails at once instead of waiting on a password
 # prompt nobody will answer. LogLevel=ERROR also silences the cluster's
@@ -369,6 +369,10 @@ def parse_reports(out_dir):
         out['total_endpoints'] = int(row.group(4))
 
     try:
+        out['area_hier'] = parse_hier(_read(out_dir, 'util_hier.log'))
+    except HaccError:
+        pass                               # advisory only
+    try:
         paths = _read(out_dir, 'critical_paths.log')
     except HaccError:
         return out                         # advisory only
@@ -378,6 +382,38 @@ def parse_reports(out_dir):
         out['critical_path'] = {'from': pretty_pin(src.group(1)),
                                 'to': pretty_pin(dst.group(1))}
     return out
+
+
+_HIER_COLS = (('luts', 'total luts'), ('ffs', 'ffs'), ('lutram', 'lutrams'),
+              ('srl', 'srls'), ('uram', 'uram'), ('ramb36', 'ramb36'), ('dsp', 'dsp blocks'))
+
+
+def parse_hier(text):
+    """Rows of `report_utilization -hierarchical`: one dict per instance,
+    depth from the name's indentation (0 = the top)."""
+    head = None
+    rows = []
+    for line in text.splitlines():
+        if not line.startswith('|'):
+            continue
+        cells = line.split('|')[1:-1]
+        if head is None:
+            if cells and cells[0].strip() == 'Instance':
+                head = [c.strip().lower() for c in cells]
+            continue
+        if len(cells) != len(head) or not cells[0].strip():
+            continue
+        name = cells[0]
+        rec = {'inst': name.strip(), 'module': cells[1].strip(),
+               'depth': max(0, (len(name) - len(name.lstrip()) - 1) // 2)}
+        for key, col in _HIER_COLS:
+            if col in head:
+                try:
+                    rec[key] = int(float(cells[head.index(col)].strip()))
+                except ValueError:
+                    rec[key] = 0
+        rows.append(rec)
+    return rows
 
 
 # --------------------------------------------------------------------------

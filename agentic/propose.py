@@ -930,6 +930,65 @@ WHEN YOU ARE DONE
 SYSTEM_BRIEF = SYSTEM_BRIEF.replace('@@GITFORMS@@', GIT_FORMS_TEXT)
 
 
+# The brief for a run whose goal is area: the same rules of the road, another
+# score. Built from SYSTEM_BRIEF so the two cannot drift apart elsewhere.
+_AREA_SWAPS = (
+    ('''  Pipeline (all in rtl/): pre_decoder -> decoder (+ decoder_long) -> cmd_gen_1
+  -> cmd_gen_2 -> pipeline datapath with a history RAM (vhsnunzip_ram).
+''', '''  The module tree in the map below says which entities the top really
+  instantiates. Some files in rtl/ may be left over from an earlier design
+  and never instantiated: check the tree before editing one, because a
+  change there moves nothing.
+'''),
+    ('''  2. Throughput = bytes per cycle (real Parquet row groups) x f_max (from
+     @@SYNTH@@). Both halves count. A change that raises
+     bytes/cycle a little and lowers f_max more is a loss.
+  3. Area is measured and shown, not scored. You are judged on throughput
+     alone; LUTs, registers and RAMs are reported so you can see what a
+     change costs. The design must still place and route on the part.
+''', '''  2. AREA DECIDES: the LUT count after place and route (from
+     @@SYNTH@@). Fewer LUTs is the goal. Registers may not
+     grow by more than 2% and URAM may not grow at all: a LUT cut bought
+     with flip-flops or memories is refused.
+  3. Throughput = bytes per cycle (real Parquet row groups) x f_max is the
+     constraint, not the score. The brief's AREA GOAL section gives the
+     band the run must end in. A change that stays inside the band is
+     judged on LUTs alone. A change that drops below the band is adopted
+     only as a planned THROUGHPUT DEBT: it must cut at least 5% of the
+     LUTs, and its PROPOSAL.json must carry a recovery_plan (see below)
+     whose end state is back inside the band and still smaller than the
+     best design inside the band. Later iterations then carry out that
+     plan; if it is not repaid in time the run throws the debt away. A
+     smaller design that is merely slower is not a win. Remember f_max:
+     removing a pipeline register can save LUTs and cost the clock.
+'''),
+    ('''   "expected_gain_pct": <number, real prediction of throughput change>,
+''', '''   "expected_gain_pct": <number, real prediction of the LUT reduction in
+     percent (positive = fewer LUTs)>,
+   "expected_luts": <predicted LUT count after your change>,
+   "expected_throughput_gbps": <predicted throughput after your change>,
+   "recovery_plan": only when expected_throughput_gbps is below the band:
+     {"steps": "the concrete follow-up change(s) that win the throughput
+        back: mechanism, files, records, in what order",
+      "expected_throughput_gbps": <after recovery; inside the band>,
+      "expected_luts_after": <LUTs after recovery>},
+'''),
+    ('''  Declining is the last resort, not an option to reach for after reading.
+  A structural change (wider line, wider port, more elements per cycle) is
+  hard and touches several files; that is exactly why this session exists
+  and why it has a large budget. Plan it, build it in verified steps, and
+  keep going while the check passes.''', '''  Declining is the last resort, not an option to reach for after reading.
+  A structural change (a narrower datapath, a shared unit, a memory in
+  place of a register array) is hard and touches several files; that is
+  exactly why this session exists and why it has a large budget. Plan it,
+  build it in verified steps, and keep going while the check passes.'''),
+)
+AREA_BRIEF = SYSTEM_BRIEF
+for _old, _new in _AREA_SWAPS:
+    assert _old in AREA_BRIEF, _old[:60]
+    AREA_BRIEF = AREA_BRIEF.replace(_old, _new)
+
+
 RESUME_PREFIX = """\
 YOU HAVE ALREADY STARTED THIS CHANGE IN THIS WORKTREE.
 
@@ -1116,6 +1175,10 @@ def build_user_prompt(ctx, direction, others, resumed=False):
     lines.append('CURRENT DESIGN, MEASURED')
     lines.append(ctx['state_text'])
     lines.append('')
+    if ctx.get('area_text'):
+        lines.append('AREA GOAL: THE RULES, THE STATE OF THE RUN, AND WHERE THE LUTS ARE')
+        lines.append(ctx['area_text'])
+        lines.append('')
     lines.append('STAGE PROFILE (rate vs ceiling read from the RTL)')
     lines.append(ctx['profile_text'])
     lines.append('')
@@ -1200,7 +1263,64 @@ To open one, add "open_track"; to give up an open one, add
 "abandon_track": "reason"."""
 
 
+AREA_PLAN_RULES = """\
+Choose %d DIFFERENT directions for %d parallel candidate sessions. The goal
+is FEWER LUTS; throughput is a constraint (see AREA GOAL above). Rules:
+- Aim at the modules that hold the LUTs: read WHERE THE LUTS ARE and name
+  the instance, the module, and the mechanism that removes its LUTs, with
+  a predicted LUT count. Big wins first; one cheap low-risk direction.
+- Mechanisms that cut FPGA LUTs: remove logic that is never used or that
+  duplicates another unit; narrow over-wide counters, lengths, offsets and
+  data paths to what the format needs; share one unit in place of several
+  copies (time-multiplex where the probe shows the unit idle); move wide
+  register arrays and FIFOs into LUTRAM/SRL or into the existing URAM;
+  replace wide crossbars and barrel shifters by narrower or staged ones;
+  simplify control (one-hot vs encoded, fewer states). Registers may not
+  grow by more than 2%% and URAM may not grow.
+- Mind throughput = bytes/cycle x f_max: a cut that lengthens the worst
+  path or adds a bubble per element can leave the band.
+- THROUGHPUT DEBT: a direction may deliberately drop below the band
+  (for example fewer elements per cycle, a narrower line) only if it cuts
+  at least 5%% of the LUTs AND comes with a concrete recovery: the
+  follow-up change that wins the throughput back at a smaller LUT cost,
+  so that the planned end state is inside the band and smaller than the
+  best in-band design. Say the recovery in the direction's hypothesis;
+  the session writes it into its proposal. Not in the last iterations.
+- WHILE A DEBT IS OPEN, direction 1 MUST carry out the next step of its
+  recovery plan (quoted in AREA GOAL). The other directions may cut LUTs
+  but must not lose throughput.
+- Do not repeat a direction that failed in the history unless you say what
+  is different this time. Never choose an AVOID skill (the skill library
+  was written for throughput; read it as background).
+- Each direction must be concrete enough that a coding session can start:
+  name the module, the mechanism and the files to read.
+
+Reply with JSON only:
+{"directions": [
+  {"focus": "one line, the change to make",
+   "hypothesis": "why it removes LUTs, how many (predicted LUT count), and what it does to throughput; for a debt, the recovery",
+   "skill_ids": ["ids from the library, or none"],
+   "where_to_look": "files/entities to read first",
+   "risk": "what could go wrong",
+   "roadmap_step": null,
+   "modelled_gain_pct": null}
+ ],
+ "note": "one or two sentences on the overall state"}
+"""
+
+
 def build_plan_prompt(ctx, n):
+    text = _build_plan_prompt(ctx, n)
+    if not ctx.get('area_text'):
+        return text
+    head = text[:text.index('Choose %d DIFFERENT directions' % n)]
+    head = head.replace('CURRENT DESIGN, MEASURED\n',
+                        'AREA GOAL: THE RULES, THE STATE OF THE RUN, AND WHERE THE LUTS ARE\n'
+                        + ctx['area_text'] + '\n\nCURRENT DESIGN, MEASURED\n', 1)
+    return head + AREA_PLAN_RULES % (n, n)
+
+
+def _build_plan_prompt(ctx, n):
     return """\
 GOAL: %s
 ITERATION %d of %d. Progress so far: %s
@@ -1423,6 +1543,8 @@ def plan_directions(ctx, n, log, track_open=False):
               timeout_s=600, effort='medium')
     data = extract_json(res.get('text', '')) if res.get('status') == 'ok' else None
     cmd = track_command(data)
+    if ctx.get('area_text'):
+        cmd = {}
     if track_open:
         cmd.pop('open', None)
     elif 'abandon' in cmd:
@@ -1520,7 +1642,16 @@ def read_proposal(worktree):
         # used to judge (the loop's step list fixes both).
         'step_kind': str(data.get('step_kind') or '')[:20] or None,
         'predicted_bpc': _float_or_none(data.get('predicted_bpc')),
+        'expected_luts': _float_or_none(data.get('expected_luts')),
+        'expected_throughput_gbps': _float_or_none(data.get('expected_throughput_gbps')),
+        'recovery_plan': None,
     }
+    plan = data.get('recovery_plan')
+    if isinstance(plan, dict):
+        out['recovery_plan'] = {
+            'steps': str(plan.get('steps') or '')[:2000],
+            'expected_throughput_gbps': _float_or_none(plan.get('expected_throughput_gbps')),
+            'expected_luts_after': _float_or_none(plan.get('expected_luts_after'))}
     try:
         out['expected_gain_pct'] = float(data.get('expected_gain_pct'))
     except (TypeError, ValueError):
@@ -1590,7 +1721,7 @@ def write_candidates(ctx, assignments, log, rate=None):
 
         track = asg['direction'].get('track') or None
         budget, timeout_min, calib = session_limits(track, ctx)
-        system = SYSTEM_BRIEF.replace(
+        system = (AREA_BRIEF if ctx.get('area_text') else SYSTEM_BRIEF).replace(
             '@@BUDGET@@', 'about $%.0f and %d minutes' % (budget, timeout_min)).replace(
             '@@SYNTH@@', synth_phrase())
         writable = WRITABLE

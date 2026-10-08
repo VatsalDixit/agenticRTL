@@ -98,6 +98,19 @@ begin
 
         cdh.last := cur.last;
         cdh.endi := cur.endi;
+
+        -- Tell the decoder how far the lookahead half reaches. `nxt` is only
+        -- invalid when `cur` is the last line of a chunk, in which case the
+        -- lookahead half of cdh.data holds stale bytes (see the `pad` logic
+        -- above) and nothing beyond `endi` may be decoded. Otherwise the
+        -- lookahead line is a real line of the same chunk, whose last valid
+        -- index is nxt.endi.
+        if nxt.valid = '1' then
+          cdh.wendi := "1" & nxt.endi;
+        else
+          cdh.wendi := "0" & cur.endi;
+        end if;
+
         cur.valid := '0';
       end if;
 

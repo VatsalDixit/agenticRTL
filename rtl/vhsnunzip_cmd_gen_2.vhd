@@ -36,6 +36,12 @@ entity vhsnunzip_cmd_gen_2 is
 end vhsnunzip_cmd_gen_2;
 
 architecture behavior of vhsnunzip_cmd_gen_2 is
+
+  -- Simulation-only validation switches; see the hooks in the process below.
+  constant TEST_CP2 : boolean := false;
+  constant TEST_SW  : boolean := false;
+  constant TEST_REP : boolean := false;
+
 begin
   proc: process (clk) is
 
@@ -46,19 +52,46 @@ begin
     -- pointers from the relative offsets in the copy elements. lt_val stores
     -- whether the pointer is valid.
     variable lt_val : std_logic;
-    variable lt_ptr : unsigned(12 downto 0);
+    variable lt_ptr : unsigned(11 downto 0);
 
     -- Elements are available in c1h that we can't load yet because we're still
     -- busy with a literal from the previous element transfer.
     variable c1_pend: std_logic;
 
     -- Preprocessed copy length. The sign bit is an inverted validity bit.
-    variable cp_len : signed(3 downto 0) := (others => '1');
+    variable cp_len : signed(4 downto 0) := (others => '1');
 
     -- Temporary variables used during decoding.
     variable cp_rel : signed(16 downto 0);
-    variable cp_lt  : unsigned(12 downto 0);
-    variable len    : unsigned(3 downto 0);
+    variable cp_lt  : unsigned(11 downto 0);
+    variable len    : unsigned(4 downto 0);
+
+    -- Second copy of a copy pair. The decoder guarantees that its offset is at
+    -- least 16 bytes, so it never overlaps itself and never reads a byte that
+    -- this very command writes, but it may well be within the reach of the
+    -- short-term SRLs; it therefore needs a short-term address as well as a
+    -- long-term address pair, and gets them from the same arithmetic the first
+    -- copy uses. It never shares a command with a literal, so its rotation is
+    -- handed to the datapath in li_rol and its byte region is [cp_end, li_end).
+    variable pair2  : std_logic;
+    variable cp_rel2: signed(16 downto 0);
+    variable cp_lt2 : unsigned(11 downto 0);
+    variable cp2_rol: unsigned(4 downto 0);
+    variable cp_end_pre : unsigned(4 downto 0);
+
+    -- Literal-first command. The decoder admits one only when the literal is
+    -- at most eight bytes long, fits one 16-byte line together with the copy
+    -- behind it, and the copy's offset is at least 16; the whole literal is
+    -- therefore written by this one command, and its byte count is known
+    -- before any of the clamps below: li_len + 1, exactly. The copy's
+    -- destination base is then off + that count rather than off, which is the
+    -- only arithmetic the order reversal costs here. The final off is
+    -- off + len + cp_len + 1 either way, so the line pointer carry chain is
+    -- unchanged.
+    variable sw     : std_logic;
+    variable len_sw : unsigned(4 downto 0);
+    variable cp_base: unsigned(4 downto 0);
+    variable off_in : unsigned(4 downto 0);
 
     -- Remaining literal length, diminished-one. The sign bit is an inverted
     -- validity bit.
@@ -76,10 +109,10 @@ begin
     variable li_off : unsigned(3 downto 0);
 
     -- Current decompressed line offset.
-    variable off    : unsigned(3 downto 0);
+    variable off    : unsigned(4 downto 0);
 
     -- Number of bytes we can (still) write this cycle.
-    variable budget : unsigned(3 downto 0);
+    variable budget : unsigned(4 downto 0);
 
     -- Temporary flag, representing whether we can advance to the next element
     -- information record.
@@ -109,7 +142,7 @@ begin
       if c1h.valid = '0' and lt_val = '1' then
         c1h := c1;
         if c1h.valid = '1' then
-          c1_pend := not c1h.cp_len(3) or c1h.li_val;
+          c1_pend := not c1h.cp_len(4) or c1h.li_val;
         end if;
       end if;
 
@@ -127,20 +160,59 @@ begin
           c1_pend := '0';
         end if;
 
+        -- Literal-first command: the literal occupies [off, off+len_sw) and
+        -- the copy starts behind it. cp_len's sign bit is the copy's validity,
+        -- so a record whose copy has already been issued never swaps.
+        sw := c1h.sw_val and not cp_len(4);
+        off_in := off;
+        if sw = '1' then
+          len_sw := resize(unsigned(li_len(3 downto 0)), 5) + 1;
+        else
+          len_sw := (others => '0');
+        end if;
+
+        -- pragma translate_off
+        -- Validation hook: issue commands that the decoder does not mark as
+        -- literal-first through the literal-first path anyway, in the two
+        -- degenerate shapes where that must be bit-identical. A command with a
+        -- literal and no copy becomes "literal in the first region, empty copy
+        -- region behind it", which exercises a non-zero literal-first base and
+        -- the inverted region select; a command with a copy and no literal
+        -- becomes "empty literal region, copy behind it", which exercises the
+        -- copy being served through the second byte region. Simulation only;
+        -- not part of the synthesised design.
+        if TEST_SW and sw = '0' then
+          if cp_len(4) = '1' and li_len(li_len'high) = '0' and li_len < 8
+             and li_len + 1 + signed(resize(li_off, li_len'length)) < 15 then
+            sw := '1';
+            len_sw := resize(unsigned(li_len(3 downto 0)), 5) + 1;
+          elsif cp_len(4) = '0' and li_len(li_len'high) = '1'
+                and c1h.cp2_val = '0' then
+            sw := '1';
+            len_sw := (others => '0');
+          end if;
+        end if;
+        -- pragma translate_on
+
+        cp_base := off + len_sw;
+
         -- Compute copy source addresses. cp_rel(..3) = relative line;
         -- 0 = current line, positive is further forward.
-        cp_rel := signed(resize(off, 17)) - signed(resize(c1h.cp_off, 17));
+        cp_rel := signed(resize(cp_base, 17)) - signed(resize(c1h.cp_off, 17));
 
         -- Compute short-term address. This coincidentally works out to a
         -- carry-free operation!
-        cmh.st_addr := not unsigned(cp_rel(7 downto 3));
+        cmh.st_addr := not unsigned(cp_rel(8 downto 4));
 
         -- Compute long-term addresses. This unfortunately is not exactly
-        -- carry-free...
-        cp_lt := lt_ptr + unsigned(cp_rel(15 downto 3));
+        -- carry-free... cp_lt counts 16-byte lines; each such line lives in one
+        -- of the two RAM pairs (selected by its LSB), so the even/odd address
+        -- pair below reads the 32-byte window that contains any 16-byte line
+        -- and its lookahead line.
+        cp_lt := lt_ptr + unsigned(cp_rel(15 downto 4));
         cmh.lt_swap := cp_lt(0);
-        cmh.lt_adev := cp_lt(12 downto 1) + cp_lt(0 downto 0);
-        cmh.lt_adod := cp_lt(12 downto 1);
+        cmh.lt_adev := resize(cp_lt(11 downto 1) + cp_lt(0 downto 0), 12);
+        cmh.lt_adod := resize(cp_lt(11 downto 1), 12);
 
         -- If we need to read too far back for the short term memory to reach
         -- in all cases, use the long-term memory. The reason for the
@@ -149,37 +221,127 @@ begin
         -- can read back the results from the previous cycle immediately),
         -- while the long-term memory is pipelined, has port arbiters, and so
         -- on, so it has significant write-to-read latency.
-        if cp_rel(16 downto 3) < -31 then
-          cmh.lt_val := not cp_len(3);
+        if cp_rel(16 downto 4) < -31 then
+          cmh.lt_val := not cp_len(4);
         else
           cmh.lt_val := '0';
         end if;
 
         -- Determine the rotation/byte mux selection.
         cmh.cp_rle := c1h.cp_rle;
-        if c1h.cp_rle = '1' then
-          cmh.cp_rol := "0" & unsigned(cp_rel(2 downto 0));
+
+        -- Power-of-two self-overlap replication. The period travels with the
+        -- copy; the datapath also needs the window index of the copy's first
+        -- source byte and the low three bits of its destination base, because the
+        -- replication phase is counted from the copy's base and not from the
+        -- start of the output line. All three are don't-care -- and the period is
+        -- forced inactive -- on a command that carries no copy, i.e. on the
+        -- continuation commands of a long literal.
+        cmh.cp_rbase := cp_base(2 downto 0);
+        cmh.cp_rsrc := unsigned(cp_rel(3 downto 0));
+        if cp_len(4) = '0' then
+          cmh.cp_rep := c1h.cp_rep;
         else
-          cmh.cp_rol := unsigned(cp_rel(2 downto 0)) - off;
+          cmh.cp_rep := "00";
+        end if;
+
+        -- pragma translate_off
+        -- Validation hook: route copies that cannot possibly overlap themselves
+        -- through the replication path with the smallest period that still covers
+        -- the whole copy. A copy of at most `period` bytes never has a destination
+        -- byte more than period-1 past its own base, so (b - base) mod period is
+        -- just b - base and the replication is an exact no-op: the output must
+        -- stay bit-identical while all three period decodes, the masked phase
+        -- arithmetic, the four-bit lane add, the lane-pair line select and their
+        -- interaction with literals, pairs, literal-first commands and chunk
+        -- boundaries are exercised. The phase takes every value 0..7 here, which
+        -- is the whole value space a real replication can produce as well; what
+        -- the hook cannot reach is the wrap itself, which is a bare AND with the
+        -- period mask. The offset test keeps the copy from reading a byte it
+        -- writes, which is what makes the no-op claim hold.
+        -- Simulation only; not part of the synthesised design.
+        if TEST_REP and cp_len(4) = '0' and cp_len <= 7
+           and c1h.cp_rle = '0'
+           and c1h.cp_off > resize(unsigned(cp_len(3 downto 0)), 16) then
+          if cp_len <= 1 then
+            cmh.cp_rep := "01";
+          elsif cp_len <= 3 then
+            cmh.cp_rep := "10";
+          else
+            cmh.cp_rep := "11";
+          end if;
+        end if;
+        -- pragma translate_on
+
+        if c1h.cp_rle = '1' then
+          cmh.cp_rol := "0" & unsigned(cp_rel(3 downto 0));
+        else
+          cmh.cp_rol := unsigned(cp_rel(3 downto 0)) - cp_base;
         end if;
 
         -- Determine how many byte slots are still available for the literal.
-        budget := unsigned(cp_len(3 downto 0)) xor "0111";
+        budget := unsigned(cp_len(4 downto 0)) xor "01111";
+
+        -- The second copy only rides along on the cycle in which the first one
+        -- is actually issued; cp_len's sign bit is the first copy's validity.
+        pair2 := c1h.cp2_val and not cp_len(4);
 
         -- Update state for copy.
-        off := off + unsigned(cp_len) + 1;
+        cp_end_pre := cp_base;
+        off := cp_base + unsigned(cp_len) + 1;
 
         -- Thanks to the preprocessing in stage 1, each copy command can be
         -- handled in a single cycle, so we're done with it now.
         cp_len := (others => '1');
 
-        -- Save the offset after the copy so the datapath can derive which
-        -- bytes should come from the copy path.
-        cmh.cp_end := off;
+        -- Save the boundary between the command's two byte regions. Normally
+        -- that is the offset after the copy; in a literal-first command it is
+        -- the offset after the literal, which is where the copy starts.
+        if sw = '1' then
+          cmh.cp_end := cp_base;
+        else
+          cmh.cp_end := off;
+        end if;
+        cmh.sw_val := sw;
+
+        -- Second copy of a copy pair. Exactly the same address and rotation
+        -- arithmetic as the first copy, but starting from the offset after the
+        -- first copy. Its byte region is [cp_end, li_end); the literal that
+        -- would otherwise occupy that region cannot exist in a paired transfer,
+        -- so the datapath serves the second copy through the literal rotator and
+        -- no second rotator is needed. The copies together fit a 16-byte line,
+        -- so off stays below 32 exactly as it does for a copy plus a full
+        -- literal. Like the first copy it resolves either to the short-term SRLs
+        -- (second read port) or to the long-term memory (mirrored RAMs); the
+        -- reach test is the same one the first copy uses.
+        cmh.cp2_val := pair2;
+        if pair2 = '1' then
+          cp_rel2 := signed(resize(off, 17)) - signed(resize(c1h.cp2_off, 17));
+          cp_lt2 := lt_ptr + unsigned(cp_rel2(15 downto 4));
+          cmh.lt_swap2 := cp_lt2(0);
+          cmh.lt_adev2 := resize(cp_lt2(11 downto 1) + cp_lt2(0 downto 0), 12);
+          cmh.lt_adod2 := resize(cp_lt2(11 downto 1), 12);
+          cmh.st_addr2 := not unsigned(cp_rel2(8 downto 4));
+          if cp_rel2(16 downto 4) < -31 then
+            cmh.lt_val2 := '1';
+          else
+            cmh.lt_val2 := '0';
+          end if;
+          cp2_rol := unsigned(cp_rel2(3 downto 0)) - off;
+          off := off + resize(c1h.cp2_len, 5) + 1;
+        else
+          cmh.lt_swap2 := '0';
+          cmh.lt_adev2 := (others => '0');
+          cmh.lt_adod2 := (others => '0');
+          cmh.st_addr2 := (others => '0');
+          cmh.lt_val2 := '0';
+          cp2_rol := (others => '0');
+        end if;
+        cmh.cp2_roh := cp2_rol(4);
 
         -- Determine how many literal bytes we can write.
         if li_len < signed(resize(budget, li_len'length)) then
-          len := unsigned(li_len(3 downto 0)) + 1;
+          len := unsigned(li_len(4 downto 0)) + 1;
         else
           len := budget;
         end if;
@@ -191,18 +353,60 @@ begin
         -- overflow. There are two ways to deal with this; either we limit
         -- len such that it doesn't overflow, or we just don't write any
         -- chunk in this case and wait until the next cycle, when we'll have
-        -- advanced a line. The latter costs only a *tiny* bit of throughput
-        -- while the latter requires a bit more logic.
-        if li_off(3) = '1' then
-          len := "0000";
+        -- advanced a line. The original design took the latter route; we take
+        -- the former, because it lets a command that only has a couple of
+        -- byte slots left over from its copy still fill those slots with
+        -- literal data instead of writing nothing and spending an extra
+        -- command on the literal.
+        --
+        -- The literal source window is 16 bytes wide: the current literal
+        -- line and the lookahead line (see the LOOKAHEAD_LOOKUP table in
+        -- vhsnunzip_pipeline). Byte index li_off+len-1 must stay within that
+        -- window, and li_off itself must stay representable in its 4 bits
+        -- (it is reduced by 8 exactly once, when the literal line is popped),
+        -- so the resulting li_off may be at most 15. Hence the available
+        -- number of literal bytes this cycle is 15-li_off. For li_off < 8
+        -- that is 8 or more, so this clamp is a no-op there and only the
+        -- lookahead case is affected.
+        if len > resize(not li_off, len'length) then
+          len := resize(not li_off, len'length);
         end if;
 
-        -- Determine the rotation for the literal.
-        cmh.li_rol := li_off - off;
+        -- Determine the rotation for the literal. The literal window is exactly
+        -- one 16-byte decompressed line wide, so only the low 4 bits matter.
+        -- In a paired transfer there is no literal (len is zero, because the
+        -- pair is only loaded when the literal length register is empty), so
+        -- li_rol carries the second copy's rotation instead. The half-select
+        -- that stage 1 derives from li_rol(3) then happens to be exactly the
+        -- lane-pair select the second copy needs, because both windows are
+        -- indexed the same way: window byte p+8 against window byte p.
+        if pair2 = '1' then
+          cmh.li_rol := cp2_rol(3 downto 0);
+        elsif sw = '1' then
+          -- The literal starts at the command's own offset, not behind the
+          -- copy.
+          cmh.li_rol := li_off - off_in(3 downto 0);
+        else
+          cmh.li_rol := li_off - off(3 downto 0);
+        end if;
 
-        -- Update state for literal.
-        off := off + len;
-        li_off := li_off + len;
+        -- pragma translate_off
+        -- A literal-first command must write its whole literal: the copy was
+        -- placed behind exactly len_sw bytes. The decoder's admission rules
+        -- guarantee that neither the write budget nor the literal window clamp
+        -- below bites, which this checks.
+        assert sw = '0' or len = len_sw
+          report "literal-first command had its literal clamped"
+          severity failure;
+        -- pragma translate_on
+
+        -- Update state for literal. In a literal-first command the literal's
+        -- bytes are in front of the copy and were already counted into the
+        -- copy's base, so the offset must not advance over them twice.
+        if sw = '0' then
+          off := off + len;
+        end if;
+        li_off := li_off + len(3 downto 0);
         li_len := li_len - signed(resize(len, li_len'length));
 
         -- Save the offset after the literal so the datapath can derive which
@@ -210,11 +414,35 @@ begin
         -- valid.
         cmh.li_end := off;
 
+        -- pragma translate_off
+        -- Validation hook: route every plain copy that happens to share its
+        -- command with no literal bytes through the second copy's slot instead
+        -- of the first one's. The two slots are equivalent for such a copy, so
+        -- the output must be bit-identical, which exercises the second slot's
+        -- addressing (short-term *and* long-term), lookahead decomposition,
+        -- lane-pair select and byte-region selection on stimulus that does not
+        -- happen to contain pairable copies. Simulation only; not part of the
+        -- synthesised design.
+        if TEST_CP2 and cp_end_pre /= off and c1h.cp_rle = '0'
+           and pair2 = '0' and len = 0 and sw = '0' then
+          cmh.cp2_val := '1';
+          cmh.lt_val2 := cmh.lt_val;
+          cmh.lt_val := '0';
+          cmh.lt_swap2 := cmh.lt_swap;
+          cmh.lt_adev2 := cmh.lt_adev;
+          cmh.lt_adod2 := cmh.lt_adod;
+          cmh.st_addr2 := cmh.st_addr;
+          cmh.li_rol := cmh.cp_rol(3 downto 0);
+          cmh.cp2_roh := cmh.cp_rol(4);
+          cmh.cp_end := cp_end_pre;
+        end if;
+        -- pragma translate_on
+
         -- Carry the MSB of the decompression offset into the line pointer.
-        if off(3) = '1' then
+        if off(4) = '1' then
           lt_ptr := lt_ptr + 1;
         end if;
-        off(3) := '0';
+        off(4) := '0';
 
         -- Determine whether we're done with this element information record.
         advance := true;
@@ -264,7 +492,7 @@ begin
 
       -- Load the long-term memory pointer when we get it.
       if lt_val = '0' and lt_off_ld = '1' then
-        lt_ptr := lt_off;
+        lt_ptr := lt_off(11 downto 0);
         lt_val := '1';
       end if;
 

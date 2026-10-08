@@ -6,7 +6,8 @@
 #
 #   vivado -mode batch -source vivado.tcl -tclargs TOP PART PERIOD_NS
 #
-# Leaves timing.log, utilization.log and critical_paths.log in reports/.
+# Leaves timing.log, utilization.log, util_hier.log and critical_paths.log in
+# reports/.
 # Frozen (agentic/freeze.py): this decides what f_max and area a candidate is
 # credited with.
 
@@ -41,4 +42,6 @@ route_design
 file mkdir reports
 report_timing_summary -file reports/timing.log
 report_utilization -file reports/utilization.log
+# Per-module LUTs, registers and RAMs: what an area-reducing session aims at.
+report_utilization -hierarchical -hierarchical_depth 3 -file reports/util_hier.log
 report_timing -max_paths 10 -file reports/critical_paths.log

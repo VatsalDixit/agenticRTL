@@ -119,6 +119,14 @@ package vhsnunzip_int_pkg is
     last      : std_logic;
     endi      : unsigned(2 downto 0);
 
+    -- Index of the last valid byte of the *whole* 16-byte window. This is
+    -- 8 + the lookahead line's endi when the lookahead line exists, and equal
+    -- to endi when this is the last line of the chunk (the lookahead half
+    -- then holds stale data). The decoder uses this to tell whether an
+    -- element header that starts past the first line can be decoded out of
+    -- the lookahead half rather than being deferred to the next cycle.
+    wendi     : unsigned(3 downto 0);
+
   end record;
 
   constant COMPRESSED_STREAM_DOUBLE_INIT : compressed_stream_double := (
@@ -127,7 +135,8 @@ package vhsnunzip_int_pkg is
     first     => UNDEF,
     start     => (others => UNDEF),
     last      => UNDEF,
-    endi      => (others => UNDEF)
+    endi      => (others => UNDEF),
+    wendi     => (others => UNDEF)
   );
 
   procedure stream_des(l: inout line; value: inout compressed_stream_double; to_x: boolean);
@@ -167,6 +176,23 @@ package vhsnunzip_int_pkg is
     cp_off    : unsigned(15 downto 0);
     cp_len    : unsigned(5 downto 0);
 
+    -- Second copy element, issued in the same transfer as the first one. Only
+    -- set when the element directly behind the first copy is also a copy and
+    -- the pair is guaranteed to be issuable as a single datapath command: the
+    -- two copies together fit one 16-byte line, neither of them needs the
+    -- overlapping-copy split in cmd_gen_1, and the second copy reaches back far
+    -- enough that it is always served by the long-term memory. That last
+    -- condition is what makes a pair cheap: the second copy needs no short-term
+    -- SRL read port of its own (a mirrored set of history RAMs, which are URAM
+    -- and cost no LUTs, supplies it), and it cannot read a byte that the first
+    -- copy of the pair writes this very cycle. li_val is always low when
+    -- cp2_val is set, so the second copy takes over the literal's byte region
+    -- and, in the datapath, the literal's rotator; the literal that follows the
+    -- pair becomes an element of its own.
+    cp2_val   : std_logic;
+    cp2_off   : unsigned(15 downto 0);
+    cp2_len   : unsigned(3 downto 0);
+
     -- Literal element information. li_offs is the starting byte offset within
     -- li_data for the literal; li_len encodes the literal length. li_len is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
@@ -174,6 +200,21 @@ package vhsnunzip_int_pkg is
     li_val    : std_logic;
     li_off    : unsigned(3 downto 0);
     li_len    : unsigned(31 downto 0);
+
+    -- Element order flag. Normally a transfer is "copy first, then the literal
+    -- or the second copy behind it", so the copy owns the low byte region of
+    -- the command and the literal/second copy the high one. When sw_val is set
+    -- the transfer is the other way around: a short literal (at most eight
+    -- bytes, one-byte header) comes FIRST and the copy decoded behind it comes
+    -- second. The decoder only sets it when the whole literal and the whole
+    -- copy fit one 16-byte line together and the copy's offset is at least 16,
+    -- so the copy cannot read a byte the literal writes in that same command
+    -- and needs neither the overlapping-copy split nor run-length acceleration.
+    -- cp2_val is always low when sw_val is set. Downstream, only the byte
+    -- region boundaries and the destination base of the copy change; the
+    -- rotators, the history reads and the strobes are the ones they always
+    -- were, and the datapath's region select is simply inverted.
+    sw_val    : std_logic;
 
     -- Indicates that the literal data FIFO should be popped after this stream
     -- transfer has been handled.
@@ -191,9 +232,13 @@ package vhsnunzip_int_pkg is
     cp_val    => UNDEF,
     cp_off    => (others => UNDEF),
     cp_len    => (others => UNDEF),
+    cp2_val   => '0',
+    cp2_off   => (others => UNDEF),
+    cp2_len   => (others => UNDEF),
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );
@@ -232,7 +277,15 @@ package vhsnunzip_int_pkg is
     -- DIMINISHED-ONE, just like the value in the Snappy header (this saves a
     -- bit).
     cp_off    : unsigned(15 downto 0);
-    cp_len    : signed(3 downto 0);
+    cp_len    : signed(4 downto 0);
+
+    -- Second copy element of a copy pair; see element_stream. The pairing
+    -- conditions guarantee that stage 1 never has to split either copy of a
+    -- pair, so cp2_len needs no diminished-one remainder bookkeeping: it is the
+    -- decoder's length, diminished-one, verbatim.
+    cp2_val   : std_logic;
+    cp2_off   : unsigned(15 downto 0);
+    cp2_len   : unsigned(3 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -244,6 +297,18 @@ package vhsnunzip_int_pkg is
     -- within the two lines.
     cp_rle    : std_logic;
 
+    -- Power-of-two self-overlap acceleration. A copy whose offset is 2, 4 or 8
+    -- reads a byte it writes itself as soon as its length exceeds the offset,
+    -- which without this flag forces stage 1 to clamp the copy to cp_off bytes
+    -- per command (and to double the offset for the next one): a 16-byte copy
+    -- at offset 4 costs three commands instead of one. Since the destination is
+    -- then simply the source pattern repeated with period cp_off, and since
+    -- 2, 4 and 8 all divide the 8-byte lane-pair rotation, the whole of the
+    -- acceleration is "take the source lane index modulo cp_off" in the
+    -- datapath's per-lane-pair rotation. cp_rep encodes the period: "00" = no
+    -- replication, "01" = 2, "10" = 4, "11" = 8.
+    cp_rep    : unsigned(1 downto 0);
+
     -- Literal element information. li_offs is the starting byte offset within
     -- li_data for the literal; li_len encodes the literal length. li_len is
     -- stored DIMINISHED-ONE, just like the value in the Snappy header (this
@@ -251,6 +316,9 @@ package vhsnunzip_int_pkg is
     li_val    : std_logic;
     li_off    : unsigned(3 downto 0);
     li_len    : unsigned(31 downto 0);
+
+    -- Literal-before-copy order flag; see element_stream.
+    sw_val    : std_logic;
 
     -- Indicates that the literal data FIFO should be popped after this stream
     -- transfer has been handled.
@@ -267,10 +335,15 @@ package vhsnunzip_int_pkg is
     valid     => '0',
     cp_off    => (others => UNDEF),
     cp_len    => (others => UNDEF),
+    cp2_val   => '0',
+    cp2_off   => (others => UNDEF),
+    cp2_len   => (others => UNDEF),
     cp_rle    => UNDEF,
+    cp_rep    => (others => '0'),
     li_val    => UNDEF,
     li_off    => (others => UNDEF),
     li_len    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );
@@ -337,7 +410,7 @@ package vhsnunzip_int_pkg is
     --  - the effect of lt_swap is inverted on a byte-by-byte basis based on
     --    cp_rol.
     --
-    cp_rol    : unsigned(3 downto 0);
+    cp_rol    : unsigned(4 downto 0);
 
     -- Run-length encoding acceleration flag for rotations. When set, the
     -- constant (0, 1, 2, 3, 4, 5, 6, 7) should be added to cp_rol before the
@@ -349,11 +422,52 @@ package vhsnunzip_int_pkg is
     -- within the two lines.
     cp_rle    : std_logic;
 
+    -- Power-of-two self-overlap acceleration; see partial_command_stream. When
+    -- cp_rep is non-zero the period is 2**cp_rep bytes, and the destination byte
+    -- at line offset b reads source window byte cp_rsrc + ((b - base) mod
+    -- period) rather than cp_rsrc + (b - base); cp_rsrc is the window index of
+    -- the copy's first source byte (cp_rel(3..0), i.e. cp_rol + base) and
+    -- cp_rbase is the low three bits of the copy's destination base, which is
+    -- what the period is counted from. Because the period divides eight,
+    -- (b - base) mod period only needs b mod 8, so the phase is a lane-pair
+    -- property and the rotation stays an eight-way one; destination bytes b and
+    -- b+8 land on the same phase, hence on the same source lane, exactly as in
+    -- run-length mode. The lanes used are the ones the unaccelerated command
+    -- would have given its first `period` destination bytes, so every per-lane
+    -- short-term address, lookahead bit and long-term line select is unchanged;
+    -- the whole of the acceleration is a masked three-bit add and a four-bit add
+    -- in front of the per-lane-pair rotation register, whose carry out is the
+    -- lane-pair line select.
+    cp_rep    : unsigned(1 downto 0);
+    cp_rbase  : unsigned(2 downto 0);
+    cp_rsrc   : unsigned(3 downto 0);
+
     -- This index indicates the last valid *copy* byte provided by this command
     -- + one. Bytes between cp_endi and endi are literal bytes. The copy
     -- selection signals can be decoded from this in the same way that the 
     -- byte strobe signals are determined from endi.
-    cp_end    : unsigned(3 downto 0);
+    cp_end    : unsigned(4 downto 0);
+
+    -- Second copy of a copy pair. It never shares a command with a literal, so
+    -- it borrows the literal's byte region and the literal's rotator in the
+    -- datapath: its destination region is exactly [cp_end, li_end), li_rol
+    -- carries cp2_rol(3 downto 0), and bit 4 of its rotation travels in cp2_roh
+    -- (which the literal path has no use for but the lookahead decomposition in
+    -- stage 1 needs). cp2_val says the region belongs to the second copy rather
+    -- than to a literal; when it is low none of the fields below are used.
+    --
+    -- The second copy reads either the short-term SRLs (through a second read
+    -- port, i.e. a duplicate set of SRLs written with the same data) or the
+    -- mirrored long-term RAMs, selected by lt_val2 exactly as lt_val selects
+    -- between the two for the first copy. It never needs the run-length flag,
+    -- because the decoder only pairs copies whose offset is at least 16.
+    cp2_val   : std_logic;
+    st_addr2  : unsigned(4 downto 0);
+    lt_val2   : std_logic;
+    lt_adev2  : unsigned(11 downto 0);
+    lt_adod2  : unsigned(11 downto 0);
+    lt_swap2  : std_logic;
+    cp2_roh   : std_logic;
 
     -- Rotation for literals. The direction is rotate-left. The MSB should be
     -- handled by offsetting the SRL literal read by one line on a byte-by-byte
@@ -367,7 +481,15 @@ package vhsnunzip_int_pkg is
     -- (endi > 8) should be written to a holding register, as the beginning for
     -- the next line. The MSB therefore indicates that an aligned line of
     -- decompressed data is complete.
-    li_end    : unsigned(3 downto 0);
+    li_end    : unsigned(4 downto 0);
+
+    -- Literal-before-copy order flag; see element_stream. The two byte regions
+    -- of a command are [off, cp_end) and [cp_end, li_end); normally the first
+    -- is the copy and the second is the literal (or the second copy), and when
+    -- sw_val is set it is the other way around. In the datapath that is exactly
+    -- one inversion of the region select; both regions keep the rotator, the
+    -- source multiplexer and the strobe logic they always had.
+    sw_val    : std_logic;
 
     -- Indicates that the literal data FIFO should be popped after this command
     -- has been handled.
@@ -389,9 +511,20 @@ package vhsnunzip_int_pkg is
     st_addr   => (others => UNDEF),
     cp_rol    => (others => UNDEF),
     cp_rle    => UNDEF,
+    cp_rep    => (others => '0'),
+    cp_rbase  => (others => '0'),
+    cp_rsrc   => (others => '0'),
     cp_end    => (others => UNDEF),
+    cp2_val   => '0',
+    st_addr2  => (others => UNDEF),
+    lt_val2   => '0',
+    lt_adev2  => (others => UNDEF),
+    lt_adod2  => (others => UNDEF),
+    lt_swap2  => UNDEF,
+    cp2_roh   => UNDEF,
     li_rol    => (others => UNDEF),
     li_end    => (others => UNDEF),
+    sw_val    => '0',
     ld_pop    => UNDEF,
     last      => UNDEF
   );
@@ -420,14 +553,14 @@ package vhsnunzip_int_pkg is
     valid     : std_logic;
 
     -- Decompressed data line.
-    data      : byte_array(0 to 7);
+    data      : byte_array(0 to 15);
 
     -- Asserted to mark the last line of a chunk.
     last      : std_logic;
 
-    -- Indicates the number of valid bytes. This is always 8 when last is not
-    -- set, but could be anything from 0 to 8 inclusive for the last transfer.
-    cnt       : unsigned(3 downto 0);
+    -- Indicates the number of valid bytes. This is always 16 when last is not
+    -- set, but could be anything from 0 to 16 inclusive for the last transfer.
+    cnt       : unsigned(4 downto 0);
 
   end record;
 
@@ -458,8 +591,12 @@ package vhsnunzip_int_pkg is
       lt_rd_adev  : out unsigned(11 downto 0);
       lt_rd_adod  : out unsigned(11 downto 0);
       lt_rd_next  : in  std_logic;
-      lt_rd_even  : in  byte_array(0 to 7);
-      lt_rd_odd   : in  byte_array(0 to 7);
+      lt_rd_even  : in  byte_array(0 to 15);
+      lt_rd_odd   : in  byte_array(0 to 15);
+      lt_rd_adev2 : out unsigned(11 downto 0);
+      lt_rd_adod2 : out unsigned(11 downto 0);
+      lt_rd_even2 : in  byte_array(0 to 15);
+      lt_rd_odd2  : in  byte_array(0 to 15);
       -- pragma translate_off
       dbg_cs      : out compressed_stream_single;
       dbg_cd      : out compressed_stream_double;
@@ -747,6 +884,9 @@ package body vhsnunzip_int_pkg is
       value.last := vhsn_to_x01(value.last);
       value.endi := vhsn_to_x01(value.endi);
     end if;
+    -- The reference stream dumps predate the wendi field; reconstruct the
+    -- conservative value from what is in them (no usable lookahead half).
+    value.wendi := "0" & value.endi;
     value.valid := '1';
   end procedure;
 
