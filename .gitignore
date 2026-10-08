@@ -7,10 +7,8 @@ sim/work/
 work-obj*.cf
 
 # Vivado synthesis artifacts
-syn/synth_*/
 *.jou
 *.log
-!syn/synthesize.tcl
 
 # Python
 __pycache__/

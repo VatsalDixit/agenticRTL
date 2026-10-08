@@ -1,4 +1,4 @@
-# The agentic RTL loop
+# The verification flow
 
 This directory holds the orchestration for the design loop. The guiding
 principle is **cheap signal first**: functional correctness is verified on every
@@ -49,22 +49,11 @@ design is known-correct.
 The golden model (`model/emu/`) is the reference: any RTL change must keep the
 hardware output matching the model's serialized `*.tv` transfers.
 
-## Stage 2 — synthesis (scaffolded, see `syn/`)
+## Stages 2 and 3 — synthesis and optimisation (in `agentic/`)
 
-Gated behind an all-pass from stage 1. Produces the timing/area feedback signal.
-Not wired to a toolchain yet (no Vivado on this machine) — `syn/README.md` has
-the plan and the parsing target (`synthesize.py`-style WNS→f_max and utilization
-extraction).
-
-## Stage 3 — optimization subagents (future)
-
-Once stages 1–2 are solid, specialized agents consume the synthesis report and
-propose RTL edits:
-
-- **timing agent** — targets the worst-negative-slack path, proposes
-  retiming/pipelining/logic restructuring, re-verifies via stage 1.
-- **area agent** — targets LUT/register/URAM reduction (e.g. RAM_STYLE choice,
-  sharing), re-verifies via stage 1.
-
-Every proposed edit must pass stage 1 before its stage-2 numbers count. Wiring
-these in is the next milestone after the verification loop is green under GHDL.
+This file describes the first, manual verification ladder. Synthesis and the
+optimising agents were built afterwards as the agentic loop in
+[`agentic/`](../agentic/README.md): it measures every candidate with its own
+frozen testbench and reference decompressor, synthesises it (Yosys on Nangate
+45nm, or Vivado place and route on the HACC host), and scores it on
+throughput.

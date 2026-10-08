@@ -15,7 +15,6 @@ Snappy decompressor.
 - `tb/*.sim.08.vhd` — the self-checking, vhlib-free testbenches for that
   subtree.
 - `model/emu/{__init__,operators,streams,utils}.py` — the Python golden model.
-- `syn/synthesize.tcl`, `syn/constraints.xdc` — the Vivado synthesis flow.
 
 ## What is new / original to this repo
 
@@ -28,7 +27,8 @@ Snappy decompressor.
   and parametrized output).
 - `sim/run.sh`, `flow/run_verify.sh` — GHDL runner and the verification-loop
   orchestrator.
-- Documentation (`README.md`, `flow/README.md`, `syn/README.md`, this file).
+- `agentic/` — the agentic optimisation loop (see `agentic/README.md`).
+- Documentation (`README.md`, `flow/README.md`, this file).
 
 ## What was intentionally dropped
 

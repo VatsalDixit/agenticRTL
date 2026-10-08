@@ -1,34 +1,96 @@
 # agenticRTL — vhsnunzip
 
-A **lite, self-contained** hardware-design repository built around the
-[`vhsnunzip`](https://github.com/abs-tudelft/vhsnunzip) VHDL Snappy
-decompressor, intended as the substrate for an **agentic RTL-design loop**:
-edit RTL → verify functionally → (once correct) synthesize → feed timing/area
-back to optimization agents → repeat.
+An **agentic RTL-optimisation loop** applied to
+[`vhsnunzip`](https://github.com/abs-tudelft/vhsnunzip), a VHDL-2008 Snappy
+decompressor. You give the loop a goal ("increase throughput by 200%"). It
+then improves the RTL by itself, iteration after iteration:
 
-This is a stripped-down extraction of the decompressor and its verification
-model. Everything not needed to build, verify, and (later) synthesize the
-`vhsnunzip_unbuffered` core has been removed — no `libstf`, no Coyote, no Arrow,
-no `snzip`/`snappy` C builds, no `vhlib` submodule.
+1. It analyses where the current best design loses throughput.
+2. It plans a few different directions.
+3. It runs parallel Claude coding sessions, each writing one candidate RTL
+   change in its own git worktree.
+4. It measures every candidate: it simulates on real Parquet data, checks
+   every output byte against a frozen reference decompressor, and
+   synthesises the design.
+5. It keeps the best candidate and moves on.
+
+The loop lives in [`agentic/`](agentic/README.md). The design it optimises
+is in `rtl/`.
+
+## Results
+
+All numbers come from Vivado 2024.2 place and route on the Alveo U55C
+(`xcu55c-fsvh2892-2L-e`, 4.0 ns constraint). Throughput is bytes/cycle ×
+f_max. Bytes/cycle is the geometric mean over real Parquet row groups: NYC
+taxi trips for training, and the TPC-H SF1 tables held out. Every output
+byte is checked.
+
+| Design | Where | B/cycle | f_max | Throughput | vs original | LUTs |
+|---|---|---|---|---|---|---|
+| Original `vhsnunzip_unbuffered` | starting point | 5.64 | 279.6 MHz | 1.578 GB/s | — | 1,808 |
+| Loop run `hacc-real200`, iteration 84 | loop branch, Oct 7 | 16.38 | 256.1 MHz | 4.195 GB/s | +165.9% | 10,486 |
+| **DSW-4**, built on the run's iteration-35 design | [`dsw4-design`](https://github.com/VatsalDixit/agenticRTL/tree/dsw4-design) | **20.60** | **251.8 MHz** | **5.187 GB/s** | **+228.7%** | 29,050 (+32 URAM) |
+
+`hacc-real200` ran on an earlier version of this branch (commit `b3d0302`):
+88 iterations, about $1,040 of model usage. DSW-4 widens the ports to
+32 bytes and replaces the back end and the element parser of the loop's
+iteration-35 design (2.758 GB/s), in three steps. B1, B2 and B3 are each one
+commit on that branch. Its full measurement is in
+`sim/dsw4/results-b3/RESULTS.md` on that branch.
+
+Two later runs used the **blind kit** ([`fast-guard-blind`](https://github.com/VatsalDixit/agenticRTL/tree/fast-guard-blind)).
+It is this loop with its documentation, tests, packing model and notes from
+earlier runs removed, so that the run has to find its designs on its own:
+
+| Run | Kit | Status | Best fully measured design |
+|---|---|---|---|
+| `fastguard200` | blind kit | stopped at iteration 20 | 2.287 GB/s (+45.0%), 10.47 B/cycle at 218.4 MHz, 6,504 LUTs |
+| `nolearn25` | blind kit, learning step off | running (iteration 12 of 25 on Oct 8) | 1.919 GB/s (+21.6%) at iteration 9 |
+
+## Branches
+
+| Branch | What it is |
+|---|---|
+| `agentic-loop` (default) | The loop, with its documentation, tests and design notes |
+| `dsw4-design` | The best design so far (+228.7%) and its measurements |
+| `fast-guard-blind` | The blind kit used for the two runs above |
+| `agentic-snappy` | Earlier hand-written optimisation work (July) |
 
 ## What's here
 
 ```
-rtl/        Synthesizable VHDL-2008 — the vhsnunzip_unbuffered dependency subtree
-tb/         Self-checking testbenches (vhlib-free), unit → integration → top
+agentic/    The optimisation loop (see agentic/README.md)
+rtl/        Synthesizable VHDL-2008: the design being optimised
+tb/         Self-checking per-stage testbenches from upstream
 model/      Python golden model + self-contained test-vector generator
-vectors/    Pre-generated *.tv test vectors (repo simulates out of the box)
+vectors/    Pre-generated *.tv test vectors
 sim/        GHDL runner for a single testbench
-syn/        Synthesis scaffold (Vivado tcl + constraints) for the later stage
-flow/       The verification-loop orchestrator + loop design notes
-docs/        Attribution and upstream license
+flow/       The original verification ladder
+docs/       Attribution, upstream license, the loop's v3 design plan
 ```
 
-## The design under test: `vhsnunzip_unbuffered`
+## Running the loop
 
-A streaming single-core Snappy decompressor. Approx. figures from upstream
-(Vivado, `xcvu5p`): **~1844 LUTs, ~1066 regs, 0 BRAM, 2 URAM, ~256 MHz,
-~1.5 GB/s**. Its module hierarchy (all in `rtl/`):
+See [`agentic/README.md`](agentic/README.md) for setup. In short, it needs:
+
+- GHDL and Yosys (the OSS CAD Suite) under WSL or Linux.
+- Python 3.10+ with `claude-agent-sdk`, plus a logged-in Claude Code CLI.
+- Optionally, ssh to the HACC build host for Vivado.
+
+```bash
+python agentic/setup.py                 # check tools, build stimulus, freeze the instrument
+python agentic/test_kit.py              # the loop's own checks, no model needed
+python agentic/loop.py --goal "increase throughput by 200%" --iters 100
+python agentic/gui.py                   # live dashboard
+```
+
+[`docs/loop-v3-plan.md`](docs/loop-v3-plan.md) records the design of the
+current loop and the reasons behind it.
+
+## The design: `vhsnunzip_unbuffered`
+
+The original is a streaming single-core Snappy decompressor. Its module
+hierarchy (all in `rtl/`):
 
 ```
 vhsnunzip_unbuffered
@@ -40,57 +102,26 @@ vhsnunzip_unbuffered
 └── vhsnunzip_ram (×2)          + packages: _pkg, _int_pkg, _utils_pkg
 ```
 
-Each stage has a matching self-checking testbench, so a failure localizes to a
-specific block. `vhsnunzip_ram.sim.vhd` is used for simulation;
-`vhsnunzip_ram.syn.vhd` (same entity) is for synthesis.
+`vhsnunzip_ram.sim.vhd` is used for simulation and `vhsnunzip_ram.syn.vhd`
+(same entity) for synthesis.
 
-## Quick start (verification)
+## Manual verification (upstream testbenches)
 
-Runs on Linux / **WSL** (Ubuntu). Windows-native works for vector generation
-(Python) but GHDL is easiest in WSL.
-
-```bash
-# 1. Install GHDL (Debian/Ubuntu/WSL)
-sudo apt-get install -y ghdl python3
-
-# 2. Generate test vectors (pure Python, no external tools)
-python3 model/gen_vectors.py
-
-# 3. Run the whole testbench ladder (unit → integration → top)
-bash flow/run_verify.sh
-
-# ...or a single testbench:
-bash sim/run.sh vhsnunzip_unbuffered_tc
-```
-
-`gen_vectors.py` runs the Python golden model, self-verifies it, and serializes
-the expected per-stage stream transfers to `vectors/*.tv`. The VHDL testbenches
-read those back and assert against them. Regenerate with a new seed or your own
-input to fuzz:
+These steps run on Linux or WSL with GHDL installed. The loop does not use
+them: it has its own testbench and oracle. They are still a quick way to
+check the original design stage by stage.
 
 ```bash
-python3 model/gen_vectors.py --seed 7
-python3 model/gen_vectors.py path/to/your/file --min 1024 --max 65536 --max-prob 0.3
+python3 model/gen_vectors.py            # regenerate vectors/*.tv from the golden model
+bash flow/run_verify.sh                 # unit → integration → top, stops at the first failure
+bash sim/run.sh vhsnunzip_unbuffered_tc # or a single testbench
 ```
 
-## Verification-first loop
-
-Per the design goal, the loop runs **functional verification first** (fast,
-seconds) and only kicks off **synthesis** (slow, minutes–hours) once the design
-is functionally correct. See [`flow/README.md`](flow/README.md) for the full
-loop design and where the timing/area optimization subagents plug in.
-
-## Synthesis (later stage)
-
-No Vivado is wired up yet. `syn/` holds the Vivado tcl + constraints from
-upstream (`xcvu5p-flva2104-2-i`) ready for when a toolchain is available; see
-[`syn/README.md`](syn/README.md) for the plan, including an open-source
-(GHDL + yosys) interim area-estimate path.
+See [`flow/README.md`](flow/README.md) for details.
 
 ## Provenance & license
 
-Derived from `vhsnunzip` (ABS group, TU Delft) via the `celeris-labs/parcore`
-fork. Original license (MIT/Apache — see `docs/LICENSE.upstream`) applies to all
-`rtl/`, `tb/`, and `model/emu/` files. New glue (`model/gen_vectors.py`,
-`model/emu/snappy.py`, `sim/`, `flow/`, docs) is original to this repo. See
-[`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md).
+The design is derived from `vhsnunzip` (ABS group, TU Delft), via the
+`celeris-labs/parcore` fork. The original license (MIT/Apache, see
+`docs/LICENSE.upstream`) applies to `rtl/`, `tb/` and `model/emu/`. Everything
+else is original to this repo. See [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md).
