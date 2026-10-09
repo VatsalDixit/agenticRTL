@@ -42,11 +42,13 @@ use work.vhsnunzip_dsw4_pkg.all;
 -- the decision, SPEC 3.7 / 8):
 --
 --   window   E(0..7): element (len / off in the packed (u, lo) form it arrives
---            in, see wen_t) + l7 = sat7(len), o7 = sat7(off),
---            av = sat7(A_r - lptr) for THIS cycle's A_r and avx = the same
---            with the NEXT cycle's A_r (registers: computed last cycle from
---            the early arrival values), rhnz = len >= 128,
---            rh2 = len >= 256, isL/isC/isE, rep (off in {1,2,4,8,16}).
+--            in, see wen_t) + rhnz = len >= 128, rh2 = len >= 256, ohi =
+--            off >= 128, isL/isC/isE, rep (off in {1,2,4,8,16}). The saturated
+--            views l7 = sat7(len) and o7 = sat7(off) and the availabilities
+--            av / avx = sat7(A - lptr) are NOT stored: they are one mux (or one
+--            satav) off the stored fields and are re-derived per window entry
+--            (wl7 / wo7 / Eav / Eavx below), because the entry's width is paid
+--            for 20 times over in the candidate array and the shift select.
 --   nv       valid entries in the window (a prefix, 0..8).
 --   nu       usable entries (a prefix, <= nv): entries that were already in
 --            the window registers last cycle, so their per-slot constants and
@@ -148,16 +150,31 @@ architecture behavior of vhsnunzip_writer is
   -- at once (rl = lo, rh = u, q = u(15:0)), so the window entry is 32 payload
   -- bits instead of 48 -- 16 bits less in the 12-entry candidate array, in the
   -- 8 x 5:1 window shift select and in the 8 window registers.
+  -- l7 = sat7(len) and o7 = sat7(off) are NOT kept either: both are a 7-bit
+  -- 2:1 mux of fields the entry already carries,
+  --   l7 = 127 when rhnz else lo          (rhnz = len >= 128)
+  --   o7 = 127 when ohi  else u(6:0)      (ohi  = off >= 128, i.e. u(15:7)/=0)
+  -- so carrying them costs 13 bits (14 out, ohi in) through the 12-entry
+  -- candidate array X, the 8 x 5:1 window shift select and the 8 window
+  -- registers, while re-deriving them is one mux level per window entry shared
+  -- by every reader (mkbnd is called 5 times, mkhead 8 times, all on E).
+  -- av / avx are not kept either. An entry's lptr never changes while it is in
+  -- the window, and both availabilities are the SAME function of it and of one
+  -- global arrival pointer:
+  --   avx = sat7(a1 - lptr)   (a1 = a_r registered once)
+  --   av  = sat7(a2 - lptr)   (a2 = a1 registered once)
+  -- because x_p used to shift avx into av every cycle while recomputing avx
+  -- from the current a_r, and mkent seeded a fresh entry with exactly the same
+  -- pair. Deriving them from E(k).lptr costs 16 satav instances, which is
+  -- precisely the 16 x_p / mkent used to build them, so the 14 bits leave the
+  -- candidate array, the shift select and the window registers for free.
   type wen_t is record
     u    : unsigned(24 downto 0);
     lo   : unsigned(6 downto 0);
     lptr : gaw_t;
-    l7   : unsigned(6 downto 0);
-    o7   : unsigned(6 downto 0);
-    av   : unsigned(6 downto 0);
-    avx  : unsigned(6 downto 0);
     rhnz : std_logic;
     rh2  : std_logic;
+    ohi  : std_logic;
     isL  : std_logic;
     isC  : std_logic;
     isE  : std_logic;
@@ -167,9 +184,8 @@ architecture behavior of vhsnunzip_writer is
 
   constant WEN_INIT : wen_t := (
     u => (others => '0'), lo => (others => '0'),
-    lptr => (others => '0'), l7 => (others => '0'), o7 => (others => '0'),
-    av => (others => '0'), avx => (others => '0'), rhnz => '0', rh2 => '0',
-    isL => '0', isC => '0', isE => '0', rep => '0');
+    lptr => (others => '0'), rhnz => '0', rh2 => '0',
+    ohi => '0', isL => '0', isC => '0', isE => '0', rep => '0');
 
   -- Head remainder.
   type hd_t is record
@@ -252,8 +268,7 @@ architecture behavior of vhsnunzip_writer is
     return '0';
   end function;
 
-  -- Window entry from an ELQ element; a1 / a0: the arrival values whose
-  -- registered av / avx this is (A_r and A_r of the cycle after the load).
+  -- Window entry from an ELQ element.
   -- The element's len and off share its (u, lo) payload (dsw4_pkg): u is
   -- len(31:7) for a literal and off for a copy. Unpacking needs no mux and no
   -- gating of the wide fields:
@@ -266,14 +281,12 @@ architecture behavior of vhsnunzip_writer is
   --                         ignores q7 and rep0.
   -- Only the two one-bit "long literal" flags have to know the kind, and l7
   -- becomes a 7-bit select instead of a 32-bit saturate.
-  function mkent(e : element_t; a1, a0 : gaw_t) return wen_t is
+  function mkent(e : element_t) return wen_t is
     variable w : wen_t;
   begin
     w.u    := e.u;
     w.lo   := e.lo;
     w.lptr := e.lptr;
-    w.av   := satav(a1, w.lptr);
-    w.avx  := satav(a0, w.lptr);
     w.isL  := '0';
     w.isC  := '0';
     w.isE  := '0';
@@ -284,14 +297,27 @@ architecture behavior of vhsnunzip_writer is
     end case;
     w.rhnz := w.isL and b2sl(e.u /= 0);
     w.rh2  := w.isL and b2sl(e.u(24 downto 1) /= 0);
-    if w.rhnz = '1' then
-      w.l7 := to_unsigned(127, 7);
-    else
-      w.l7 := e.lo;
-    end if;
-    w.o7   := sat(e.u(15 downto 0), 7);
+    w.ohi  := b2sl(e.u(15 downto 7) /= 0);
     w.rep  := is_repq(e.u(15 downto 0));
     return w;
+  end function;
+
+  -- The two derived saturated fields, re-built from the entry (one 7-bit 2:1
+  -- mux each, shared by every reader of the same window entry).
+  function wl7(w : wen_t) return unsigned is
+  begin
+    if w.rhnz = '1' then
+      return to_unsigned(127, 7);
+    end if;
+    return w.lo;
+  end function;
+
+  function wo7(w : wen_t) return unsigned is
+  begin
+    if w.ohi = '1' then
+      return to_unsigned(127, 7);
+    end if;
+    return w.u(6 downto 0);
   end function;
 
   -- The command slot's 2-bit kind code, rebuilt from the decoded flags
@@ -354,7 +380,8 @@ architecture behavior of vhsnunzip_writer is
   -- o7 - P is just B vs o7, and only a copy has a hazard), and two more make
   -- the fit and availability bounds as offsets of it. cutv in [0, 32], the
   -- offsets in [-33, 32]: 7-bit signed throughout, no clamp but the sign.
-  function mkbnd(y : wen_arr(0 to 3); bb : unsigned(5 downto 0)) return bnd_arr is
+  function mkbnd(y : wen_arr(0 to 3); yav : u7_arr(0 to 3);
+                 bb : unsigned(5 downto 0)) return bnd_arr is
     variable res  : bnd_arr;
     variable pk   : unsigned(5 downto 0);          -- P_k, saturated at 32
     variable nl   : unsigned(1 downto 0);
@@ -362,14 +389,18 @@ architecture behavior of vhsnunzip_writer is
     variable cv   : signed(6 downto 0);            -- m - P_k before the clamp
     variable cvu  : unsigned(5 downto 0);          -- cutv
     variable l7c  : unsigned(5 downto 0);          -- sat33(l7_k)
+    variable l7v  : unsigned(6 downto 0);          -- l7_k, derived
+    variable o7v  : unsigned(6 downto 0);          -- o7_k, derived
     variable psum : unsigned(6 downto 0);
   begin
     pk := (others => '0');
     if y(0).isL = '1' then nl := "01"; else nl := "00"; end if;
     for k in 1 to 3 loop
-      l7c := c33(y(k).l7);
-      if y(k).isC = '1' and y(k).o7 < resize(bb, 7) then
-        m := y(k).o7(5 downto 0);
+      l7v := wl7(y(k));
+      o7v := wo7(y(k));
+      l7c := c33(l7v);
+      if y(k).isC = '1' and o7v < resize(bb, 7) then
+        m := o7v(5 downto 0);
       else
         m := bb;
       end if;
@@ -381,8 +412,8 @@ architecture behavior of vhsnunzip_writer is
       end if;
       res(k).cutv := cvu;
       res(k).ende := signed('0' & cvu) - signed('0' & l7c);
-      res(k).avb  := signed('0' & cvu) - signed('0' & c33(y(k).av));
-      if y(k).av >= y(k).l7 then res(k).fav := '1'; else res(k).fav := '0'; end if;
+      res(k).avb  := signed('0' & cvu) - signed('0' & c33(yav(k)));
+      if yav(k) >= l7v then res(k).fav := '1'; else res(k).fav := '0'; end if;
       res(k).nl   := nl;
       res(k).p    := pk;
       -- Next slot: P += l7, saturated at 32. P >= B is unreachable (a slot is
@@ -433,24 +464,28 @@ architecture behavior of vhsnunzip_writer is
     return res;
   end function;
 
-  -- Fresh head from a window entry: av = sat7(A_r - lptr) for the decision
-  -- cycle (the entry's registered av), avn = the same with the next A_r.
-  function mkhead(w : wen_t; avn : unsigned(6 downto 0); bb : unsigned(5 downto 0)) return hd_t is
-    variable h : hd_t;
+  -- Fresh head from a window entry. wav = sat7(A_r - lptr) for the decision
+  -- cycle (Eav), avn = the same with the next A_r (Eavx); both are passed in
+  -- because they are derived per entry, not stored in it.
+  function mkhead(w : wen_t; wav, avn : unsigned(6 downto 0);
+                  bb : unsigned(5 downto 0)) return hd_t is
+    variable h   : hd_t;
+    variable o7v : unsigned(6 downto 0);
   begin
+    o7v    := wo7(w);
     h.rl   := '0' & w.lo;
     h.rh   := w.u;
     h.rhnz := w.rhnz;
-    h.r7   := w.l7;
+    h.r7   := wl7(w);
     h.q0   := w.u(15 downto 0);
-    h.q7   := w.o7;
+    h.q7   := o7v;
     h.rep0 := REPK and w.isC and w.rep;
     -- produced = 0: qdbl(off, off) = off.
     h.dq   := w.u(15 downto 0);
-    h.lim  := w.o7;
+    h.lim  := o7v;
     h.lp0  := w.lptr;
     h.avn  := avn;
-    h.cap  := capf(w.isL, h.rep0, w.av, w.o7, bb);
+    h.cap  := capf(w.isL, h.rep0, wav, o7v, bb);
     return h;
   end function;
 
@@ -459,7 +494,12 @@ architecture behavior of vhsnunzip_writer is
   -----------------------------------------------------------------------------
   signal arw     : gaw_t;                      -- a_r, windowed to GAW bits
   signal a1      : gaw_t := (others => '0');   -- a_r registered once
+  signal a2      : gaw_t := (others => '0');   -- a_r registered twice
   signal E       : wen_arr(0 to 7) := (others => WEN_INIT);
+  -- The window's availabilities, derived from E(k).lptr (see wen_t): one pair
+  -- of satav per window entry, shared by every reader.
+  signal Eav     : u7_arr(0 to 7);
+  signal Eavx    : u7_arr(0 to 7);
   signal nv, nu  : unsigned(3 downto 0) := (others => '0');
   signal hd      : hd_t := HD_INIT;
   signal bnd     : bnd_arr := (others => BND_INIT);
@@ -534,6 +574,7 @@ begin
     variable fit     : std_logic;
     variable ok      : std_logic;
     variable n       : unsigned(5 downto 0);
+    variable l7k     : unsigned(6 downto 0);
     variable d       : unsigned(5 downto 0);
     variable c       : integer range 0 to 4;
     variable cutany  : std_logic;
@@ -639,7 +680,8 @@ begin
           n := (others => '0');
           lst := '1';
         elsif fit = '1' then
-          n := E(k).l7(5 downto 0);
+          l7k := wl7(E(k));
+          n := l7k(5 downto 0);
         else
           n := ncut(k)(5 downto 0);
           cutany := '1';
@@ -742,18 +784,22 @@ begin
 
   npf <= "100" when nvis >= 4 else nvis(2 downto 0);
 
-  -- Extended window X(j) = E(j) for j < nv, PF(j - nv) after; av for the
-  -- NEXT cycle: av' = sat7(a1 - lptr) (= this cycle's avx for an entry already
-  -- in the window), avx' = sat7(a_r - lptr).
-  x_p: process (E, nv, pf, a1, arw) is
+  -- The window availabilities: sat7(a - lptr) with a = a1 (avx) or a2 (av).
+  -- Both used to be registered fields of the entry, shifted along every cycle;
+  -- lptr is constant for as long as the entry lives, so this is the same value.
+  av_g: for k in 0 to 7 generate
+    Eav(k)  <= satav(a2, E(k).lptr);
+    Eavx(k) <= satav(a1, E(k).lptr);
+  end generate;
+
+  -- Extended window X(j) = E(j) for j < nv, PF(j - nv) after.
+  x_p: process (E, nv, pf) is
     variable w : wen_t;
   begin
     for j in 0 to 11 loop
       w := WEN_INIT;
       if j < 8 and j < to_integer(nv) then
         w := E(j);
-        w.av  := E(j).avx;
-        w.avx := satav(arw, E(j).lptr);
       else
         -- PF entry kk lands at position nv + kk, so position j takes pf(kk)
         -- exactly when nv = j - kk. Both bounds on kk are static per j:
@@ -762,7 +808,7 @@ begin
         -- (12 of the 48 PF inputs are unreachable).
         for kk in 0 to 3 loop
           if kk <= j and j - kk <= 8 and to_integer(nv) = j - kk then
-            w := mkent(pf(kk), a1, arw);
+            w := mkent(pf(kk));
           end if;
         end loop;
       end if;
@@ -773,8 +819,9 @@ begin
   -- Head candidates and per-shift bundles. Uses only E (registers) for the
   -- bundles and the shifted heads: a slot whose entry would come from PF is
   -- not usable next cycle (nu' = nv - c), so its values do not matter.
-  cand_p: process (E, hd, bnd, ncut, bnext, a1) is
+  cand_p: process (E, Eav, Eavx, hd, bnd, ncut, bnext, a1) is
     variable y    : wen_arr(0 to 3);
+    variable yav  : u7_arr(0 to 3);
     variable h    : hd_t;
     variable brw  : std_logic;
     variable rle  : unsigned(7 downto 0);
@@ -783,8 +830,8 @@ begin
     variable n7   : unsigned(6 downto 0);
   begin
     -- A head is only ever built from E(c) with c < nv (a head from PF is
-    -- replaced by INIT the cycle after, as nu' = 0), so E(c).avx (a register)
-    -- is its avn.
+    -- replaced by INIT the cycle after, as nu' = 0), so Eavx(c) (one satav off
+    -- the registered lptr) is its avn.
 
     -- 0 HOLD: same head; av0 for the next cycle = avn, avn refreshed.
     h := hd;
@@ -793,7 +840,7 @@ begin
     hcand(0) <= h;
 
     -- 1 INIT: fresh head from E0.
-    hcand(1) <= mkhead(E(0), E(0).avx, bnext);
+    hcand(1) <= mkhead(E(0), Eav(0), Eavx(0), bnext);
 
     -- 2 slot 0 cut: n0 = cap. R0 - cap with the pipelined borrow, lp0 + cap,
     -- av0' = avn - cap, q0 := dq (registered), dq' = qdbl(dq, lim + cap).
@@ -829,7 +876,7 @@ begin
 
     -- 3..6 shift by 1..4: fresh head from E(c).
     for c in 1 to 4 loop
-      hcand(2 + c) <= mkhead(E(c), E(c).avx, bnext);
+      hcand(2 + c) <= mkhead(E(c), Eav(c), Eavx(c), bnext);
     end loop;
 
     -- 7..9 slot k cut: n_k = cutv_k - r, subtracted ONCE. This candidate is
@@ -838,7 +885,7 @@ begin
     -- "x -/+ n_k", so the one subtract replaces the four separate
     -- "- cutv_k + r" pairs this loop used to build (two carry chains each).
     for k in 1 to 3 loop
-      h  := mkhead(E(k), E(k).avx, bnext);
+      h  := mkhead(E(k), Eav(k), Eavx(k), bnext);
       n7 := ncut(k);
       -- R0 = len_k - n_k = len_k(6:0) [+ 128, borrowing from rh] - n_k.
       rle := '0' & E(k).lo;
@@ -856,10 +903,11 @@ begin
       -- lp0 = lptr_k + n_k, one GAW-bit add.
       h.lp0 := E(k).lptr + resize(n7, GAW);
       -- av0' = av_k - n_k, avn' = (av_k with the next A_r) - n_k (7 b).
-      av    := E(k).av - n7;
-      h.avn := E(k).avx - n7;
+      av    := Eav(k) - n7;
+      h.avn := Eavx(k) - n7;
       -- Copy: produced = n_k, lim = n_k + off_k, dq = qdbl(off_k, lim).
-      l8    := resize(n7, 8) + resize(E(k).o7, 8);
+      -- h.q7 is mkhead's wo7(E(k)): the derived o7_k, already built above.
+      l8    := resize(n7, 8) + resize(h.q7, 8);
       h.lim := sat(l8, 7);
       h.dq  := qdbl(E(k).u(15 downto 0), l8);
       h.cap := capf(E(k).isL, h.rep0, av, h.q7, bnext);
@@ -869,9 +917,10 @@ begin
     -- Bundles for every shift c' (slots 1..3 of the shifted window).
     for c in 0 to 4 loop
       for i in 0 to 3 loop
-        y(i) := E(c + i);
+        y(i)   := E(c + i);
+        yav(i) := Eav(c + i);
       end loop;
-      bcand(c) <= mkbnd(y, bnext);
+      bcand(c) <= mkbnd(y, yav, bnext);
     end loop;
   end process;
 
@@ -919,6 +968,7 @@ begin
   begin
     if rising_edge(clk) then
       a1 <= arw;
+      a2 <= a1;
 
       -- Window: E(i)' = X(i + c), late 5:1 by the replicated shift.
       for i in 0 to 7 loop
@@ -962,6 +1012,7 @@ begin
 
       if reset = '1' then
         a1     <= (others => '0');
+        a2     <= (others => '0');
         nv     <= (others => '0');
         nu     <= (others => '0');
         bb     <= to_unsigned(LINE_B, 6);
