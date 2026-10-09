@@ -523,11 +523,13 @@ architecture behavior of vhsnunzip_writer is
   signal plcd    : std_logic_vector(0 to 3);   -- slot k placed (used)
   signal cmd_n   : element_stream;
 
-  -- Outcome one-hot, replicated: 0 HOLD, 1 INIT, 2 C0 (slot 0 cut),
-  -- 3..6 shift by 1..4, 7..9 slot 1..3 cut. Two copies: the head register is
-  -- the only reader (the shift one-hot needs eight, one per window
+  -- Outcome one-hot, replicated: 0 HOLD, 1 C0 (slot 0 cut), 2 "a new head out
+  -- of a window entry" (INIT, shift by 1..4 and a slot 1..3 cut all build the
+  -- same candidate; WHICH entry and how far it is advanced select that
+  -- candidate's INPUTS, see hsrc1h / cut1h below). Two copies: the head
+  -- register is the only reader (the shift one-hot needs eight, one per window
   -- destination), and it reads the outcome in two groups.
-  subtype oc_t is std_logic_vector(0 to 9);
+  subtype oc_t is std_logic_vector(0 to 2);
   type oc_rep_t is array (0 to 1) of oc_t;
   -- Shift one-hot (c = 0..4, 0 also when no command issues), replicated.
   subtype sh_t is std_logic_vector(0 to 4);
@@ -542,7 +544,35 @@ architecture behavior of vhsnunzip_writer is
   signal bnext   : unsigned(5 downto 0);       -- budget of the next command
   signal lfsr_n  : unsigned(15 downto 0);
   signal npf     : unsigned(2 downto 0);       -- min(4, nvis)
-  signal hcand   : hd_arr(0 to 9);             -- head per outcome
+  signal hcand   : hd_arr(0 to 2);             -- head per outcome
+
+  -- The one head build out of a window entry, and its selected inputs.
+  --
+  -- Eight of the ten outcomes used to build their own head: INIT and the four
+  -- shifts were mkhead(E(c)) and the three slot cuts were the same head with
+  -- every field advanced by n_k. They are ONE function of (entry, n):
+  -- mkhead(E(c)) is the cut build with n = 0 (rl = lo - 0, lp0 = lptr + 0,
+  -- av/avn - 0, lim = sat(0 + o7) = o7 and qdbl(off, o7) = off, the comment in
+  -- mkhead), and when rhnz = 1 the n = 0 cut build returns the same remaining
+  -- length in the other valid (rh - 1, rl + 128) split, which every reader of
+  -- the pair takes identically (the slot-0-cut successor and the rhnz => rh /=
+  -- 0 invariant are both unchanged).
+  --
+  -- At most one of the eight can happen, so selecting the ENTRY, its two
+  -- availabilities and n -- all four register functions, so the select sits
+  -- beside the decision and not behind the arithmetic -- builds the head once:
+  -- 8 copies of (one 8-bit subtract chain, a 25-bit decrement, a GAW add, two
+  -- 7-bit subtracts, a qdbl, a capf) collapse to one, and the head register's
+  -- 100-bit mux drops from 9 inputs to 2.
+  --   hsrc1h(c) = this cycle's head comes from E(c), c = 0..4
+  --               (INIT -> E(0); shift by c -> E(c); cut at slot k -> E(k))
+  --   cut1h(k)  = slot k is the cut slot, so n = ncut(k) (else n = 0)
+  signal hsrc1h  : std_logic_vector(0 to 4);
+  signal cut1h   : std_logic_vector(1 to 3);
+  signal hsrcE   : wen_t;                      -- E(c) of the new head
+  signal hsrcAv  : unsigned(6 downto 0);       -- Eav(c)
+  signal hsrcAvx : unsigned(6 downto 0);       -- Eavx(c)
+  signal hsrcN   : unsigned(6 downto 0);       -- ncut(c), or 0 (no cut)
   signal bcand   : bnd_arr2;                   -- bundle per shift c'
   signal stall   : std_logic;
 
@@ -788,6 +818,10 @@ begin
     end process;
   end generate;
 
+  --   HOLD    : no command issues and the head is still usable,
+  --   C0      : slot 0 was cut (the head continues, hcand(1)),
+  --   new head: everything else -- INIT (no usable head), a clean shift by
+  --             1..4 and a cut at slot 1..3 (hcand(2)).
   ocrep_g: for g in 0 to 1 generate
     oc_p: process (issue, done, plcd, nu) is
       variable oc : oc_t;
@@ -795,20 +829,66 @@ begin
       oc := (others => '0');
       if issue = '0' then
         if nu = 0 then
-          oc(1) := '1';
+          oc(2) := '1';                        -- INIT
         else
-          oc(0) := '1';
+          oc(0) := '1';                        -- HOLD
         end if;
+      else
+        oc(1) := not done(0);                  -- slot 0 cut
+        oc(2) := done(0);                      -- shift by 1..4 or slot k cut
       end if;
-      oc(2) := issue and not done(0);
-      for k in 1 to 3 loop
-        oc(2 + k) := issue and done(k - 1) and not plcd(k);
-        oc(6 + k) := issue and plcd(k) and not done(k);
-      end loop;
-      oc(6) := issue and done(3);
       oc_rep(g) <= oc;
     end process;
   end generate;
+
+  -- The head source one-hot: which window entry the new head comes from, and
+  -- whether it is advanced (a cut) or fresh. done is a prefix and plcd(k)
+  -- needs done(k-1), so "shift by c" and "cut at slot c" are the only two ways
+  -- to take E(c), and they differ only in n:
+  --   shift by c = done(c-1) and not plcd(c),  cut at c = plcd(c) and not done(c)
+  --   either one = done(c-1) and not (plcd(c) and done(c))
+  -- INIT takes E(0) and shift-by-4 takes E(4) (both fresh, n = 0). All-zero
+  -- for HOLD and for a slot-0 cut, where this candidate is not selected.
+  hsrc_p: process (issue, done, plcd, nu) is
+  begin
+    hsrc1h(0) <= not issue and b2sl(nu = 0);
+    for c in 1 to 3 loop
+      hsrc1h(c) <= issue and done(c - 1) and not (plcd(c) and done(c));
+      cut1h(c)  <= issue and plcd(c) and not done(c);
+    end loop;
+    hsrc1h(4) <= issue and done(3);
+  end process;
+
+  -- The head build's inputs: entry, its two availabilities and n. All four are
+  -- register functions, so this select sits beside the decision, not behind
+  -- the head arithmetic.
+  hsel_p: process (E, Eav, Eavx, ncut, hsrc1h, cut1h) is
+    variable w  : wen_t;
+    variable av : unsigned(6 downto 0);
+    variable ax : unsigned(6 downto 0);
+    variable n  : unsigned(6 downto 0);
+  begin
+    w  := WEN_INIT;
+    av := (others => '0');
+    ax := (others => '0');
+    n  := (others => '0');
+    for c in 0 to 4 loop
+      if hsrc1h(c) = '1' then
+        w  := E(c);
+        av := Eav(c);
+        ax := Eavx(c);
+      end if;
+    end loop;
+    for k in 1 to 3 loop
+      if cut1h(k) = '1' then
+        n := ncut(k);
+      end if;
+    end loop;
+    hsrcE   <= w;
+    hsrcAv  <= av;
+    hsrcAvx <= ax;
+    hsrcN   <= n;
+  end process;
 
   -----------------------------------------------------------------------------
   -- Next-state candidates (registers only; no decision input).
@@ -906,7 +986,8 @@ begin
   -- Head candidates and per-shift bundles. Uses only E (registers) for the
   -- bundles and the shifted heads: a slot whose entry would come from PF is
   -- not usable next cycle (nu' = nv - c), so its values do not matter.
-  cand_p: process (E, Eav, Eavx, hd, bnd, ncut, bnext, a1) is
+  cand_p: process (E, Eav, hd, bnd, bnext, a1,
+                   hsrcE, hsrcAv, hsrcAvx, hsrcN) is
     variable y    : wen_arr(0 to 3);
     variable yav  : u7_arr(0 to 3);
     variable h    : hd_t;
@@ -928,10 +1009,7 @@ begin
     h.cap := capf(E(0).isL, hd.rep0, hd.avn, hd.q7, bnext);
     hcand(0) <= h;
 
-    -- 1 INIT: fresh head from E0.
-    hcand(1) <= mkhead(E(0), Eav(0), Eavx(0), bnext);
-
-    -- 2 slot 0 cut: n0 = cap. R0 - cap with the pipelined borrow, lp0 + cap,
+    -- 1 slot 0 cut: n0 = cap. R0 - cap with the pipelined borrow, lp0 + cap,
     -- av0' = avn - cap, q0 := dq (registered), dq' = qdbl(dq, lim + cap).
     h := hd;
     brw := hd.rhnz and not hd.rl(7);
@@ -961,47 +1039,42 @@ begin
       h.dq   := qdbl(hd.dq, l8);
     end if;
     h.cap := capf(E(0).isL, h.rep0, av, h.q7, bnext);
+    hcand(1) <= h;
+
+    -- 2 the new head out of E(c), advanced by n (see hsrc1h): INIT and the
+    -- shifts have n = 0, a cut at slot k has n = n_k = cutv_k - r, subtracted
+    -- ONCE. The cut candidate is only ever selected when slot k was reached
+    -- and cut, so r < cutv_k and n is the exact cut length; every next-state
+    -- value below is one of "x -/+ n", so the one subtract replaces the four
+    -- separate "- cutv_k + r" pairs this used to build (two carry chains
+    -- each), and the eight outcomes share this single build.
+    h  := mkhead(hsrcE, hsrcAv, hsrcAvx, bnext);
+    n7 := hsrcN;
+    -- R0 = len_k - n = len_k(6:0) [+ 128, borrowing from rh] - n.
+    rle := '0' & hsrcE.lo;
+    if hsrcE.rhnz = '1' then
+      rle(7) := '1';
+      h.rh   := hsrcE.u - 1;
+      h.rhnz := hsrcE.rh2;
+    end if;
+    h.rl := rle - resize(n7, 8);
+    if h.rhnz = '1' or h.rl(7) = '1' or h.rl(6 downto 0) = 127 then
+      h.r7 := to_unsigned(127, 7);
+    else
+      h.r7 := h.rl(6 downto 0);
+    end if;
+    -- lp0 = lptr_k + n, one GAW-bit add.
+    h.lp0 := hsrcE.lptr + resize(n7, GAW);
+    -- av0' = av_k - n, avn' = (av_k with the next A_r) - n (7 b).
+    av    := hsrcAv - n7;
+    h.avn := hsrcAvx - n7;
+    -- Copy: produced = n, lim = n + off_k, dq = qdbl(off_k, lim).
+    -- h.q7 is mkhead's wo7(hsrcE): the derived o7_k, already built above.
+    l8    := resize(n7, 8) + resize(h.q7, 8);
+    h.lim := sat(l8, 7);
+    h.dq  := qdbl(hsrcE.u(15 downto 0), l8);
+    h.cap := capf(hsrcE.isL, h.rep0, av, h.q7, bnext);
     hcand(2) <= h;
-
-    -- 3..6 shift by 1..4: fresh head from E(c).
-    for c in 1 to 4 loop
-      hcand(2 + c) <= mkhead(E(c), Eav(c), Eavx(c), bnext);
-    end loop;
-
-    -- 7..9 slot k cut: n_k = cutv_k - r, subtracted ONCE. This candidate is
-    -- only ever selected when slot k was reached and cut, so r < cutv_k and
-    -- n7 is the exact cut length; every next-state value below is one of
-    -- "x -/+ n_k", so the one subtract replaces the four separate
-    -- "- cutv_k + r" pairs this loop used to build (two carry chains each).
-    for k in 1 to 3 loop
-      h  := mkhead(E(k), Eav(k), Eavx(k), bnext);
-      n7 := ncut(k);
-      -- R0 = len_k - n_k = len_k(6:0) [+ 128, borrowing from rh] - n_k.
-      rle := '0' & E(k).lo;
-      if E(k).rhnz = '1' then
-        rle(7) := '1';
-        h.rh   := E(k).u - 1;
-        h.rhnz := E(k).rh2;
-      end if;
-      h.rl := rle - resize(n7, 8);
-      if h.rhnz = '1' or h.rl(7) = '1' or h.rl(6 downto 0) = 127 then
-        h.r7 := to_unsigned(127, 7);
-      else
-        h.r7 := h.rl(6 downto 0);
-      end if;
-      -- lp0 = lptr_k + n_k, one GAW-bit add.
-      h.lp0 := E(k).lptr + resize(n7, GAW);
-      -- av0' = av_k - n_k, avn' = (av_k with the next A_r) - n_k (7 b).
-      av    := Eav(k) - n7;
-      h.avn := Eavx(k) - n7;
-      -- Copy: produced = n_k, lim = n_k + off_k, dq = qdbl(off_k, lim).
-      -- h.q7 is mkhead's wo7(E(k)): the derived o7_k, already built above.
-      l8    := resize(n7, 8) + resize(h.q7, 8);
-      h.lim := sat(l8, 7);
-      h.dq  := qdbl(E(k).u(15 downto 0), l8);
-      h.cap := capf(E(k).isL, h.rep0, av, h.q7, bnext);
-      hcand(6 + k) <= h;
-    end loop;
 
     -- Bundles for every shift c' (slots 1..3 of the shifted window).
     for c in 0 to 4 loop
@@ -1081,15 +1154,15 @@ begin
       -- Head: by the replicated outcome. The HOLD outcome is hd itself with
       -- only avn and cap refreshed (hcand(0) above), so the remaining 100
       -- bits take the register's own clock enable and outcome 0 leaves their
-      -- mux: 9 inputs of 100 b plus 10 inputs of 13 b, not 10 of 113 b.
-      for o in 0 to 9 loop
+      -- mux: 2 inputs of 100 b plus 3 inputs of 13 b, not 10 of 113 b.
+      for o in 0 to 2 loop
         if oc_rep(0)(o) = '1' then
           hd.avn <= hcand(o).avn;
           hd.cap <= hcand(o).cap;
         end if;
       end loop;
       if oc_rep(1)(0) = '0' then
-        for o in 1 to 9 loop
+        for o in 1 to 2 loop
           if oc_rep(1)(o) = '1' then
             hd.rl   <= hcand(o).rl;
             hd.rh   <= hcand(o).rh;
@@ -1136,7 +1209,7 @@ begin
 
   -- pragma translate_off
   chk_p: process (clk) is
-    variable nsh, noc : natural;
+    variable nsh, noc, ncut1h, nhsrc : natural;
   begin
     if rising_edge(clk) and reset = '0' then
       assert nu <= nv and nv <= 8 report "writer: window count out of range" severity failure;
@@ -1148,11 +1221,27 @@ begin
       for i in 0 to 4 loop
         if sh_rep(0)(i) = '1' then nsh := nsh + 1; end if;
       end loop;
-      for i in 0 to 9 loop
+      for i in 0 to 2 loop
         if oc_rep(0)(i) = '1' then noc := noc + 1; end if;
       end loop;
       assert nsh = 1 and noc = 1
         report "writer: shift / outcome select is not one-hot" severity failure;
+      -- The head source and the cut slot are one-hot, and a head source is
+      -- selected exactly when outcome 2 (a new head) is.
+      ncut1h := 0;
+      nhsrc  := 0;
+      for k in 1 to 3 loop
+        if cut1h(k) = '1' then ncut1h := ncut1h + 1; end if;
+      end loop;
+      for c in 0 to 4 loop
+        if hsrc1h(c) = '1' then nhsrc := nhsrc + 1; end if;
+      end loop;
+      assert ncut1h <= 1 and nhsrc <= 1 and (nhsrc = 1) = (oc_rep(0)(2) = '1')
+        report "writer: head source select does not match the outcome" severity failure;
+      for k in 1 to 3 loop
+        assert cut1h(k) = '0' or hsrc1h(k) = '1'
+          report "writer: a cut slot is not the head source" severity failure;
+      end loop;
       -- The source select prunes PF inputs with kk > i, which holds exactly
       -- while the shift stays inside the window (c <= nu <= nv).
       for i in 0 to 4 loop
