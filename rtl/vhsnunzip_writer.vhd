@@ -96,8 +96,9 @@ use work.vhsnunzip_dsw4_pkg.all;
 --   shift c   : head = E_c fresh.
 -- The shift one-hot and the outcome one-hot are built directly from the done
 -- prefix (no counting) and replicated 8x (keep) to drive the next-state
--- selects (SPEC 3.7). The ELQ counts (pf_adv, rp_adv) and nv', nu' are
--- precomputed for every shift c' and selected by the same one-hot.
+-- selects (SPEC 3.7). The ELQ counts (pf_adv, rp_adv), nv', nu' and the
+-- window's per-destination source CODE are precomputed for every shift c' and
+-- selected by the same one-hot, so the window is one wide mux, not two.
 entity vhsnunzip_writer is
   generic (
     TEST_SLOTS     : natural := 4;
@@ -154,8 +155,8 @@ architecture behavior of vhsnunzip_writer is
   -- 2:1 mux of fields the entry already carries,
   --   l7 = 127 when rhnz else lo          (rhnz = len >= 128)
   --   o7 = 127 when ohi  else u(6:0)      (ohi  = off >= 128, i.e. u(15:7)/=0)
-  -- so carrying them costs 13 bits (14 out, ohi in) through the 12-entry
-  -- candidate array X, the 8 x 5:1 window shift select and the 8 window
+  -- so carrying them costs 13 bits (14 out, ohi in) through the window source
+  -- select (ws_p) and the 8 window
   -- registers, while re-deriving them is one mux level per window entry shared
   -- by every reader (mkbnd is called 5 times, mkhead 8 times, all on E).
   -- av / avx are not kept either. An entry's lptr never changes while it is in
@@ -163,11 +164,11 @@ architecture behavior of vhsnunzip_writer is
   -- global arrival pointer:
   --   avx = sat7(a1 - lptr)   (a1 = a_r registered once)
   --   av  = sat7(a2 - lptr)   (a2 = a1 registered once)
-  -- because x_p used to shift avx into av every cycle while recomputing avx
-  -- from the current a_r, and mkent seeded a fresh entry with exactly the same
-  -- pair. Deriving them from E(k).lptr costs 16 satav instances, which is
-  -- precisely the 16 x_p / mkent used to build them, so the 14 bits leave the
-  -- candidate array, the shift select and the window registers for free.
+  -- because the window used to shift avx into av every cycle while
+  -- recomputing avx from the current a_r, and mkent seeded a fresh entry with
+  -- exactly the same pair. Deriving them from E(k).lptr costs 16 satav
+  -- instances, which is precisely the 16 that used to build them, so the 14
+  -- bits leave the source select and the window registers for free.
   type wen_t is record
     u    : unsigned(24 downto 0);
     lo   : unsigned(6 downto 0);
@@ -523,9 +524,11 @@ architecture behavior of vhsnunzip_writer is
   signal cmd_n   : element_stream;
 
   -- Outcome one-hot, replicated: 0 HOLD, 1 INIT, 2 C0 (slot 0 cut),
-  -- 3..6 shift by 1..4, 7..9 slot 1..3 cut.
+  -- 3..6 shift by 1..4, 7..9 slot 1..3 cut. Two copies: the head register is
+  -- the only reader (the shift one-hot needs eight, one per window
+  -- destination), and it reads the outcome in two groups.
   subtype oc_t is std_logic_vector(0 to 9);
-  type oc_rep_t is array (0 to 7) of oc_t;
+  type oc_rep_t is array (0 to 1) of oc_t;
   -- Shift one-hot (c = 0..4, 0 also when no command issues), replicated.
   subtype sh_t is std_logic_vector(0 to 4);
   type sh_rep_t is array (0 to 7) of sh_t;
@@ -538,7 +541,6 @@ architecture behavior of vhsnunzip_writer is
   -- Next-state candidates (from registers only).
   signal bnext   : unsigned(5 downto 0);       -- budget of the next command
   signal lfsr_n  : unsigned(15 downto 0);
-  signal X       : wen_arr(0 to 11);           -- extended window, av for next cycle
   signal npf     : unsigned(2 downto 0);       -- min(4, nvis)
   signal hcand   : hd_arr(0 to 9);             -- head per outcome
   signal bcand   : bnd_arr2;                   -- bundle per shift c'
@@ -550,6 +552,39 @@ architecture behavior of vhsnunzip_writer is
   signal ldc     : u3_5;                       -- PF loads
   signal nvc     : u4_5;                       -- nv'
   signal nuc     : u4_5;                       -- nu'
+
+  -----------------------------------------------------------------------------
+  -- Window source select (one level).
+  -----------------------------------------------------------------------------
+  -- The next window is E'(i) = X(i + c) with the extended window
+  -- X(j) = E(j) for j < nv and pf(j - nv) above it. Built as two wide mux
+  -- levels (12 X entries of 50 b, then an 8 x 5:1 shift select) that is 84
+  -- wide mux inputs; composed into ONE select per destination it is 48,
+  -- because the composition is the only place where the three invariants that
+  -- kill inputs can be used at once:
+  --   * c <= nu <= nv (a slot is only done while nu > k), so pf(kk) can only
+  --     ever land at destination i = (nv - c) + kk >= kk: destination 0 takes
+  --     pf(0) only, destination 1 pf(0..1), destination 2 pf(0..2),
+  --   * E(i + c) only exists for i + c <= 7, so destination 7 has no E input
+  --     but its own and destination 4..6 have 3, 2, 1,
+  --   * c = 0 with i < nv is "hold", which is the register's own clock enable
+  --     and needs no mux input at all.
+  -- The source code is a function of nv (a register) for every c, so it is
+  -- built early (sc_p) and only SELECTED by the late shift one-hot (3 bits per
+  -- destination, wc_p), exactly like the ELQ counts in cnt_p: no wide mux and
+  -- no arithmetic is added behind the decision.
+  --   code 0..3 -> E(i + 1 + code)   (shift by c = code + 1, still in window)
+  --   code 4..7 -> pf(code - 4)      (a fresh ELQ entry)
+  -- A destination at or above nv' is never read (the decision guards every
+  -- slot k with nu > k), so an unreachable code there selects WEN_INIT or a
+  -- stale PF entry indifferently.
+  type scode_t is array (0 to 7) of unsigned(2 downto 0);
+  type scode_arr is array (0 to 4) of scode_t;
+  signal scode   : scode_arr;                  -- per shift c' (from nv)
+  signal wcode   : scode_t;                    -- late: selected by sh_rep
+  signal whold   : std_logic_vector(0 to 7);   -- clock enable, inverted
+  signal pfe     : wen_arr(0 to 3);            -- mkent(pf)
+  signal ws      : wen_arr(0 to 7);            -- selected source
 
 begin
 
@@ -731,18 +766,33 @@ begin
   end process;
 
   -- Replicated outcome / shift one-hots (SPEC 3.7: c, cut and the one-hot
-  -- shift are replicated 8x for the next-state fan-out). done is a prefix
+  -- shift are replicated for the next-state fan-out: 8 shift copies, one per
+  -- window destination, and 2 outcome copies, the head being its only
+  -- reader -- an unread copy is kept alive by the keep attribute, so only
+  -- the copies that are wired are built). done is a prefix
   -- and plcd(k) implies done(k-1), so every bit is a small AND term:
   --   shift c (c = 1..3) = done(c-1) and not done(c), shift 4 = done(3);
   --   cut at slot k      = plcd(k) and not done(k)   (shift k);
   --   clean shift by k   = done(k-1) and not plcd(k).
   rep_g: for g in 0 to 7 generate
-    oc_p: process (issue, done, plcd, nu) is
-      variable oc : oc_t;
+    sh_p: process (issue, done) is
       variable sh : sh_t;
     begin
-      oc := (others => '0');
       sh := (others => '0');
+      for k in 1 to 3 loop
+        sh(k) := issue and done(k - 1) and not done(k);
+      end loop;
+      sh(0) := not issue or not done(0);
+      sh(4) := issue and done(3);
+      sh_rep(g) <= sh;
+    end process;
+  end generate;
+
+  ocrep_g: for g in 0 to 1 generate
+    oc_p: process (issue, done, plcd, nu) is
+      variable oc : oc_t;
+    begin
+      oc := (others => '0');
       if issue = '0' then
         if nu = 0 then
           oc(1) := '1';
@@ -754,13 +804,9 @@ begin
       for k in 1 to 3 loop
         oc(2 + k) := issue and done(k - 1) and not plcd(k);
         oc(6 + k) := issue and plcd(k) and not done(k);
-        sh(k)     := issue and done(k - 1) and not done(k);
       end loop;
       oc(6) := issue and done(3);
-      sh(0) := not issue or not done(0);
-      sh(4) := issue and done(3);
       oc_rep(g) <= oc;
-      sh_rep(g) <= sh;
     end process;
   end generate;
 
@@ -792,27 +838,68 @@ begin
     Eavx(k) <= satav(a1, E(k).lptr);
   end generate;
 
-  -- Extended window X(j) = E(j) for j < nv, PF(j - nv) after.
-  x_p: process (E, nv, pf) is
+  -- Window source code per shift c', from nv only (early, 3 b x 40).
+  --   c >= 1 and i + c <  nv : E(i + c)      -> code = c - 1
+  --   otherwise              : pf(i + c - nv) -> code = 4 + (i + c - nv)
+  -- The second line is also the c = 0 hold case (a negative PF index), where
+  -- the code is never used because whold turns the clock enable off.
+  sc_p: process (nv) is
+    variable j, kk : integer;
+  begin
+    for c in 0 to 4 loop
+      for i in 0 to 7 loop
+        j := i + c;
+        if c > 0 and j < to_integer(nv) then
+          scode(c)(i) <= to_unsigned(c - 1, 3);
+        else
+          kk := j - to_integer(nv);
+          scode(c)(i) <= "1" & to_unsigned(kk mod 4, 2);
+        end if;
+      end loop;
+    end loop;
+  end process;
+
+  -- Late: AND-OR select of the code by the replicated shift one-hot, and the
+  -- hold (clock enable) term. Three bits and one bit per destination.
+  wc_p: process (sh_rep, scode, nv) is
+    variable cd : unsigned(2 downto 0);
+  begin
+    for i in 0 to 7 loop
+      cd := (others => '0');
+      for c in 0 to 4 loop
+        if sh_rep(i)(c) = '1' then
+          cd := cd or scode(c)(i);
+        end if;
+      end loop;
+      wcode(i) <= cd;
+      whold(i) <= sh_rep(i)(0) and b2sl(i < to_integer(nv));
+    end loop;
+  end process;
+
+  -- The four PF entries, unpacked once.
+  pfe_g: for kk in 0 to 3 generate
+    pfe(kk) <= mkent(pf(kk));
+  end generate;
+
+  -- The one wide select: 8 destinations over the inputs that the invariants
+  -- above leave reachable (5, 6, 7, 8, 7, 6, 5, 4 = 48, against 44 + 40 for
+  -- the extended window plus the shift select it replaces).
+  ws_p: process (E, pfe, wcode) is
     variable w : wen_t;
   begin
-    for j in 0 to 11 loop
+    for i in 0 to 7 loop
       w := WEN_INIT;
-      if j < 8 and j < to_integer(nv) then
-        w := E(j);
-      else
-        -- PF entry kk lands at position nv + kk, so position j takes pf(kk)
-        -- exactly when nv = j - kk. Both bounds on kk are static per j:
-        -- kk <= j (nv >= 0) and j - kk <= 8 (nv <= 8, the window depth), so
-        -- positions 0..2 and 9..11 never build all four inputs of this mux
-        -- (12 of the 48 PF inputs are unreachable).
-        for kk in 0 to 3 loop
-          if kk <= j and j - kk <= 8 and to_integer(nv) = j - kk then
-            w := mkent(pf(kk));
-          end if;
-        end loop;
-      end if;
-      X(j) <= w;
+      for s in 1 to 4 loop
+        if i + s <= 7 and wcode(i) = to_unsigned(s - 1, 3) then
+          w := E(i + s);
+        end if;
+      end loop;
+      for kk in 0 to 3 loop
+        if kk <= i and wcode(i) = to_unsigned(4 + kk, 3) then
+          w := pfe(kk);
+        end if;
+      end loop;
+      ws(i) <= w;
     end loop;
   end process;
 
@@ -833,7 +920,9 @@ begin
     -- replaced by INIT the cycle after, as nu' = 0), so Eavx(c) (one satav off
     -- the registered lptr) is its avn.
 
-    -- 0 HOLD: same head; av0 for the next cycle = avn, avn refreshed.
+    -- 0 HOLD: same head; av0 for the next cycle = avn, avn refreshed. Only
+    -- avn and cap differ from hd, which is why the other ten fields of the
+    -- head register take a clock enable instead of a tenth mux input.
     h := hd;
     h.avn := satav(a1, hd.lp0);
     h.cap := capf(E(0).isL, hd.rep0, hd.avn, hd.q7, bnext);
@@ -970,13 +1059,12 @@ begin
       a1 <= arw;
       a2 <= a1;
 
-      -- Window: E(i)' = X(i + c), late 5:1 by the replicated shift.
+      -- Window: E(i)' = ws(i) unless the entry holds (c = 0, i < nv), which
+      -- is the register's clock enable (see the source select above).
       for i in 0 to 7 loop
-        for s in 0 to 4 loop
-          if sh_rep(i)(s) = '1' then
-            E(i) <= X(i + s);
-          end if;
-        end loop;
+        if whold(i) = '0' then
+          E(i) <= ws(i);
+        end if;
       end loop;
 
       nvn := (others => '0');
@@ -990,12 +1078,32 @@ begin
       nv <= nvn;
       nu <= nun;
 
-      -- Head: 10:1 by the replicated outcome.
+      -- Head: by the replicated outcome. The HOLD outcome is hd itself with
+      -- only avn and cap refreshed (hcand(0) above), so the remaining 100
+      -- bits take the register's own clock enable and outcome 0 leaves their
+      -- mux: 9 inputs of 100 b plus 10 inputs of 13 b, not 10 of 113 b.
       for o in 0 to 9 loop
-        if oc_rep(4)(o) = '1' then
-          hd <= hcand(o);
+        if oc_rep(0)(o) = '1' then
+          hd.avn <= hcand(o).avn;
+          hd.cap <= hcand(o).cap;
         end if;
       end loop;
+      if oc_rep(1)(0) = '0' then
+        for o in 1 to 9 loop
+          if oc_rep(1)(o) = '1' then
+            hd.rl   <= hcand(o).rl;
+            hd.rh   <= hcand(o).rh;
+            hd.rhnz <= hcand(o).rhnz;
+            hd.r7   <= hcand(o).r7;
+            hd.q0   <= hcand(o).q0;
+            hd.q7   <= hcand(o).q7;
+            hd.rep0 <= hcand(o).rep0;
+            hd.dq   <= hcand(o).dq;
+            hd.lim  <= hcand(o).lim;
+            hd.lp0  <= hcand(o).lp0;
+          end if;
+        end loop;
+      end if;
 
       -- Bundle: 5:1 by the replicated shift.
       for s in 0 to 4 loop
@@ -1045,6 +1153,12 @@ begin
       end loop;
       assert nsh = 1 and noc = 1
         report "writer: shift / outcome select is not one-hot" severity failure;
+      -- The source select prunes PF inputs with kk > i, which holds exactly
+      -- while the shift stays inside the window (c <= nu <= nv).
+      for i in 0 to 4 loop
+        assert sh_rep(0)(i) = '0' or i <= to_integer(nu)
+          report "writer: shift exceeds the usable window" severity failure;
+      end loop;
       -- R0 split: the borrow invariant (rh /= 0 => rl >= 96 after a cut) and
       -- rhnz => rh /= 0. The converse no longer holds: a copy head's rh is the
       -- element payload's offset half (see mkent) and is never read, because
