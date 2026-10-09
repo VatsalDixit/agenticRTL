@@ -70,22 +70,26 @@ use work.vhsnunzip_dsw4_pkg.all;
 --              cap: slot-0 cap for this cycle (LIT min(B, av0), av0 =
 --              sat7(A_r(prev) - lp0); REP copy B; other copy min(B, q7)).
 --   bnd(k)   per-slot constants for slots 1..3 (SPEC 3.7 table), computed
---            last cycle for every shift c' in 0..4 and selected by c.
+--            last cycle for every shift c' in 0..4 and selected by c. The
+--            table is one value per slot plus two offsets of it:
+--            cutv_k = min(B, o7_k) - P_k, ende_k = cutv_k - l7_k and
+--            avb_k = cutv_k - av_k (see bnd_t).
 --   B        this command's budget (32; TEST_CUT: LFSR budget).
 --
 -- Decision (from registers only): slot 0 n0 = min(r, cap), done0 = r <= cap;
 -- slot k reached iff slots before it are done (and not EOC), k < nu,
--- k < KMAX and r < bud_k; then LIT: nl_k < LITP and (r <= endb_k ? fav_k :
--- r >= avb_k); CPY: r < haz_k, done iff r <= endh_k. Cut lengths: slot 0
--- n0 = cap (a register), slot k n_k = cutv_k - r (cutv_k = bud_k for LIT,
--- min(bud_k, haz_k) for CPY, a register). Next-state candidates:
+-- k < KMAX and r < cutv_k (budget and copy hazard in one compare); then LIT:
+-- nl_k < LITP and (r <= ende_k ? fav_k : r >= avb_k); CPY: always ok, done
+-- iff r <= ende_k. Cut lengths: slot 0 n0 = cap (a register), slot k
+-- n_k = cutv_k - r (a register minus r). Next-state candidates:
 --   slot 0 cut: rl - cap (8 b, borrow from rh precomputed), lp0 + cap,
 --               av0' = avn - cap (7 b), q0 := dq (register), dq' from dq,
 --               lim + cap (7-bit add, parallel compares).
---   slot k cut: rl' = len_k(6:0) [+128] - cutv_k + r (8 b), rh' = rh_k - 1,
---               lp0' = lptr_k + n_k as an 8-bit add with a carry-select on
---               lptr_k(31:8) / lptr_k(31:8) + 1, av0' = av_k - n_k (7 b),
---               q0 = off_k, dq' = qdbl(off_k, n_k + off_k).
+--   slot k cut: n_k = cutv_k - r once (ncut, shared with the decision's
+--               segment length), then rl' = len_k(6:0) [+128] - n_k (8 b),
+--               rh' = rh_k - 1, lp0' = lptr_k + n_k (GA add),
+--               av0' = av_k - n_k (7 b), q0 = off_k,
+--               dq' = qdbl(off_k, n_k + off_k).
 --   shift c   : head = E_c fresh.
 -- The shift one-hot and the outcome one-hot are built directly from the done
 -- prefix (no counting) and replicated 8x (keep) to drive the next-state
@@ -133,8 +137,11 @@ architecture behavior of vhsnunzip_writer is
   -----------------------------------------------------------------------------
   -- Window entry with registered derived fields.
   -----------------------------------------------------------------------------
+  -- The kind code itself is NOT kept: isL / isC / isE are its decode, and the
+  -- command's 2-bit code is the one LUT (isE, isC or isE) -- cheaper than
+  -- carrying two more bits through the 12-entry candidate array and the
+  -- 8 x 5:1 window shift select.
   type wen_t is record
-    kind : std_logic_vector(1 downto 0);
     len  : unsigned(31 downto 0);
     off  : unsigned(15 downto 0);
     lptr : gaw_t;
@@ -152,7 +159,7 @@ architecture behavior of vhsnunzip_writer is
   type wen_arr is array (natural range <>) of wen_t;
 
   constant WEN_INIT : wen_t := (
-    kind => K_LIT, len => (others => '0'), off => (others => '0'),
+    len => (others => '0'), off => (others => '0'),
     lptr => (others => '0'), l7 => (others => '0'), o7 => (others => '0'),
     av => (others => '0'), avx => (others => '0'), rhnz => '0', rh2 => '0',
     isL => '0', isC => '0', isE => '0', rep => '0');
@@ -181,25 +188,33 @@ architecture behavior of vhsnunzip_writer is
     lim => (others => '0'), lp0 => (others => '0'), avn => (others => '0'),
     cap => (others => '0'));
 
-  -- Per-slot constants (slots 1..3). Signed 8 b, clamped to [-64, 127]: r is
-  -- 0..127, and every clamped value keeps its compare result against r.
+  -- Per-slot constants (slots 1..3). The whole SPEC 3.7 slot table is the one
+  -- value cutv_k = min(B, o7_k) - P_k (clamped at 0) and two offsets of it:
+  --   reached and inside the copy hazard : r <  cutv   (budget B - P_k and
+  --       hazard o7_k - P_k are the two halves of the min, taken before the
+  --       subtract, so one compare serves both and o7 = 127 needs no special
+  --       "no hazard" value: 127 > B >= min discards it anyway)
+  --   fits (LIT B-P-l7, CPY min(B,o7)-P-l7)  : r <= ende = cutv - l7
+  --   literal availability (the old avb)      : r >= avb  = cutv - av
+  -- Every operand compared against cutv is below 34 where it matters
+  -- (cutv <= B <= 32 and r >= 0), so l7 / av enter the offsets clamped at 33
+  -- and the bundle needs 7 b per offset instead of 8 b clamped to [-64, 127]:
+  -- 29 b per slot instead of 55 b, three narrow subtracts instead of five
+  -- wide ones with two-sided clamps, and the decision still compares r
+  -- against a register only (no arithmetic in front of it).
   type bnd_t is record
-    bud  : signed(7 downto 0);     -- B - P_k             reached iff r < bud
-    endb : signed(7 downto 0);     -- B - P_k - l7_k      LIT fits iff r <= endb
-    avb  : signed(7 downto 0);     -- B - P_k - av_k      LIT cut ok iff r >= avb
-    haz  : signed(7 downto 0);     -- o7_k - P_k (127: inf) CPY ok iff r < haz
-    endh : signed(7 downto 0);     -- min(B,o7_k)-P_k-l7_k CPY done iff r <= endh
+    ende : signed(6 downto 0);     -- cutv - sat33(l7_k)  fits iff r <= ende
+    avb  : signed(6 downto 0);     -- cutv - sat33(av_k)  LIT cut ok iff r >= avb
     fav  : std_logic;              -- av_k >= l7_k
     nl   : unsigned(1 downto 0);   -- literals before slot k (sat 3)
-    p    : unsigned(5 downto 0);   -- P_k (sat 63): S_k = r + P_k
-    cutv : unsigned(5 downto 0);   -- cut: n_k = cutv - r (LIT bud, CPY min(bud,haz))
+    p    : unsigned(5 downto 0);   -- P_k (sat 32): S_k = r + P_k
+    cutv : unsigned(5 downto 0);   -- min(B, o7_k) - P_k; cut: n_k = cutv - r
   end record;
   type bnd_arr is array (1 to 3) of bnd_t;
   type bnd_arr2 is array (0 to 4) of bnd_arr;
 
   constant BND_INIT : bnd_t := (
-    bud => (others => '0'), endb => (others => '0'), avb => (others => '0'),
-    haz => (others => '0'), endh => (others => '0'), fav => '0',
+    ende => (others => '0'), avb => (others => '0'), fav => '0',
     nl => (others => '0'), p => (others => '0'), cutv => (others => '0'));
 
   -----------------------------------------------------------------------------
@@ -235,7 +250,6 @@ architecture behavior of vhsnunzip_writer is
   function mkent(e : element_t; a1, a0 : gaw_t) return wen_t is
     variable w : wen_t;
   begin
-    w.kind := e.kind;
     w.len  := e.len;
     w.off  := e.off;
     w.lptr := e.lptr;
@@ -255,6 +269,14 @@ architecture behavior of vhsnunzip_writer is
     end case;
     w.rep := is_repq(e.off);
     return w;
+  end function;
+
+  -- The command slot's 2-bit kind code, rebuilt from the decoded flags
+  -- (dsw4_pkg: K_LIT "00", K_CPY "01", K_EOC "11", so kind = isE &
+  -- (isC or isE)). One LUT, instead of two more bits in every window entry.
+  function kcode(w : wen_t) return std_logic_vector is
+  begin
+    return w.isE & (w.isC or w.isE);
   end function;
 
   -- Slot-0 cap: LIT min(B, av0); REP copy B; other copy min(B, q7).
@@ -291,72 +313,61 @@ architecture behavior of vhsnunzip_writer is
   end function;
 
 
-  -- Clamp a 10-bit signed value to [-64, 127] (8-bit signed).
-  function s8c(x : signed(9 downto 0)) return signed is
+  -- Clamp a 7-bit length / availability at 33. Every value built from it is
+  -- compared against cutv - r with cutv <= B <= 32 and r >= 0, so 33 and
+  -- anything above it give the same compare result; this keeps the bundle
+  -- offsets inside 7-bit signed arithmetic (no two-sided clamp).
+  function c33(x : unsigned(6 downto 0)) return unsigned is
   begin
-    if x < -64 then
-      return to_signed(-64, 8);
-    elsif x > 127 then
-      return to_signed(127, 8);
+    if x > 33 then
+      return to_unsigned(33, 6);
     end if;
-    return x(7 downto 0);
-  end function;
-
-  -- Clamp a 10-bit signed value to [0, 63].
-  function u6c(x : signed(9 downto 0)) return unsigned is
-  begin
-    if x < 0 then
-      return to_unsigned(0, 6);
-    elsif x > 63 then
-      return to_unsigned(63, 6);
-    end if;
-    return unsigned(x(5 downto 0));
+    return x(5 downto 0);
   end function;
 
   -- Per-slot constants for a window y(0..3) (y(0) = head) with budget bb.
-  -- All operands are registers (av included); fixed 10-bit signed arithmetic
-  -- (no integer, so no 32-bit adders): bud in [-63, 32], endb / avb / endh
-  -- in [-190, 32], haz in [-63, 127].
+  -- All operands are registers (av included). One subtract builds cutv =
+  -- min(B, o7_k) - P_k (the min is taken before the subtract, since B - P vs
+  -- o7 - P is just B vs o7, and only a copy has a hazard), and two more make
+  -- the fit and availability bounds as offsets of it. cutv in [0, 32], the
+  -- offsets in [-33, 32]: 7-bit signed throughout, no clamp but the sign.
   function mkbnd(y : wen_arr(0 to 3); bb : unsigned(5 downto 0)) return bnd_arr is
     variable res  : bnd_arr;
-    variable pk   : unsigned(5 downto 0);          -- P_k, saturated at 63
+    variable pk   : unsigned(5 downto 0);          -- P_k, saturated at 32
     variable nl   : unsigned(1 downto 0);
-    variable bi, l7, o7, av, mo, bud, haz : signed(9 downto 0);
-    variable pks  : signed(9 downto 0);
-    variable psum : unsigned(7 downto 0);
+    variable m    : unsigned(5 downto 0);          -- min(B, o7_k)
+    variable cv   : signed(6 downto 0);            -- m - P_k before the clamp
+    variable cvu  : unsigned(5 downto 0);          -- cutv
+    variable l7c  : unsigned(5 downto 0);          -- sat33(l7_k)
+    variable psum : unsigned(6 downto 0);
   begin
-    bi := signed(resize(bb, 10));
     pk := (others => '0');
     if y(0).isL = '1' then nl := "01"; else nl := "00"; end if;
     for k in 1 to 3 loop
-      l7  := signed(resize(y(k).l7, 10));
-      o7  := signed(resize(y(k).o7, 10));
-      av  := signed(resize(y(k).av, 10));
-      pks := signed(resize(pk, 10));
-      bud := bi - pks;
-      res(k).bud  := s8c(bud);
-      res(k).endb := s8c(bud - l7);
-      res(k).avb  := s8c(bud - av);
-      if y(k).o7 = 127 then
-        haz := to_signed(127, 10);
+      l7c := c33(y(k).l7);
+      if y(k).isC = '1' and y(k).o7 < resize(bb, 7) then
+        m := y(k).o7(5 downto 0);
       else
-        haz := o7 - pks;
+        m := bb;
       end if;
-      res(k).haz  := s8c(haz);
-      if o7 < bi then mo := o7; else mo := bi; end if;
-      res(k).endh := s8c(mo - pks - l7);
+      cv := signed('0' & m) - signed('0' & pk);
+      if cv < 0 then
+        cvu := (others => '0');
+      else
+        cvu := unsigned(cv(5 downto 0));
+      end if;
+      res(k).cutv := cvu;
+      res(k).ende := signed('0' & cvu) - signed('0' & l7c);
+      res(k).avb  := signed('0' & cvu) - signed('0' & c33(y(k).av));
       if y(k).av >= y(k).l7 then res(k).fav := '1'; else res(k).fav := '0'; end if;
       res(k).nl   := nl;
       res(k).p    := pk;
-      if y(k).isL = '1' or haz > bud then
-        res(k).cutv := u6c(bud);
-      else
-        res(k).cutv := u6c(haz);
-      end if;
-      -- Next slot: P += l7 (saturated: P >= 32 is unreachable anyway).
-      psum := resize(pk, 8) + resize(y(k).l7, 8);
-      if psum > 63 then
-        pk := to_unsigned(63, 6);
+      -- Next slot: P += l7, saturated at 32. P >= B is unreachable (a slot is
+      -- reached only while r + P < B <= 32), and once P saturates it stays
+      -- saturated, so cutv = 0 hides every slot behind it, as it must.
+      psum := resize(pk, 7) + resize(l7c, 7);
+      if psum > 32 then
+        pk := to_unsigned(32, 6);
       else
         pk := psum(5 downto 0);
       end if;
@@ -438,6 +449,11 @@ architecture behavior of vhsnunzip_writer is
   -----------------------------------------------------------------------------
   -- Decision outputs.
   -----------------------------------------------------------------------------
+  -- n_k = cutv_k - r, the slot-k cut length: the one subtract the decision
+  -- (the cut's segment length) and the slot-k cut head candidate share.
+  type u7_3 is array (1 to 3) of unsigned(6 downto 0);
+  signal ncut    : u7_3;
+
   signal issue   : std_logic;
   signal done    : std_logic_vector(0 to 3);   -- slot k done (EOC included)
   signal plcd    : std_logic_vector(0 to 3);   -- slot k placed (used)
@@ -483,7 +499,11 @@ begin
   -- a difference against a pointer inside the credit window).
   arw <= a_r(GAW - 1 downto 0);
 
-  dec_p: process (E, nu, hd, bnd, bubble, de_credit_ok, stall) is
+  ncut_g: for k in 1 to 3 generate
+    ncut(k) <= resize(bnd(k).cutv, 7) - hd.r7;
+  end generate;
+
+  dec_p: process (E, nu, hd, bnd, ncut, bubble, de_credit_ok, stall) is
     variable r       : signed(7 downto 0);
     variable iss     : std_logic;
     variable dn, pl  : std_logic_vector(0 to 3);
@@ -516,7 +536,7 @@ begin
     -- Slot 0.
     sl := WSLOT_INIT;
     sl.val  := '1';
-    sl.kind := E(0).kind;
+    sl.kind := kcode(E(0));
     pl(0) := '1';
     if E(0).isE = '1' then
       dn(0) := '1';
@@ -553,11 +573,13 @@ begin
       cm.lw := E(0).lptr;
     end if;
 
-    -- Slots 1..3.
+    -- Slots 1..3. Three compares of r against registered per-slot constants:
+    -- r < cutv is both the budget bound and the copy hazard, r <= ende is
+    -- both fit bounds, and r >= avb is the literal availability cut bound.
     for k in 1 to 3 loop
       reach := '0';
       if dn(k - 1) = '1' and E(k - 1).isE = '0' and nu > k and k < KMAX
-         and r < bnd(k).bud then
+         and r < signed(resize(bnd(k).cutv, 8)) then
         reach := '1';
       end if;
       fit := '0';
@@ -565,22 +587,21 @@ begin
       if E(k).isE = '1' then
         ok  := '1';
         fit := '1';
-      elsif E(k).isL = '1' then
-        if r <= bnd(k).endb then
-          fit := '1';
-          ok  := bnd(k).fav;
-        elsif r >= bnd(k).avb then
-          ok  := '1';
-        end if;
-        if bnd(k).nl >= LITP then
-          ok := '0';
-        end if;
       else
-        if r < bnd(k).haz then
-          ok := '1';
-        end if;
-        if r <= bnd(k).endh then
+        if r <= resize(bnd(k).ende, 8) then
           fit := '1';
+        end if;
+        if E(k).isL = '1' then
+          if fit = '1' then
+            ok := bnd(k).fav;
+          elsif r >= resize(bnd(k).avb, 8) then
+            ok := '1';
+          end if;
+          if bnd(k).nl >= LITP then
+            ok := '0';
+          end if;
+        else
+          ok := '1';
         end if;
       end if;
       pl(k) := reach and ok;
@@ -588,7 +609,7 @@ begin
       if pl(k) = '1' then
         sl := WSLOT_INIT;
         sl.val  := '1';
-        sl.kind := E(k).kind;
+        sl.kind := kcode(E(k));
         sl.s    := unsigned(r(5 downto 0)) + bnd(k).p;
         sl.lptr := E(k).lptr;
         if E(k).isE = '1' then
@@ -597,7 +618,7 @@ begin
         elsif fit = '1' then
           n := E(k).l7(5 downto 0);
         else
-          n := bnd(k).cutv - unsigned(r(5 downto 0));
+          n := ncut(k)(5 downto 0);
           cutany := '1';
         end if;
         sl.n := n;
@@ -729,17 +750,15 @@ begin
   -- Head candidates and per-shift bundles. Uses only E (registers) for the
   -- bundles and the shifted heads: a slot whose entry would come from PF is
   -- not usable next cycle (nu' = nv - c), so its values do not matter.
-  cand_p: process (E, hd, bnd, bnext, a1) is
+  cand_p: process (E, hd, bnd, ncut, bnext, a1) is
     variable y    : wen_arr(0 to 3);
     variable h    : hd_t;
-    variable r    : unsigned(7 downto 0);
     variable brw  : std_logic;
     variable rle  : unsigned(7 downto 0);
     variable av   : unsigned(6 downto 0);
     variable l8   : unsigned(7 downto 0);
     variable n7   : unsigned(6 downto 0);
   begin
-    r := '0' & hd.r7;
     -- A head is only ever built from E(c) with c < nv (a head from PF is
     -- replaced by INIT the cycle after, as nu' = 0), so E(c).avx (a register)
     -- is its avn.
@@ -790,29 +809,33 @@ begin
       hcand(2 + c) <= mkhead(E(c), E(c).avx, bnext);
     end loop;
 
-    -- 7..9 slot k cut: n_k = cutv_k - r.
+    -- 7..9 slot k cut: n_k = cutv_k - r, subtracted ONCE. This candidate is
+    -- only ever selected when slot k was reached and cut, so r < cutv_k and
+    -- n7 is the exact cut length; every next-state value below is one of
+    -- "x -/+ n_k", so the one subtract replaces the four separate
+    -- "- cutv_k + r" pairs this loop used to build (two carry chains each).
     for k in 1 to 3 loop
-      h := mkhead(E(k), E(k).avx, bnext);
-      -- R0 = len_k - n_k = len_k(6:0) [+ 128, borrowing from rh] - cutv + r.
+      h  := mkhead(E(k), E(k).avx, bnext);
+      n7 := ncut(k);
+      -- R0 = len_k - n_k = len_k(6:0) [+ 128, borrowing from rh] - n_k.
       rle := '0' & E(k).len(6 downto 0);
       if E(k).rhnz = '1' then
         rle(7) := '1';
         h.rh   := E(k).len(31 downto 7) - 1;
         h.rhnz := E(k).rh2;
       end if;
-      h.rl := rle - resize(bnd(k).cutv, 8) + r;
+      h.rl := rle - resize(n7, 8);
       if h.rhnz = '1' or h.rl(7) = '1' or h.rl(6 downto 0) = 127 then
         h.r7 := to_unsigned(127, 7);
       else
         h.r7 := h.rl(6 downto 0);
       end if;
-      -- lp0 = lptr_k + n_k = lptr_k + cutv_k - r, one GAW-bit add.
-      h.lp0 := E(k).lptr + resize(bnd(k).cutv, GAW) - resize(r, GAW);
+      -- lp0 = lptr_k + n_k, one GAW-bit add.
+      h.lp0 := E(k).lptr + resize(n7, GAW);
       -- av0' = av_k - n_k, avn' = (av_k with the next A_r) - n_k (7 b).
-      av    := E(k).av - resize(bnd(k).cutv, 7) + hd.r7;
-      h.avn := E(k).avx - resize(bnd(k).cutv, 7) + hd.r7;
+      av    := E(k).av - n7;
+      h.avn := E(k).avx - n7;
       -- Copy: produced = n_k, lim = n_k + off_k, dq = qdbl(off_k, lim).
-      n7    := resize(bnd(k).cutv, 7) - hd.r7;
       l8    := resize(n7, 8) + resize(E(k).o7, 8);
       h.lim := sat(l8, 7);
       h.dq  := qdbl(E(k).off, l8);
@@ -993,7 +1016,8 @@ begin
             if E(k - 1).isE = '1' then why := 1;
             elsif nu <= k then why := 2;
             elsif k >= KMAX then why := 3;
-            elsif not (r < bnd(k).bud) then why := 4;
+            -- budget and hazard are one bound now, both counted as "budget".
+            elsif not (r < signed(resize(bnd(k).cutv, 8))) then why := 4;
             elsif plcd(k) = '1' then why := 8;
             elsif E(k).isL = '1' and bnd(k).nl >= LITP then why := 7;
             elsif E(k).isL = '1' then why := 6;
