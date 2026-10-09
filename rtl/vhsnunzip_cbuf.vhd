@@ -42,7 +42,7 @@ entity vhsnunzip_cbuf is
     co          : in  cbeat_t;
     co_ready    : out std_logic;
 
-    lwx         : in  ga_t;
+    lwx         : in  gaw_t;
     gb          : out ga_t;
     a_r         : out ga_t;
 
@@ -66,7 +66,7 @@ architecture behavior of vhsnunzip_cbuf is
 
   -- Write side.
   signal gb_r        : ga_t := (others => '0');   -- GA of the next beat
-  signal lwx_r       : ga_t := (others => '0');   -- LWX_r (lwx registered once)
+  signal lwx_r       : gaw_t := (others => '0');  -- LWX_r (lwx registered once)
   signal credit_ok_r : std_logic := '1';          -- (GB + 32 - LWX_r) <= CBUF_WIN
   signal first_r     : std_logic := '1';          -- next beat starts a chunk
   signal a1_r, a2_r  : ga_t := (others => '0');   -- GB delayed 1 and 2 cycles
@@ -101,7 +101,7 @@ begin
   cef_pop_i <= cef_pop when cef_cnt /= 0 else '0';
 
   reg_proc: process (clk) is
-    variable diff   : ga_t;
+    variable diff   : gaw_t;
     variable cnt_v  : unsigned(2 downto 0);
   begin
     if rising_edge(clk) then
@@ -109,15 +109,15 @@ begin
       -- Credit for the beat that would be written NEXT cycle, at the GB this
       -- edge produces: pop ? GB + 64 : GB + 32, against LWX_r. LWX is
       -- monotonic, so the one-cycle-old LWX_r is conservative.
-      diff := gb_r - lwx_r;
+      diff := gb_r(GAW - 1 downto 0) - lwx_r;
       if pop = '1' then
-        if diff <= to_unsigned(CBUF_WIN - 64, 32) then
+        if diff <= to_unsigned(CBUF_WIN - 64, GAW) then
           credit_ok_r <= '1';
         else
           credit_ok_r <= '0';
         end if;
       else
-        if diff <= to_unsigned(CBUF_WIN - 32, 32) then
+        if diff <= to_unsigned(CBUF_WIN - 32, GAW) then
           credit_ok_r <= '1';
         else
           credit_ok_r <= '0';
@@ -208,12 +208,12 @@ begin
     if rising_edge(clk) then
       if reset = '0' then
         -- Live bytes are >= LWX and never past GB.
-        assert ga_sdiff(gb_r, lwx) >= 0
+        assert signed(gb_r(GAW - 1 downto 0) - lwx) >= 0
           report "cbuf: LWX " & to_hstring(lwx) & " is past GB " & to_hstring(gb_r)
           severity failure;
         -- The beat at GB overwrites GAs GB-1024 .. GB-993: all must be < LWX.
         if pop = '1' then
-          assert ga_sdiff(gb_r + 32, lwx) <= 1024
+          assert signed(gb_r(GAW - 1 downto 0) + 32 - lwx) <= 1024
             report "cbuf: write at GB " & to_hstring(gb_r) & " overwrites live bytes (LWX "
                    & to_hstring(lwx) & ")"
             severity failure;

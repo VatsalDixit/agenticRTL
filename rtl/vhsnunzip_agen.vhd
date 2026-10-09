@@ -70,7 +70,7 @@ architecture rtl of vhsnunzip_agen is
     wc        : unsigned(17 downto 0);
     d_total   : unsigned(5 downto 0);
     s         : u6_arr(1 to 3);
-    lw        : ga_t;
+    lw        : gaw_t;
     slot      : ag1_slot_arr;
   end record;
 

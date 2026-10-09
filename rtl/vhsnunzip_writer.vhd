@@ -137,7 +137,7 @@ architecture behavior of vhsnunzip_writer is
     kind : std_logic_vector(1 downto 0);
     len  : unsigned(31 downto 0);
     off  : unsigned(15 downto 0);
-    lptr : ga_t;
+    lptr : gaw_t;
     l7   : unsigned(6 downto 0);
     o7   : unsigned(6 downto 0);
     av   : unsigned(6 downto 0);
@@ -168,7 +168,7 @@ architecture behavior of vhsnunzip_writer is
     rep0 : std_logic;
     dq   : unsigned(15 downto 0);
     lim  : unsigned(6 downto 0);
-    lp0  : ga_t;
+    lp0  : gaw_t;
     avn  : unsigned(6 downto 0);
     cap  : unsigned(5 downto 0);
   end record;
@@ -206,14 +206,16 @@ architecture behavior of vhsnunzip_writer is
   -- Helpers.
   -----------------------------------------------------------------------------
 
-  -- sat7(a - p) for a GA difference read as signed: <= 0 gives 0.
-  function satav(a, p : ga_t) return unsigned is
-    variable d : unsigned(31 downto 0);
+  -- sat7(a - p) for a GA difference read as signed: <= 0 gives 0. Both
+  -- operands are inside the CBUF credit window (a - p is in [-64, +896], SPEC
+  -- 3.1), so GAW = 12 bits of difference is exact and the sign is bit GAW-1.
+  function satav(a : gaw_t; p : gaw_t) return unsigned is
+    variable d : gaw_t;
   begin
     d := a - p;
-    if d(31) = '1' then
+    if d(GAW - 1) = '1' then
       return to_unsigned(0, 7);
-    elsif d(30 downto 7) /= 0 then
+    elsif d(GAW - 2 downto 7) /= 0 then
       return to_unsigned(127, 7);
     else
       return d(6 downto 0);
@@ -230,7 +232,7 @@ architecture behavior of vhsnunzip_writer is
 
   -- Window entry from an ELQ element; a1 / a0: the arrival values whose
   -- registered av / avx this is (A_r and A_r of the cycle after the load).
-  function mkent(e : element_t; a1, a0 : ga_t) return wen_t is
+  function mkent(e : element_t; a1, a0 : gaw_t) return wen_t is
     variable w : wen_t;
   begin
     w.kind := e.kind;
@@ -239,8 +241,8 @@ architecture behavior of vhsnunzip_writer is
     w.lptr := e.lptr;
     w.l7   := sat(e.len, 7);
     w.o7   := sat(e.off, 7);
-    w.av   := satav(a1, e.lptr);
-    w.avx  := satav(a0, e.lptr);
+    w.av   := satav(a1, w.lptr);
+    w.avx  := satav(a0, w.lptr);
     w.rhnz := b2sl(e.len(31 downto 7) /= 0);
     w.rh2  := b2sl(e.len(31 downto 8) /= 0);
     w.isL  := '0';
@@ -421,7 +423,8 @@ architecture behavior of vhsnunzip_writer is
   -----------------------------------------------------------------------------
   -- Registers.
   -----------------------------------------------------------------------------
-  signal a1      : ga_t := (others => '0');    -- a_r registered once
+  signal arw     : gaw_t;                      -- a_r, windowed to GAW bits
+  signal a1      : gaw_t := (others => '0');   -- a_r registered once
   signal E       : wen_arr(0 to 7) := (others => WEN_INIT);
   signal nv, nu  : unsigned(3 downto 0) := (others => '0');
   signal hd      : hd_t := HD_INIT;
@@ -475,6 +478,10 @@ begin
   -- Decision (combinational, against registered constants only).
   -----------------------------------------------------------------------------
   stall <= '1' when slfsr(6 downto 0) < STALL_THR else '0';
+
+  -- Only the low GAW bits of the arrival counter are ever needed (every use is
+  -- a difference against a pointer inside the credit window).
+  arw <= a_r(GAW - 1 downto 0);
 
   dec_p: process (E, nu, hd, bnd, bubble, de_credit_ok, stall) is
     variable r       : signed(7 downto 0);
@@ -694,22 +701,26 @@ begin
   -- Extended window X(j) = E(j) for j < nv, PF(j - nv) after; av for the
   -- NEXT cycle: av' = sat7(a1 - lptr) (= this cycle's avx for an entry already
   -- in the window), avx' = sat7(a_r - lptr).
-  x_p: process (E, nv, pf, a1, a_r) is
+  x_p: process (E, nv, pf, a1, arw) is
     variable w : wen_t;
-    variable k : integer range -8 to 11;
   begin
     for j in 0 to 11 loop
+      w := WEN_INIT;
       if j < 8 and j < to_integer(nv) then
         w := E(j);
         w.av  := E(j).avx;
-        w.avx := satav(a_r, E(j).lptr);
+        w.avx := satav(arw, E(j).lptr);
       else
-        k := j - to_integer(nv);
-        if k >= 0 and k <= 3 then
-          w := mkent(pf(k), a1, a_r);
-        else
-          w := WEN_INIT;
-        end if;
+        -- PF entry kk lands at position nv + kk, so position j takes pf(kk)
+        -- exactly when nv = j - kk. Both bounds on kk are static per j:
+        -- kk <= j (nv >= 0) and j - kk <= 8 (nv <= 8, the window depth), so
+        -- positions 0..2 and 9..11 never build all four inputs of this mux
+        -- (12 of the 48 PF inputs are unreachable).
+        for kk in 0 to 3 loop
+          if kk <= j and j - kk <= 8 and to_integer(nv) = j - kk then
+            w := mkent(pf(kk), a1, arw);
+          end if;
+        end loop;
       end if;
       X(j) <= w;
     end loop;
@@ -726,7 +737,6 @@ begin
     variable rle  : unsigned(7 downto 0);
     variable av   : unsigned(6 downto 0);
     variable l8   : unsigned(7 downto 0);
-    variable lo9  : unsigned(8 downto 0);
     variable n7   : unsigned(6 downto 0);
   begin
     r := '0' & hd.r7;
@@ -761,8 +771,8 @@ begin
     end if;
     av := hd.avn - resize(hd.cap, 7);
     if E(0).isL = '1' then
-      h.lp0 := hd.lp0 + resize(hd.cap, 32);
-      h.avn := satav(a1, hd.lp0 + resize(hd.cap, 32));
+      h.lp0 := hd.lp0 + resize(hd.cap, GAW);
+      h.avn := satav(a1, hd.lp0 + resize(hd.cap, GAW));
     end if;
     if E(0).isC = '1' then
       h.q0   := hd.dq;
@@ -796,13 +806,8 @@ begin
       else
         h.r7 := h.rl(6 downto 0);
       end if;
-      -- lp0 = lptr_k + n_k: 8-bit add, carry-select on lptr_k(31:8).
-      lo9 := resize(E(k).lptr(7 downto 0), 9) + resize(bnd(k).cutv, 9) - r;
-      if lo9(8) = '1' then
-        h.lp0 := (E(k).lptr(31 downto 8) + 1) & lo9(7 downto 0);
-      else
-        h.lp0 := E(k).lptr(31 downto 8) & lo9(7 downto 0);
-      end if;
+      -- lp0 = lptr_k + n_k = lptr_k + cutv_k - r, one GAW-bit add.
+      h.lp0 := E(k).lptr + resize(bnd(k).cutv, GAW) - resize(r, GAW);
       -- av0' = av_k - n_k, avn' = (av_k with the next A_r) - n_k (7 b).
       av    := E(k).av - resize(bnd(k).cutv, 7) + hd.r7;
       h.avn := E(k).avx - resize(bnd(k).cutv, 7) + hd.r7;
@@ -867,7 +872,7 @@ begin
     variable nvn, nun : unsigned(3 downto 0);
   begin
     if rising_edge(clk) then
-      a1 <= a_r;
+      a1 <= arw;
 
       -- Window: E(i)' = X(i + c), late 5:1 by the replicated shift.
       for i in 0 to 7 loop

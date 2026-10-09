@@ -391,18 +391,21 @@ begin
         if p3v = '1' and k < to_integer(p3cnt) then
           el_v.valid := '1';
         end if;
+        -- lptr is a windowed GA (GAW bits): every consumer uses it either
+        -- modulo the 1 KiB CBUF ring or as a difference inside the credit
+        -- window, so the high GA bits are dropped here.
         if p3eoc = '1' then
           el_v.kind := K_EOC;
-          el_v.lptr := p3pos(k);
+          el_v.lptr := p3pos(k)(GAW - 1 downto 0);
         elsif p3r(k).kind = K_LIT then
           el_v.kind := K_LIT;
           el_v.len  := p3len(k);
-          el_v.lptr := p3pos(k) + p3r(k).hdr;
+          el_v.lptr := p3pos(k)(GAW - 1 downto 0) + resize(p3r(k).hdr, GAW);
         else
           el_v.kind := K_CPY;
           el_v.len  := p3len(k);
           el_v.off  := p3r(k).off;
-          el_v.lptr := p3pos(k);
+          el_v.lptr := p3pos(k)(GAW - 1 downto 0);
         end if;
         el_r(k) <= el_v;
       end loop;

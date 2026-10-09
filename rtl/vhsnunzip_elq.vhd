@@ -60,8 +60,8 @@ end vhsnunzip_elq;
 
 architecture behavior of vhsnunzip_elq is
 
-  -- Stored entry: kind 2 + len 32 + off 16 + lptr 32 = 82 bits.
-  constant EW : natural := 82;
+  -- Stored entry: kind 2 + len 32 + off 16 + lptr GAW (windowed GA) bits.
+  constant EW : natural := 2 + 32 + 16 + GAW;
   subtype ent_t is std_logic_vector(EW - 1 downto 0);
   type bank_t is array (0 to 15) of ent_t;
 
@@ -106,10 +106,10 @@ architecture behavior of vhsnunzip_elq is
     variable e : element_t;
   begin
     e.valid := '1';
-    e.kind  := v(81 downto 80);
-    e.len   := unsigned(v(79 downto 48));
-    e.off   := unsigned(v(47 downto 32));
-    e.lptr  := unsigned(v(31 downto 0));
+    e.kind  := v(GAW + 49 downto GAW + 48);
+    e.len   := unsigned(v(GAW + 47 downto GAW + 16));
+    e.off   := unsigned(v(GAW + 15 downto GAW));
+    e.lptr  := unsigned(v(GAW - 1 downto 0));
     return e;
   end function;
 

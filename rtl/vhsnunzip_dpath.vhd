@@ -54,7 +54,7 @@ entity vhsnunzip_dpath is
     litA        : in  byte_array(0 to 31);
     litB        : in  byte_array(0 to 31);
 
-    lwx         : out ga_t;
+    lwx         : out gaw_t;
     push        : out decompressed_stream;
     ram_wr      : out ram_command_array(0 to 31)
   );
@@ -78,7 +78,7 @@ architecture rtl of vhsnunzip_dpath is
   signal s1           : xcmd_t := XCMD_INIT;
   signal s2           : xcmd_t := XCMD_INIT;
   signal ext          : bytes_k_t := (others => (others => X"00"));
-  signal lwx_r        : ga_t := (others => '0');
+  signal lwx_r        : gaw_t := (others => '0');
 
   -- S2b: short-term SRL outputs and the gathered line.
   signal st           : bytes_k_t;

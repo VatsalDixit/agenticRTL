@@ -45,6 +45,16 @@ package vhsnunzip_dsw4_pkg is
   -----------------------------------------------------------------------------
   subtype ga_t is unsigned(31 downto 0);           -- global compressed address
 
+  -- Windowed GA (SPEC 3.1 credit). Every GA the element queue, the writer and
+  -- the LWX path carry lives inside the CBUF credit window: all live element
+  -- pointers are in [LWX, GB] with GB + 32 - LWX <= CBUF_WIN = 896, and A_r is
+  -- GB two cycles old (GB - 64 at worst), so A_r - lptr is in [-64, +896] and
+  -- lptr - LWX is in [0, 896]. GAW = 12 bits holds every one of those
+  -- differences as a signed value (+-2048), so all of this arithmetic is exact
+  -- modulo 2^GAW and the upper 20 bits of a GA are dead weight here.
+  constant GAW : natural := 12;
+  subtype gaw_t is unsigned(GAW - 1 downto 0);
+
   constant K_SLOTS    : natural := 4;    -- writer slots per command (KMAX)
   constant LINE_B     : natural := 32;   -- output line / command budget, bytes
   constant ELQ_CRED   : natural := 48;   -- walker -> writer element credits
@@ -179,7 +189,7 @@ package vhsnunzip_dsw4_pkg is
     kind      : std_logic_vector(1 downto 0);  -- 00 LIT 01 CPY 11 EOC
     len       : unsigned(31 downto 0);
     off       : unsigned(15 downto 0);
-    lptr      : ga_t;
+    lptr      : gaw_t;                         -- GA, windowed (GAW bits)
   end record;
 
   type element_arr is array (natural range <>) of element_t;
@@ -215,7 +225,7 @@ package vhsnunzip_dsw4_pkg is
     n         : unsigned(5 downto 0);
     s         : unsigned(5 downto 0);
     q         : unsigned(15 downto 0);
-    lptr      : ga_t;
+    lptr      : gaw_t;
   end record;
 
   type wslot_arr is array (0 to 3) of wslot_t;
@@ -236,7 +246,7 @@ package vhsnunzip_dsw4_pkg is
     li1_val   : std_logic;
     slot      : wslot_arr;
     d_total   : unsigned(5 downto 0);      -- 0..32
-    lw        : ga_t;                      -- low-water GA (SPEC 3.7)
+    lw        : gaw_t;                     -- low-water GA (SPEC 3.7, windowed)
     c         : unsigned(2 downto 0);      -- elements completed (0..4)
     cut       : std_logic;
   end record;
@@ -262,7 +272,7 @@ package vhsnunzip_dsw4_pkg is
     s1        : unsigned(5 downto 0);      -- unused slots: d_total
     s2        : unsigned(5 downto 0);
     s3        : unsigned(5 downto 0);
-    lw        : ga_t;
+    lw        : gaw_t;
     rep_q     : unsigned(4 downto 0);      -- q0(4:0), REP only
     rep_base  : unsigned(4 downto 0);      -- (Wc - q0) mod 32, REP only
     tier      : slv2_arr(0 to 3);          -- 00 none 01 ST 10 LT 11 LIT
@@ -301,7 +311,7 @@ package vhsnunzip_dsw4_pkg is
     spill     : std_logic;                 -- last and wl + d_total > 32
     wl        : unsigned(4 downto 0);
     cnt_last  : unsigned(5 downto 0);      -- (wl + d_total) mod 32, or 32
-    lw        : ga_t;
+    lw        : gaw_t;
     wr        : std_logic_vector(0 to 31); -- rel_j < d_total
     reg       : slv2_arr(0 to 31);         -- #{k in 1..3 : S_k <= rel_j}
     idx       : u4_arr2(0 to 3, 0 to 31);  -- 16:1 rotator index

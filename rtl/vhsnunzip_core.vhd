@@ -87,7 +87,7 @@ architecture behavior of vhsnunzip_core is
   -- Writer -> agen -> dpath -> de FIFO.
   signal wcmd          : element_stream;
   signal ag            : agcmd_t;
-  signal lwx           : ga_t;
+  signal lwx           : gaw_t;
   signal push          : decompressed_stream;
   signal de_credit_ok  : std_logic;
 
