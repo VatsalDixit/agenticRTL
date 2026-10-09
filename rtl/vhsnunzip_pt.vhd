@@ -49,6 +49,8 @@ begin
     variable pr     : prec_t;
     variable nx     : u7_arr(0 to 31);
     variable n2     : u7_arr(0 to 31);
+    variable sub    : u7_arr(0 to 31);
+    variable sub2   : u7_arr(0 to 31);
     variable w      : win_t;
     variable v      : unsigned(2 downto 0);
     variable t      : unsigned(6 downto 0);
@@ -119,9 +121,38 @@ begin
       ---------------------------------------------------------------- PT2
       w := w1;
       nx := w1.nxt;
-      for i in 0 to 31 loop
+      -- A hop never goes backwards: PT1 sets nxt[i] = i for an END position,
+      -- i + 1 + slen (slen >= 1) for a near literal, i + hdr (hdr >= 2) for a
+      -- copy and 127 for a far literal, so when nxt[i] is in range (0..31) it
+      -- is >= i. Entries below i can therefore never be selected by position
+      -- i's hop mux (SPEC 3.3 PT2). Low half: mask the unreachable entries to
+      -- a constant, which lets synthesis fold that part of the 32:1 mux tree
+      -- away. High half (i >= 16): the index is >= 16, so bit 4 of it is 1 and
+      -- the mux is a 16:1 over the high entries by construction.
+      for i in 0 to 15 loop
+        for j in 0 to 31 loop
+          if j >= i then
+            sub(j) := nx(j);
+          else
+            sub(j) := (others => '0');
+          end if;
+        end loop;
         if nx(i)(6 downto 5) = "00" then
-          w.nxt2(i) := nx(to_integer(nx(i)(4 downto 0)));
+          w.nxt2(i) := sub(to_integer(nx(i)(4 downto 0)));
+        else
+          w.nxt2(i) := nx(i);
+        end if;
+      end loop;
+      for i in 16 to 31 loop
+        for j in 0 to 15 loop
+          if 16 + j >= i then
+            sub(j) := nx(16 + j);
+          else
+            sub(j) := (others => '0');
+          end if;
+        end loop;
+        if nx(i)(6 downto 5) = "00" then
+          w.nxt2(i) := sub(to_integer(nx(i)(3 downto 0)));
         else
           w.nxt2(i) := nx(i);
         end if;
@@ -134,9 +165,20 @@ begin
       n2 := w2.nxt2;
       for i in 0 to 15 loop
         t := n2(i);
+        -- nxt2[i] >= nxt[i] >= i while it is in range (see PT2), so the two
+        -- hop muxes of position i need only the entries j >= i.
+        for j in 0 to 31 loop
+          if j >= i then
+            sub(j)  := nx(j);
+            sub2(j) := n2(j);
+          else
+            sub(j)  := (others => '0');
+            sub2(j) := (others => '0');
+          end if;
+        end loop;
         if t(6 downto 5) = "00" then
-          w.nxt3(i) := nx(to_integer(t(4 downto 0)));
-          w.nxt4(i) := n2(to_integer(t(4 downto 0)));
+          w.nxt3(i) := sub(to_integer(t(4 downto 0)));
+          w.nxt4(i) := sub2(to_integer(t(4 downto 0)));
         else
           w.nxt3(i) := t;
           w.nxt4(i) := t;
@@ -155,5 +197,29 @@ begin
   end process;
 
   win <= w3;
+
+  -- pragma translate_off
+  -- The PT2/PT3 hop muxes above drop the entries below the position they
+  -- belong to. Prove the monotonicity they rely on on every window.
+  chk_proc: process (clk) is
+  begin
+    if rising_edge(clk) then
+      if reset = '0' then
+        for i in 0 to 31 loop
+          if w1.valid = '1' and w1.nxt(i)(6 downto 5) = "00" then
+            assert to_integer(w1.nxt(i)(4 downto 0)) >= i
+              report "pt: nxt(" & integer'image(i) & ") hops backwards"
+              severity failure;
+          end if;
+          if w2.valid = '1' and w2.nxt2(i)(6 downto 5) = "00" then
+            assert to_integer(w2.nxt2(i)(4 downto 0)) >= i
+              report "pt: nxt2(" & integer'image(i) & ") hops backwards"
+              severity failure;
+          end if;
+        end loop;
+      end if;
+    end if;
+  end process;
+  -- pragma translate_on
 
 end behavior;
