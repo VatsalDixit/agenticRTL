@@ -19,7 +19,8 @@ use std.textio.all;
 --            first = 1, then e := H.vlen and RUN (the per-chunk dead cycle).
 --   RUN      needs usable H and cred >= 4; reserves 4 credits (PE1 returns
 --            4 - wcnt). e >= H.endrel: EOC group, pop H, DRAIN. Otherwise the
---            group at e goes to PE1 and x = H.nxt4[e]:
+--            group at e goes to PE1 and x = nxt4[e] = H.nxt2[H.nxt2[e]]
+--            (composed here, see hop4_proc):
 --              x = 127   WAITFAR (H kept)
 --              x < 16    e := x
 --              x < 32    pop, e := x - 16
@@ -153,13 +154,40 @@ architecture behavior of vhsnunzip_walker is
   signal far_n    : unsigned(2 downto 0) := (others => '0'); -- (T - H.base) / 16
   signal far_e    : unsigned(3 downto 0) := (others => '0'); -- T mod 16
 
+  -- The exit position nxt4[e] = nxt2[nxt2[e]], composed here out of the one
+  -- hop table the window carries, at the one position the walker walks: one
+  -- hop mux instead of PT3's 16. nxt2[e] out of the window (bit 6 or 5 set,
+  -- which includes FAR_NXT) is the exit itself, exactly as PT3 composed it.
+  signal hop4     : unsigned(6 downto 0);
+
+  -- "The element after the position this hop value came from is still in this
+  -- window": the hop lands inside the window (bits 6 and 5 clear) and below
+  -- endrel. This is PT3's old nok table, evaluated at the two positions the
+  -- walker indexes instead of at all 32.
+  function inwin(h : unsigned(6 downto 0); endrel : unsigned(5 downto 0))
+           return boolean is
+  begin
+    return h(6 downto 5) = "00" and resize(h(4 downto 0), 6) < endrel;
+  end function;
+
 begin
+
+  hop4_proc: process (wf_head, e_r) is
+    variable t : unsigned(6 downto 0);
+  begin
+    t := wf_head.nxt2(to_integer(e_r));
+    if t(6 downto 5) = "00" then
+      hop4 <= wf_head.nxt2(to_integer(t(4 downto 0)));
+    else
+      hop4 <= t;
+    end if;
+  end process;
 
   ---------------------------------------------------------------------------
   -- Walker decision (LOOP L3).
   ---------------------------------------------------------------------------
-  dec_proc: process (mode, e_r, stp, epoch_w, cred_r, wf_head, far_v, far_tgt, far_near,
-                     far_n, far_e) is
+  dec_proc: process (mode, e_r, stp, epoch_w, cred_r, wf_head, hop4, far_v, far_tgt,
+                     far_near, far_n, far_e) is
     variable hv, usable, stale : boolean;
     variable x     : unsigned(6 downto 0);
     variable n     : unsigned(2 downto 0);
@@ -167,7 +195,7 @@ begin
     hv     := wf_head.valid = '1';
     usable := hv and wf_head.epoch = epoch_w;
     stale  := hv and not usable;
-    x      := wf_head.nxt4(to_integer(e_r));
+    x      := hop4;
 
     pop_s  <= '0';
     emit_s <= '0';
@@ -278,8 +306,8 @@ begin
     variable el_v  : element_t;
     variable c     : unsigned(2 downto 0);
     variable last  : unsigned(4 downto 0);
-    variable h2, h4 : unsigned(5 downto 0);   -- hop6: bit 5 = leaves the window
-    variable h3    : unsigned(6 downto 0);
+    variable h2, h3, h4 : unsigned(6 downto 0);  -- raw hop values (bit 6/5 set
+                                                 -- = the position left the window)
     variable j3    : natural range 0 to 31;
     variable ok2, ok3, ok4 : boolean;
   begin
@@ -300,17 +328,20 @@ begin
         cred_r <= cred_r + ret_s + cred_ret;
       end if;
 
-      -- PE1: chain positions and a copy of H. The window hands over the hop
-      -- tables for one, two and four elements (nxr / nok, nxt2, nxt4); the
-      -- hop-3 position is composed here, at the one start position e that is
-      -- actually walked: p3 = nxt2[e], p4 = nxr[p3], valid iff nok[p3].
-      h2   := wf_head.nxr(to_integer(e_r));         -- hop6 of nxt[e]
+      -- PE1: chain positions and a copy of H. The window hands over the raw
+      -- hop tables for one and two elements (nxt, nxt2); the hop-3 position
+      -- and every slot's validity are composed here, at the one start position
+      -- e that is actually walked: p2 = nxt[e], p3 = nxt2[e], p4 = nxt[p3],
+      -- and slot k+1 is valid iff p_k's hop is inside the window and below
+      -- endrel (PT3's old nok table, evaluated at e and p3 only). The exit
+      -- position nxt4[e] = nxt2[p3] is composed the same way in hop4_proc.
+      h2   := wf_head.nxt(to_integer(e_r));
       h3   := wf_head.nxt2(to_integer(e_r));
       j3   := to_integer(h3(4 downto 0));
-      h4   := wf_head.nxr(j3);                      -- hop6 of nxt3[e]
-      ok2  := eoc_s = '0' and wf_head.nok(to_integer(e_r)) = '1';
-      ok3  := ok2 and h3(6 downto 5) = "00" and resize(h3, 6) < wf_head.endrel;
-      ok4  := ok3 and wf_head.nok(j3) = '1';
+      h4   := wf_head.nxt(j3);                      -- nxt3[e]
+      ok2  := eoc_s = '0' and inwin(h2, wf_head.endrel);
+      ok3  := ok2 and inwin(h3, wf_head.endrel);
+      ok4  := ok3 and inwin(h4, wf_head.endrel);
       p1v   <= emit_s;
       p1eoc <= eoc_s;
       p1p(1) <= resize(e_r, 5);
@@ -472,8 +503,7 @@ begin
         assert not (pop_s = '1' and wf_head.valid = '0')
           report "walker: pop of an empty WFIFO" severity failure;
         if mode = M_RUN and emit_s = '1' and eoc_s = '0' then
-          assert wf_head.nxt4(to_integer(e_r)) = FAR_NXT
-                 or wf_head.nxt4(to_integer(e_r)) <= 92
+          assert hop4 = FAR_NXT or hop4 <= 92
             report "walker: nxt4 out of range" severity failure;
         end if;
         assert not (far_v = '1' and mode /= M_WAITFAR)
@@ -581,14 +611,6 @@ begin
       begin
         return hx(to_unsigned(v, 4 * nd), nd);
       end function;
-      -- hop6 -> the traced absolute position (7F once it leaves the window).
-      function hop6_abs(h : unsigned(5 downto 0)) return unsigned is
-      begin
-        if h(5) = '1' then
-          return to_unsigned(FAR_NXT, 7);
-        end if;
-        return resize(h(4 downto 0), 7);
-      end function;
     begin
       if rising_edge(clk) then
         if not opened then
@@ -609,15 +631,12 @@ begin
             pend := false;
           end if;
           if emit_s = '1' then
-            x := wf_head.nxt4(to_integer(e_r));
+            x := hop4;
             ps(1) := resize(e_r, 7);
-            -- The window no longer carries the absolute hop-1/hop-3 positions
-            -- (nxr / nok are the hop6 form), so a position that leaves the
-            -- window traces as 7F, like the EOC line does.
-            ps(2) := hop6_abs(wf_head.nxr(to_integer(e_r)));
+            ps(2) := wf_head.nxt(to_integer(e_r));
             ps(3) := wf_head.nxt2(to_integer(e_r));
             if ps(3)(6 downto 5) = "00" then
-              ps(4) := hop6_abs(wf_head.nxr(to_integer(ps(3)(4 downto 0))));
+              ps(4) := wf_head.nxt(to_integer(ps(3)(4 downto 0)));
             else
               ps(4) := to_unsigned(FAR_NXT, 7);
             end if;

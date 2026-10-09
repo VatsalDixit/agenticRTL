@@ -166,30 +166,24 @@ package vhsnunzip_dsw4_pkg is
     -- i < endrel, so the window carries x only and the walker decodes the
     -- (at most 4) positions it actually emits. Storing all 32 records cost
     -- 928 bits of WFIFO and a 32:1 29-bit mux per emission slot.
-    -- nxt / nxt2 are the PT1 / PT2 hop tables, full 7-bit absolute positions.
-    -- They live inside PT only (PT2 composes nxt2 from nxt, PT3 composes nxt4
-    -- from nxt2), so the window carries nxt2 only for entries 0..15 and nxt
-    -- not at all: see nxr / nok below.
+    -- nxt / nxt2 are the PT1 / PT2 hop tables, full 7-bit absolute positions
+    -- (bit 6 or 5 set = the position leaves this window; 127 = FAR literal).
+    -- Both are carried in full, and they are the ONLY hop state: the walker
+    -- composes every deeper hop at the one position e it walks, out of these
+    -- two tables indexed by e and by nxt2[e],
+    --   p2 = nxt[e]        p3 = nxt2[e]
+    --   p4 = nxt[p3]       exit nxt4[e] = nxt2[p3]
+    -- and derives the "the next element is still in this window" predicate
+    -- (PT3's old nok table) with the same two-bit range test and endrel
+    -- compare at those two positions instead of at all 32.
     nxt       : u7_arr(0 to 31);
     nxt2      : u7_arr(0 to 31);
-    -- nxr is the walker's hop table: hop6 form of nxt, bit 5 = "leaves this
-    -- window" (the absolute value is then only needed for the exit, nxt4),
-    -- bits 4..0 = the position inside the window. nok(j) = position nxt(j) is
-    -- inside the window AND below endrel, i.e. exactly "the element after the
-    -- one at j is still in this window", precomputed here because endrel is a
-    -- window constant. The walker hops one level itself with these two tables
-    -- (nxt3[e] = nxr[nxt2[e]]), which replaces PT3's 16 hop-3 muxes with one.
-    nxr       : u6_arr(0 to 31);
-    nok       : std_logic_vector(0 to 31);
-    nxt4      : u7_arr(0 to 15);
   end record;
 
   constant WIN_INIT : win_t := (
     valid => '0', first => '0', epoch => (others => '0'), base => (others => '0'),
     x => (others => X"00"), endrel => (others => '0'), vlen => (others => '0'),
-    nxt => (others => (others => '0')), nxt2 => (others => (others => '0')),
-    nxr => (others => (others => '0')), nok => (others => '0'),
-    nxt4 => (others => (others => '0')));
+    nxt => (others => (others => '0')), nxt2 => (others => (others => '0')));
 
   -----------------------------------------------------------------------------
   -- Element (parser -> ELQ -> writer). SPEC 3.5, 3.6.
@@ -406,15 +400,13 @@ package vhsnunzip_dsw4_pkg is
   -- (LUTRAM) array, 1 LUT/bit, with the same asynchronous-read timing.
   --
   -- win_pack carries only the fields the walker reads: valid is regenerated
-  -- from the FIFO count, the absolute nxt table is not stored at all (the
-  -- walker needs only its hop6 / nok form, nxr / nok, which it also indexes
-  -- with nxt2[e] for the hop-3 position), and nxt2 above entry 15 is never
-  -- indexed (the walker's e is 4 bits, and PT composes nxt4 before the FIFO).
-  -- win_unpack returns the unstored fields as zero. The stored hop state is
-  -- 32*6 + 32*1 + 16*7 + 16*7 = 448 bits, the same as the four 16-entry 7-bit
-  -- tables it replaces.
+  -- from the FIFO count, and the hop state is the two raw tables nxt and nxt2
+  -- in full, 2*32*7 = 448 bits. That is bit for bit what the derived set it
+  -- replaces cost (nxr 32*6 + nok 32*1 + nxt2(0..15) 7*16 + nxt4(0..15) 7*16),
+  -- so composing the deeper hops in the walker is free in WFIFO width and
+  -- removes PT3's 16 hop-4 muxes and 32 nxr / nok derivations.
   -----------------------------------------------------------------------------
-  constant WIN_BITS : natural := 1 + 2 + 32 + 36*8 + 6 + 3 + 32*6 + 32 + 2*16*7;
+  constant WIN_BITS : natural := 1 + 2 + 32 + 36*8 + 6 + 3 + 2*32*7;
 
   function win_pack(w : win_t) return std_logic_vector;
   function win_unpack(v : std_logic_vector) return win_t;
@@ -502,16 +494,10 @@ package body vhsnunzip_dsw4_pkg is
     v(i + 5 downto i) := std_logic_vector(w.endrel);        i := i + 6;
     v(i + 2 downto i) := std_logic_vector(w.vlen);          i := i + 3;
     for k in 0 to 31 loop
-      v(i + 5 downto i) := std_logic_vector(w.nxr(k));      i := i + 6;
+      v(i + 6 downto i) := std_logic_vector(w.nxt(k));      i := i + 7;
     end loop;
     for k in 0 to 31 loop
-      v(i)              := w.nok(k);                        i := i + 1;
-    end loop;
-    for k in 0 to 15 loop
       v(i + 6 downto i) := std_logic_vector(w.nxt2(k));     i := i + 7;
-    end loop;
-    for k in 0 to 15 loop
-      v(i + 6 downto i) := std_logic_vector(w.nxt4(k));     i := i + 7;
     end loop;
     return v;
   end function;
@@ -529,16 +515,10 @@ package body vhsnunzip_dsw4_pkg is
     w.endrel := unsigned(v(i + 5 downto i));                i := i + 6;
     w.vlen   := unsigned(v(i + 2 downto i));                i := i + 3;
     for k in 0 to 31 loop
-      w.nxr(k)  := unsigned(v(i + 5 downto i));             i := i + 6;
+      w.nxt(k)  := unsigned(v(i + 6 downto i));             i := i + 7;
     end loop;
     for k in 0 to 31 loop
-      w.nok(k)  := v(i);                                    i := i + 1;
-    end loop;
-    for k in 0 to 15 loop
       w.nxt2(k) := unsigned(v(i + 6 downto i));             i := i + 7;
-    end loop;
-    for k in 0 to 15 loop
-      w.nxt4(k) := unsigned(v(i + 6 downto i));             i := i + 7;
     end loop;
     w.valid := '0';
     return w;

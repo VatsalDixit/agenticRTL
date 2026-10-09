@@ -20,10 +20,10 @@ use work.vhsnunzip_dsw4_pkg.all;
 --        literal, <= 92), 127 (FAR literal), i + hdr (copy). vlen = 1 + number
 --        of leading x[0..3] with bit 7 set.
 --   PT2  nxt2[i] = nxt[i] < 32 ? nxt[nxt[i]] : nxt[i]          (i = 0..31)
---   PT3  nxt4[i] = nxt2[i] < 32 ? nxt2[nxt2[i]] : nxt2[i]       (i = 0..15)
---        nxr[j]  = (nxt[j] >= 32) & nxt[j](4:0), nok[j] = nxt[j] < endrel
---        (j = 0..31). The hop-3 table is composed in the walker out of these
---        two, at the single position it walks: nxt3[e] = nxr[nxt2[e]].
+--   PT3  a register stage only: the window hands nxt and nxt2 over raw, and
+--        the walker composes the hop-3 position nxt[nxt2[e]], the exit
+--        nxt2[nxt2[e]] and the in-window predicate at the single position e it
+--        walks, instead of this stage tabulating them for all 16 / 32.
 --
 --   blk   block stream from vhsnunzip_blkrd (blk.valid = a block this cycle).
 --   win   window(b), registered at PT3, 3 cycles after block b+2 is on blk
@@ -50,12 +50,9 @@ begin
     variable endrel : unsigned(5 downto 0);
     variable pr     : prec_t;
     variable nx     : u7_arr(0 to 31);
-    variable n2     : u7_arr(0 to 31);
     variable sub    : u7_arr(0 to 31);
-    variable sub2   : u7_arr(0 to 31);
     variable w      : win_t;
     variable v      : unsigned(2 downto 0);
-    variable t      : unsigned(6 downto 0);
   begin
     if rising_edge(clk) then
       ---------------------------------------------------------------- WA + PT1
@@ -160,42 +157,13 @@ begin
       w2 <= w;
 
       ---------------------------------------------------------------- PT3
+      -- Nothing is composed out of the hop tables here any more: the walker
+      -- needs the hop-3 position nxr[nxt2[e]], the exit nxt2[nxt2[e]] and the
+      -- "next element still in this window" predicate at the one position e it
+      -- walks, so two muxes and two range tests there replace 16 hop-4 muxes
+      -- and 32 nxr / nok derivations in this stage. PT3 stays a register stage
+      -- (the block reader's window credit counts on the same latency).
       w := w2;
-      nx := w2.nxt;
-      n2 := w2.nxt2;
-      -- The hop-3 table is not composed here: the walker hops the last level
-      -- itself out of nxr / nok (one mux at the one position it uses, instead
-      -- of 16 muxes here). nxr is the hop6 form of nxt (bit 5 = leaves the
-      -- window, bits 4..0 = the position in it) and nok(j) says the element
-      -- after position j is still inside this window, which is the walker's
-      -- whole slot-validity test for a hop out of j.
-      for j in 0 to 31 loop
-        w.nxr(j) := (nx(j)(6) or nx(j)(5)) & nx(j)(4 downto 0);
-        if nx(j)(6 downto 5) = "00" and nx(j)(4 downto 0) < w2.endrel then
-          w.nok(j) := '1';
-        else
-          w.nok(j) := '0';
-        end if;
-      end loop;
-      -- nxt4[i] = nxt2[nxt2[i]]: the exit position, the only hop the walker
-      -- needs as an absolute value (its bits 6..4 are the window step count).
-      -- nxt2[i] >= nxt[i] >= i while it is in range (see PT2), so the hop mux
-      -- of position i needs only the entries j >= i.
-      for i in 0 to 15 loop
-        t := n2(i);
-        for j in 0 to 31 loop
-          if j >= i then
-            sub2(j) := n2(j);
-          else
-            sub2(j) := (others => '0');
-          end if;
-        end loop;
-        if t(6 downto 5) = "00" then
-          w.nxt4(i) := sub2(to_integer(t(4 downto 0)));
-        else
-          w.nxt4(i) := t;
-        end if;
-      end loop;
       w3 <= w;
 
       if reset = '1' then
