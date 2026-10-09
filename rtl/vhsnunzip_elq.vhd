@@ -60,8 +60,11 @@ end vhsnunzip_elq;
 
 architecture behavior of vhsnunzip_elq is
 
-  -- Stored entry: kind 2 + len 32 + off 16 + lptr GAW (windowed GA) bits.
-  constant EW : natural := 2 + 32 + 16 + GAW;
+  -- Stored entry: kind 2 + u 25 + lo 7 + lptr GAW (windowed GA) bits. len and
+  -- off share the (u, lo) payload (dsw4_pkg element_t), so the entry is 46 b
+  -- instead of 62: 16 bits less through BOTH the write rotate by wp and the
+  -- read rotate by fp, and 16 LUTRAM bits less per entry.
+  constant EW : natural := 2 + 25 + 7 + GAW;
   subtype ent_t is std_logic_vector(EW - 1 downto 0);
   type bank_t is array (0 to 15) of ent_t;
 
@@ -82,6 +85,10 @@ architecture behavior of vhsnunzip_elq is
   -- Bank read addresses, registered with fp (bank b holds entry
   -- fp + ((b - fp) mod 4)), so the LUTRAM read address is a register.
   signal ra          : addr_arr := (others => (others => '0'));
+  -- fp(5:2) + 0, 1, 2: the only three values any bank read address can take
+  -- (see racode).
+  type qp_arr is array (0 to 2) of unsigned(3 downto 0);
+  signal qp          : qp_arr;
 
   function rdaddr(f : unsigned(6 downto 0)) return addr_arr is
     variable j   : unsigned(1 downto 0);
@@ -96,9 +103,33 @@ architecture behavior of vhsnunzip_elq is
     return res;
   end function;
 
+  -- rdaddr(f)(b) = f + ((b - f(1:0)) mod 4) rounds f up to the next index
+  -- congruent to b modulo 4, so its bank address is just
+  --   f(5:2) + (1 when b < f(1:0) else 0)
+  -- -- only the carry out of the two low bits ever reaches it. With
+  -- f = fp + pf_adv (pf_adv <= 4) that carry is at most 2, so all 20 candidate
+  -- addresses are fp(5:2) + 0, 1 or 2: one 4-bit incrementer pair and a 3:1
+  -- select per bank, instead of five 7-bit pointer adders feeding twenty more.
+  -- racode(m, adv, b) is the 2-bit select, a single LUT of (m, adv, b).
+  function racode(m : unsigned(1 downto 0); adv : unsigned(2 downto 0);
+                  b : natural) return unsigned is
+    variable s : unsigned(3 downto 0);
+    variable c : unsigned(1 downto 0);
+  begin
+    s := resize(m, 4) + resize(adv, 4);
+    c := "00";
+    if s >= 4 then
+      c := c + 1;
+    end if;
+    if b < to_integer(s(1 downto 0)) then
+      c := c + 1;
+    end if;
+    return c;
+  end function;
+
   function pack(e : element_t) return ent_t is
   begin
-    return e.kind & std_logic_vector(e.len) & std_logic_vector(e.off)
+    return e.kind & std_logic_vector(e.u) & std_logic_vector(e.lo)
          & std_logic_vector(e.lptr);
   end function;
 
@@ -106,9 +137,9 @@ architecture behavior of vhsnunzip_elq is
     variable e : element_t;
   begin
     e.valid := '1';
-    e.kind  := v(GAW + 49 downto GAW + 48);
-    e.len   := unsigned(v(GAW + 47 downto GAW + 16));
-    e.off   := unsigned(v(GAW + 15 downto GAW));
+    e.kind  := v(GAW + 33 downto GAW + 32);
+    e.u     := unsigned(v(GAW + 31 downto GAW + 7));
+    e.lo    := unsigned(v(GAW + 6 downto GAW));
     e.lptr  := unsigned(v(GAW - 1 downto 0));
     return e;
   end function;
@@ -120,17 +151,23 @@ begin
   fpc_g: for i in 0 to 4 generate
     fpc(i) <= fp + i;
   end generate;
+  qp_g: for i in 0 to 2 generate
+    qp(i) <= fp(5 downto 2) + i;
+  end generate;
   nvis   <= nvis_i;
 
-  -- Write side: bank b takes el((b - wp) mod 4).
+  -- Write side: bank b takes el((b - wp) mod 4), at address
+  -- wp(5:2) + (1 when b < wp(1:0) else 0) (the rdaddr identity, see above).
   wr_map: process (wp, wcnt, el) is
-    variable j   : unsigned(1 downto 0);
-    variable idx : unsigned(6 downto 0);
+    variable j : unsigned(1 downto 0);
   begin
     for b in 0 to 3 loop
       j := to_unsigned(b, 2) - wp(1 downto 0);
-      idx := wp + resize(j, 7);
-      wa(b) <= idx(5 downto 2);
+      if b < to_integer(wp(1 downto 0)) then
+        wa(b) <= wp(5 downto 2) + 1;
+      else
+        wa(b) <= wp(5 downto 2);
+      end if;
       wd(b) <= pack(el(to_integer(j)));
       if resize(j, 3) < wcnt then
         we(b) <= '1';
@@ -180,12 +217,16 @@ begin
       -- fp + pf_adv as a select of precomputed fp + 0..4 (pf_adv is the
       -- writer's late one-hot select; no adder after it).
       case pf_adv is
-        when "001"  => fp <= fpc(1); ra <= rdaddr(fpc(1));
-        when "010"  => fp <= fpc(2); ra <= rdaddr(fpc(2));
-        when "011"  => fp <= fpc(3); ra <= rdaddr(fpc(3));
-        when "100"  => fp <= fpc(4); ra <= rdaddr(fpc(4));
-        when others => fp <= fpc(0); ra <= rdaddr(fpc(0));
+        when "001"  => fp <= fpc(1);
+        when "010"  => fp <= fpc(2);
+        when "011"  => fp <= fpc(3);
+        when "100"  => fp <= fpc(4);
+        when others => fp <= fpc(0);
       end case;
+      -- ra = rdaddr(fp + pf_adv), as a 3:1 select of fp(5:2) + 0..2.
+      for b in 0 to 3 loop
+        ra(b) <= qp(to_integer(racode(fp(1 downto 0), pf_adv, b)));
+      end loop;
       rp   <= rp + resize(rp_adv, 7);
       cret <= rp_adv;
       if reset = '1' then
@@ -217,6 +258,8 @@ begin
         report "ELQ: writer retired an entry it has not fetched" severity failure;
       assert ra = rdaddr(fp)
         report "ELQ: registered read addresses do not match fp" severity failure;
+      assert wa = rdaddr(wp)
+        report "ELQ: write addresses do not match wp" severity failure;
     end if;
   end process;
   -- pragma translate_on

@@ -41,7 +41,8 @@ use work.vhsnunzip_dsw4_pkg.all;
 -- in parallel with the decision and only SELECTED by it (no arithmetic after
 -- the decision, SPEC 3.7 / 8):
 --
---   window   E(0..7): element + l7 = sat7(len), o7 = sat7(off),
+--   window   E(0..7): element (len / off in the packed (u, lo) form it arrives
+--            in, see wen_t) + l7 = sat7(len), o7 = sat7(off),
 --            av = sat7(A_r - lptr) for THIS cycle's A_r and avx = the same
 --            with the NEXT cycle's A_r (registers: computed last cycle from
 --            the early arrival values), rhnz = len >= 128,
@@ -141,9 +142,15 @@ architecture behavior of vhsnunzip_writer is
   -- command's 2-bit code is the one LUT (isE, isC or isE) -- cheaper than
   -- carrying two more bits through the 12-entry candidate array and the
   -- 8 x 5:1 window shift select.
+  -- len and off are kept in the element's packed form (dsw4_pkg element_t):
+  -- u = len(31:7) for a literal / off for a copy, lo = len(6:0). Nothing in
+  -- this module ever needs both halves of a 32-bit length and a 16-bit offset
+  -- at once (rl = lo, rh = u, q = u(15:0)), so the window entry is 32 payload
+  -- bits instead of 48 -- 16 bits less in the 12-entry candidate array, in the
+  -- 8 x 5:1 window shift select and in the 8 window registers.
   type wen_t is record
-    len  : unsigned(31 downto 0);
-    off  : unsigned(15 downto 0);
+    u    : unsigned(24 downto 0);
+    lo   : unsigned(6 downto 0);
     lptr : gaw_t;
     l7   : unsigned(6 downto 0);
     o7   : unsigned(6 downto 0);
@@ -159,7 +166,7 @@ architecture behavior of vhsnunzip_writer is
   type wen_arr is array (natural range <>) of wen_t;
 
   constant WEN_INIT : wen_t := (
-    len => (others => '0'), off => (others => '0'),
+    u => (others => '0'), lo => (others => '0'),
     lptr => (others => '0'), l7 => (others => '0'), o7 => (others => '0'),
     av => (others => '0'), avx => (others => '0'), rhnz => '0', rh2 => '0',
     isL => '0', isC => '0', isE => '0', rep => '0');
@@ -247,18 +254,26 @@ architecture behavior of vhsnunzip_writer is
 
   -- Window entry from an ELQ element; a1 / a0: the arrival values whose
   -- registered av / avx this is (A_r and A_r of the cycle after the load).
+  -- The element's len and off share its (u, lo) payload (dsw4_pkg): u is
+  -- len(31:7) for a literal and off for a copy. Unpacking needs no mux and no
+  -- gating of the wide fields:
+  --   len = u & lo       -- exact for a literal; for a copy len(31:7) = off is
+  --                         garbage, but rhnz = 0 and every read of rh (the
+  --                         borrow in cand_p) is guarded by rhnz,
+  --   off = u(15:0)      -- exact for a copy; for a literal it is len(31:7),
+  --                         and every read of off / o7 / q / dq / rep is
+  --                         guarded by isC, or by capf's isL branch, which
+  --                         ignores q7 and rep0.
+  -- Only the two one-bit "long literal" flags have to know the kind, and l7
+  -- becomes a 7-bit select instead of a 32-bit saturate.
   function mkent(e : element_t; a1, a0 : gaw_t) return wen_t is
     variable w : wen_t;
   begin
-    w.len  := e.len;
-    w.off  := e.off;
+    w.u    := e.u;
+    w.lo   := e.lo;
     w.lptr := e.lptr;
-    w.l7   := sat(e.len, 7);
-    w.o7   := sat(e.off, 7);
     w.av   := satav(a1, w.lptr);
     w.avx  := satav(a0, w.lptr);
-    w.rhnz := b2sl(e.len(31 downto 7) /= 0);
-    w.rh2  := b2sl(e.len(31 downto 8) /= 0);
     w.isL  := '0';
     w.isC  := '0';
     w.isE  := '0';
@@ -267,7 +282,15 @@ architecture behavior of vhsnunzip_writer is
       when K_CPY  => w.isC := '1';
       when others => w.isE := '1';
     end case;
-    w.rep := is_repq(e.off);
+    w.rhnz := w.isL and b2sl(e.u /= 0);
+    w.rh2  := w.isL and b2sl(e.u(24 downto 1) /= 0);
+    if w.rhnz = '1' then
+      w.l7 := to_unsigned(127, 7);
+    else
+      w.l7 := e.lo;
+    end if;
+    w.o7   := sat(e.u(15 downto 0), 7);
+    w.rep  := is_repq(e.u(15 downto 0));
     return w;
   end function;
 
@@ -415,15 +438,15 @@ architecture behavior of vhsnunzip_writer is
   function mkhead(w : wen_t; avn : unsigned(6 downto 0); bb : unsigned(5 downto 0)) return hd_t is
     variable h : hd_t;
   begin
-    h.rl   := '0' & w.len(6 downto 0);
-    h.rh   := w.len(31 downto 7);
+    h.rl   := '0' & w.lo;
+    h.rh   := w.u;
     h.rhnz := w.rhnz;
     h.r7   := w.l7;
-    h.q0   := w.off;
+    h.q0   := w.u(15 downto 0);
     h.q7   := w.o7;
     h.rep0 := REPK and w.isC and w.rep;
     -- produced = 0: qdbl(off, off) = off.
-    h.dq   := w.off;
+    h.dq   := w.u(15 downto 0);
     h.lim  := w.o7;
     h.lp0  := w.lptr;
     h.avn  := avn;
@@ -630,7 +653,7 @@ begin
             cm.li0_val := '1';
           end if;
         elsif E(k).isC = '1' then
-          sl.q := E(k).off;
+          sl.q := E(k).u(15 downto 0);
           case k is
             when 1 => cm.cp1_val := '1';
             when 2 => cm.cp2_val := '1';
@@ -818,10 +841,10 @@ begin
       h  := mkhead(E(k), E(k).avx, bnext);
       n7 := ncut(k);
       -- R0 = len_k - n_k = len_k(6:0) [+ 128, borrowing from rh] - n_k.
-      rle := '0' & E(k).len(6 downto 0);
+      rle := '0' & E(k).lo;
       if E(k).rhnz = '1' then
         rle(7) := '1';
-        h.rh   := E(k).len(31 downto 7) - 1;
+        h.rh   := E(k).u - 1;
         h.rhnz := E(k).rh2;
       end if;
       h.rl := rle - resize(n7, 8);
@@ -838,7 +861,7 @@ begin
       -- Copy: produced = n_k, lim = n_k + off_k, dq = qdbl(off_k, lim).
       l8    := resize(n7, 8) + resize(E(k).o7, 8);
       h.lim := sat(l8, 7);
-      h.dq  := qdbl(E(k).off, l8);
+      h.dq  := qdbl(E(k).u(15 downto 0), l8);
       h.cap := capf(E(k).isL, h.rep0, av, h.q7, bnext);
       hcand(6 + k) <= h;
     end loop;
@@ -972,8 +995,10 @@ begin
       assert nsh = 1 and noc = 1
         report "writer: shift / outcome select is not one-hot" severity failure;
       -- R0 split: the borrow invariant (rh /= 0 => rl >= 96 after a cut) and
-      -- rhnz = (rh /= 0).
-      assert (hd.rh /= 0) = (hd.rhnz = '1')
+      -- rhnz => rh /= 0. The converse no longer holds: a copy head's rh is the
+      -- element payload's offset half (see mkent) and is never read, because
+      -- every read of rh is guarded by rhnz.
+      assert hd.rhnz = '0' or hd.rh /= 0
         report "writer: rhnz does not match rh" severity failure;
     end if;
   end process;

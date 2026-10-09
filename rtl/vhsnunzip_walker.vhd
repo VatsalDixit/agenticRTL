@@ -398,13 +398,18 @@ begin
           el_v.kind := K_EOC;
           el_v.lptr := p3pos(k)(GAW - 1 downto 0);
         elsif p3r(k).kind = K_LIT then
+          -- len and off share the element payload: a literal stores its whole
+          -- 32-bit length as (u, lo) = (len(31:7), len(6:0)).
           el_v.kind := K_LIT;
-          el_v.len  := p3len(k);
+          el_v.lo   := p3len(k)(6 downto 0);
+          el_v.u    := p3len(k)(31 downto 7);
           el_v.lptr := p3pos(k)(GAW - 1 downto 0) + resize(p3r(k).hdr, GAW);
         else
+          -- A copy length is at most 64, so p3len(k)(31:7) = 0 and lo holds it
+          -- exactly; u carries the 16-bit offset instead.
           el_v.kind := K_CPY;
-          el_v.len  := p3len(k);
-          el_v.off  := p3r(k).off;
+          el_v.lo   := p3len(k)(6 downto 0);
+          el_v.u    := resize(p3r(k).off, 25);
           el_v.lptr := p3pos(k)(GAW - 1 downto 0);
         end if;
         el_r(k) <= el_v;
@@ -466,6 +471,14 @@ begin
         end if;
         assert not (far_v = '1' and mode /= M_WAITFAR)
           report "walker: far target outside WAITFAR" severity failure;
+        -- element_t packs a copy length into lo (7 b): copies are <= 64 bytes.
+        if p3v = '1' and p3eoc = '0' then
+          for k in 0 to 3 loop
+            assert not (k < to_integer(p3cnt) and p3r(k).kind /= K_LIT
+                        and p3len(k)(31 downto 7) /= 0)
+              report "walker: copy length above 127" severity failure;
+          end loop;
+        end if;
         if far_v = '1' and mode = M_WAITFAR then
           d := far_tgt - wf_head.base;
           assert (d < 80) = (far_near = '1')

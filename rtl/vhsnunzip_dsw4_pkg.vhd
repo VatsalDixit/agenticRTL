@@ -183,19 +183,29 @@ package vhsnunzip_dsw4_pkg is
   --   LIT: len = payload bytes (32 b true length), lptr = GA of payload byte 0.
   --   CPY: len, off; lptr = GA of the header.
   --   EOC: len = 0, lptr = GA of the chunk end.
+  --
+  -- len and off share one 32-bit payload, because no element needs both: a
+  -- copy length is at most 64 (so it fits in lo) and a copy has no high length,
+  -- while a literal has no offset. Every element therefore carries
+  --   lo = len(6 downto 0)                (both kinds)
+  --   u  = len(31 downto 7)  for LIT      (zero for CPY / EOC above bit 15)
+  --      = off               for CPY      (in u(15 downto 0))
+  -- which is 46 stored bits instead of 62 -- the ELQ rotates this payload twice
+  -- (write rotate by wp, read rotate by fp), so every bit saved here is two
+  -- 4:1 mux bits, and 16 fewer flip-flops per walker element lane.
   -----------------------------------------------------------------------------
   type element_t is record
     valid     : std_logic;
     kind      : std_logic_vector(1 downto 0);  -- 00 LIT 01 CPY 11 EOC
-    len       : unsigned(31 downto 0);
-    off       : unsigned(15 downto 0);
+    lo        : unsigned(6 downto 0);          -- len(6 downto 0)
+    u         : unsigned(24 downto 0);         -- LIT len(31:7) / CPY off
     lptr      : gaw_t;                         -- GA, windowed (GAW bits)
   end record;
 
   type element_arr is array (natural range <>) of element_t;
 
   constant ELEMENT_INIT : element_t := (
-    valid => '0', kind => K_LIT, len => (others => '0'), off => (others => '0'),
+    valid => '0', kind => K_LIT, lo => (others => '0'), u => (others => '0'),
     lptr => (others => '0'));
 
   -----------------------------------------------------------------------------
