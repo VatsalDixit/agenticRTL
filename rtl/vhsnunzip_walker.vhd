@@ -110,7 +110,6 @@ architecture behavior of vhsnunzip_walker is
   signal p1p      : u7_arr(1 to 4) := (others => (others => '0'));
   signal p1base   : ga_t := (others => '0');
   signal p1endrel : unsigned(5 downto 0) := (others => '0');
-  signal p1rec    : prec_arr(0 to 31) := (others => PREC_INIT);
   signal p1x      : byte_array(0 to 35) := (others => X"00");
   signal p1cnt    : unsigned(2 downto 0) := "001";        -- wcnt (registered)
   signal p1last   : unsigned(4 downto 0) := (others => '0'); -- p_wcnt
@@ -267,6 +266,9 @@ begin
   ---------------------------------------------------------------------------
   seq_proc: process (clk) is
     variable pl    : natural range 0 to 31;
+    variable pk    : natural range 0 to 31;
+    variable hb    : byte_array(0 to 2);
+    variable raw   : byte_array(0 to 3);
     variable rk    : prec_t;
     variable flen  : unsigned(31 downto 0);
     variable el_v  : element_t;
@@ -301,7 +303,6 @@ begin
       p1p(4) <= wf_head.nxt3(to_integer(e_r));
       p1base   <= wf_head.base;
       p1endrel <= wf_head.endrel;
-      p1rec    <= wf_head.rec;
       p1x      <= wf_head.x;
       -- Group size and last position, decided with the group (off the loop:
       -- they only feed PE1 registers). v_k = v_{k-1} and p_k < 32 and
@@ -324,21 +325,33 @@ begin
       p1cnt  <= c;
       p1last <= last;
 
-      -- PE2: records of the chain, raw length bytes of the last element.
+      -- PE2: records of the chain, raw length bytes of the last element. The
+      -- window carries no per-position record array: the header of each of the
+      -- (at most 4) chain positions is decoded here from the three raw bytes at
+      -- that position, which is the same hdr_decode PT1 would have run, because
+      -- x is zeroed at and above endrel and every valid slot has p < endrel.
       p2v   <= p1v;
       p2eoc <= p1eoc;
       p2cnt <= p1cnt;
       p2base <= p1base;
       for k in 0 to 3 loop
+        pk := to_integer(p1p(k + 1)(4 downto 0));
         p2p(k) <= p1p(k + 1)(4 downto 0);
-        p2r(k) <= p1rec(to_integer(p1p(k + 1)(4 downto 0)));
+        hb(0) := p1x(pk);
+        hb(1) := p1x(pk + 1);
+        hb(2) := p1x(pk + 2);
+        p2r(k) <= hdr_decode(hb);
       end loop;
       pl := to_integer(p1last);
       p2last <= p1last;
       for j in 0 to 3 loop
-        p2raw(j) <= p1x(pl + 1 + j);
+        raw(j)   := p1x(pl + 1 + j);
+        p2raw(j) <= raw(j);
       end loop;
-      rk := p1rec(pl);
+      hb(0) := p1x(pl);
+      hb(1) := raw(0);
+      hb(2) := raw(1);
+      rk := hdr_decode(hb);
       p2far  <= rk.far and not p1eoc;
       p2hdrl <= rk.hdr;
 

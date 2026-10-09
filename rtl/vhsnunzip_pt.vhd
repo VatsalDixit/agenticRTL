@@ -101,10 +101,8 @@ begin
       for i in 0 to 31 loop
         pr := hdr_decode(x(i to i + 2));
         if to_unsigned(i, 6) >= endrel then
-          w.rec(i) := PREC_INIT;              -- kind END
-          w.nxt(i) := to_unsigned(i, 7);
+          w.nxt(i) := to_unsigned(i, 7);      -- END position (rec kind END)
         else
-          w.rec(i) := pr;
           if pr.kind = K_LIT then
             if pr.far = '1' then
               w.nxt(i) := to_unsigned(FAR_NXT, 7);

@@ -68,8 +68,14 @@ architecture behavior of vhsnunzip_parser is
   signal retgt_tgt : ga_t;
   signal eoc_p     : std_logic;
 
-  type wf_mem_t is array (0 to WF_DEPTH - 1) of win_t;
-  signal wf_mem    : wf_mem_t := (others => WIN_INIT);
+  -- The WFIFO is one flat vector per window (win_pack), so the head read is a
+  -- distributed-RAM read port (1 LUT/bit) instead of a WF_DEPTH:1 mux over the
+  -- whole record (~2 LUT/bit). Same asynchronous-read timing: the write is
+  -- clocked and the read combinational, exactly the LUTRAM pattern.
+  type wf_mem_t is array (0 to WF_DEPTH - 1) of std_logic_vector(WIN_BITS - 1 downto 0);
+  signal wf_mem    : wf_mem_t := (others => (others => '0'));
+  attribute ram_style : string;
+  attribute ram_style of wf_mem : signal is "distributed";
   signal wf_wp     : natural range 0 to WF_DEPTH - 1 := 0;
   signal wf_rp     : natural range 0 to WF_DEPTH - 1 := 0;
   signal wf_cnt    : natural range 0 to WF_DEPTH := 0;
@@ -94,7 +100,7 @@ begin
     if rising_edge(clk) then
       c := wf_cnt;
       if win.valid = '1' then
-        wf_mem(wf_wp) <= win;
+        wf_mem(wf_wp) <= win_pack(win);
         wf_wp <= (wf_wp + 1) mod WF_DEPTH;
         c := c + 1;
       end if;
@@ -114,7 +120,7 @@ begin
   head_proc: process (wf_mem, wf_rp, wf_cnt) is
     variable h : win_t;
   begin
-    h := wf_mem(wf_rp);
+    h := win_unpack(wf_mem(wf_rp));
     if wf_cnt /= 0 then
       h.valid := '1';
     else

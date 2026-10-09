@@ -152,7 +152,10 @@ package vhsnunzip_dsw4_pkg is
     x         : byte_array(0 to 35);       -- bytes >= endrel forced to 0
     endrel    : unsigned(5 downto 0);      -- first END position, 63 = none
     vlen      : unsigned(2 downto 0);      -- varint length (first window)
-    rec       : prec_arr(0 to 31);
+    -- No per-position prec_arr: rec(i) = hdr_decode(x(i to i+2)) for every
+    -- i < endrel, so the window carries x only and the walker decodes the
+    -- (at most 4) positions it actually emits. Storing all 32 records cost
+    -- 928 bits of WFIFO and a 32:1 29-bit mux per emission slot.
     nxt       : u7_arr(0 to 31);
     nxt2      : u7_arr(0 to 31);
     nxt3      : u7_arr(0 to 15);
@@ -162,7 +165,6 @@ package vhsnunzip_dsw4_pkg is
   constant WIN_INIT : win_t := (
     valid => '0', first => '0', epoch => (others => '0'), base => (others => '0'),
     x => (others => X"00"), endrel => (others => '0'), vlen => (others => '0'),
-    rec => (others => PREC_INIT),
     nxt => (others => (others => '0')), nxt2 => (others => (others => '0')),
     nxt3 => (others => (others => '0')), nxt4 => (others => (others => '0')));
 
@@ -361,6 +363,25 @@ package vhsnunzip_dsw4_pkg is
   -- b must hold at least 3 bytes.
   function hdr_decode(b : byte_array) return prec_t;
 
+  -----------------------------------------------------------------------------
+  -- WFIFO storage format.
+  --
+  -- The WFIFO (vhsnunzip_parser) holds WF_DEPTH windows and the walker reads
+  -- its head asynchronously. Held as a win_t register array, the head read is
+  -- an 8:1 mux over ~1700 bits (~2 LUT/bit, and place-and-route bills them to
+  -- the reader, walker_inst); held as one flat vector it is a distributed-RAM
+  -- (LUTRAM) array, 1 LUT/bit, with the same asynchronous-read timing.
+  --
+  -- win_pack carries only the fields the walker reads: valid is regenerated
+  -- from the FIFO count, and nxt/nxt2 above entry 15 are never indexed (the
+  -- walker's e is 4 bits, and PT composes nxt3/nxt4 before the FIFO), so they
+  -- are not stored. win_unpack returns them as zero.
+  -----------------------------------------------------------------------------
+  constant WIN_BITS : natural := 1 + 2 + 32 + 36*8 + 6 + 3 + 4*16*7;
+
+  function win_pack(w : win_t) return std_logic_vector;
+  function win_unpack(v : std_logic_vector) return win_t;
+
 end package vhsnunzip_dsw4_pkg;
 
 package body vhsnunzip_dsw4_pkg is
@@ -429,6 +450,61 @@ package body vhsnunzip_dsw4_pkg is
         r.off  := unsigned(b2) & unsigned(b1);
     end case;
     return r;
+  end function;
+
+  function win_pack(w : win_t) return std_logic_vector is
+    variable v : std_logic_vector(WIN_BITS - 1 downto 0) := (others => '0');
+    variable i : natural := 0;
+  begin
+    v(i)              := w.first;                          i := i + 1;
+    v(i + 1 downto i) := std_logic_vector(w.epoch);         i := i + 2;
+    v(i + 31 downto i) := std_logic_vector(w.base);         i := i + 32;
+    for k in 0 to 35 loop
+      v(i + 7 downto i) := w.x(k);                          i := i + 8;
+    end loop;
+    v(i + 5 downto i) := std_logic_vector(w.endrel);        i := i + 6;
+    v(i + 2 downto i) := std_logic_vector(w.vlen);          i := i + 3;
+    for k in 0 to 15 loop
+      v(i + 6 downto i) := std_logic_vector(w.nxt(k));      i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      v(i + 6 downto i) := std_logic_vector(w.nxt2(k));     i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      v(i + 6 downto i) := std_logic_vector(w.nxt3(k));     i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      v(i + 6 downto i) := std_logic_vector(w.nxt4(k));     i := i + 7;
+    end loop;
+    return v;
+  end function;
+
+  function win_unpack(v : std_logic_vector) return win_t is
+    variable w : win_t := WIN_INIT;
+    variable i : natural := v'low;
+  begin
+    w.first  := v(i);                                       i := i + 1;
+    w.epoch  := unsigned(v(i + 1 downto i));                i := i + 2;
+    w.base   := unsigned(v(i + 31 downto i));               i := i + 32;
+    for k in 0 to 35 loop
+      w.x(k) := v(i + 7 downto i);                          i := i + 8;
+    end loop;
+    w.endrel := unsigned(v(i + 5 downto i));                i := i + 6;
+    w.vlen   := unsigned(v(i + 2 downto i));                i := i + 3;
+    for k in 0 to 15 loop
+      w.nxt(k)  := unsigned(v(i + 6 downto i));             i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      w.nxt2(k) := unsigned(v(i + 6 downto i));             i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      w.nxt3(k) := unsigned(v(i + 6 downto i));             i := i + 7;
+    end loop;
+    for k in 0 to 15 loop
+      w.nxt4(k) := unsigned(v(i + 6 downto i));             i := i + 7;
+    end loop;
+    w.valid := '0';
+    return w;
   end function;
 
 end package body vhsnunzip_dsw4_pkg;
