@@ -34,7 +34,8 @@ use std.textio.all;
 --            same 16-aligned window instead; must give identical elements.
 --
 -- Emission, feed-forward, 4 registered stages:
---   PE1   p1 = e, p2 = nxt[e], p3 = nxt2[e], p4 = nxt3[e] and a copy of H
+--   PE1   p1 = e, p2 = nxr[e], p3 = nxt2[e], p4 = nxr[p3] (the hop-3 position,
+--         composed here instead of in PT3) and a copy of H
 --         (base, endrel, rec, x). Validity v1 = 1, v_k = v_{k-1} and p_k < 32
 --         and p_k < endrel (a FAR p_{k-1} gives p_k = 127, so a far literal is
 --         always the group's last element); wcnt and p_wcnt are decided with
@@ -107,7 +108,10 @@ architecture behavior of vhsnunzip_walker is
   -- PE1
   signal p1v      : std_logic := '0';
   signal p1eoc    : std_logic := '0';
-  signal p1p      : u7_arr(1 to 4) := (others => (others => '0'));
+  -- Chain positions, 5 bits: a slot is only consumed when its position is
+  -- inside the window (p1cnt), so the hop6 "leaves the window" bit does not
+  -- have to travel with the position.
+  signal p1p      : u5_arr(1 to 4) := (others => (others => '0'));
   signal p1base   : ga_t := (others => '0');
   signal p1endrel : unsigned(5 downto 0) := (others => '0');
   signal p1x      : byte_array(0 to 35) := (others => X"00");
@@ -273,9 +277,11 @@ begin
     variable flen  : unsigned(31 downto 0);
     variable el_v  : element_t;
     variable c     : unsigned(2 downto 0);
-    variable ok    : boolean;
-    variable q     : unsigned(6 downto 0);
     variable last  : unsigned(4 downto 0);
+    variable h2, h4 : unsigned(5 downto 0);   -- hop6: bit 5 = leaves the window
+    variable h3    : unsigned(6 downto 0);
+    variable j3    : natural range 0 to 31;
+    variable ok2, ok3, ok4 : boolean;
   begin
     if rising_edge(clk) then
       -- Walker state.
@@ -294,34 +300,35 @@ begin
         cred_r <= cred_r + ret_s + cred_ret;
       end if;
 
-      -- PE1: chain positions and a copy of H.
+      -- PE1: chain positions and a copy of H. The window hands over the hop
+      -- tables for one, two and four elements (nxr / nok, nxt2, nxt4); the
+      -- hop-3 position is composed here, at the one start position e that is
+      -- actually walked: p3 = nxt2[e], p4 = nxr[p3], valid iff nok[p3].
+      h2   := wf_head.nxr(to_integer(e_r));         -- hop6 of nxt[e]
+      h3   := wf_head.nxt2(to_integer(e_r));
+      j3   := to_integer(h3(4 downto 0));
+      h4   := wf_head.nxr(j3);                      -- hop6 of nxt3[e]
+      ok2  := eoc_s = '0' and wf_head.nok(to_integer(e_r)) = '1';
+      ok3  := ok2 and h3(6 downto 5) = "00" and resize(h3, 6) < wf_head.endrel;
+      ok4  := ok3 and wf_head.nok(j3) = '1';
       p1v   <= emit_s;
       p1eoc <= eoc_s;
-      p1p(1) <= resize(e_r, 7);
-      p1p(2) <= wf_head.nxt(to_integer(e_r));
-      p1p(3) <= wf_head.nxt2(to_integer(e_r));
-      p1p(4) <= wf_head.nxt3(to_integer(e_r));
+      p1p(1) <= resize(e_r, 5);
+      p1p(2) <= h2(4 downto 0);
+      p1p(3) <= h3(4 downto 0);
+      p1p(4) <= h4(4 downto 0);
       p1base   <= wf_head.base;
       p1endrel <= wf_head.endrel;
       p1x      <= wf_head.x;
       -- Group size and last position, decided with the group (off the loop:
-      -- they only feed PE1 registers). v_k = v_{k-1} and p_k < 32 and
-      -- p_k < endrel (a FAR p_{k-1} gives p_k = 127).
+      -- they only feed PE1 registers). v_k = v_{k-1} and p_k inside the window
+      -- and p_k < endrel (a FAR p_{k-1} leaves the window, so a far literal is
+      -- always the group's last element).
       c    := "001";
       last := '0' & e_r;
-      ok   := eoc_s = '0';
-      for k in 2 to 4 loop
-        case k is
-          when 2      => q := wf_head.nxt(to_integer(e_r));
-          when 3      => q := wf_head.nxt2(to_integer(e_r));
-          when others => q := wf_head.nxt3(to_integer(e_r));
-        end case;
-        ok := ok and q(6 downto 5) = "00" and resize(q, 6) < wf_head.endrel;
-        if ok then
-          c    := c + 1;
-          last := q(4 downto 0);
-        end if;
-      end loop;
+      if ok2 then c := c + 1; last := h2(4 downto 0); end if;
+      if ok3 then c := c + 1; last := h3(4 downto 0); end if;
+      if ok4 then c := c + 1; last := h4(4 downto 0); end if;
       p1cnt  <= c;
       p1last <= last;
 
@@ -335,8 +342,8 @@ begin
       p2cnt <= p1cnt;
       p2base <= p1base;
       for k in 0 to 3 loop
-        pk := to_integer(p1p(k + 1)(4 downto 0));
-        p2p(k) <= p1p(k + 1)(4 downto 0);
+        pk := to_integer(p1p(k + 1));
+        p2p(k) <= p1p(k + 1);
         hb(0) := p1x(pk);
         hb(1) := p1x(pk + 1);
         hb(2) := p1x(pk + 2);
@@ -574,6 +581,14 @@ begin
       begin
         return hx(to_unsigned(v, 4 * nd), nd);
       end function;
+      -- hop6 -> the traced absolute position (7F once it leaves the window).
+      function hop6_abs(h : unsigned(5 downto 0)) return unsigned is
+      begin
+        if h(5) = '1' then
+          return to_unsigned(FAR_NXT, 7);
+        end if;
+        return resize(h(4 downto 0), 7);
+      end function;
     begin
       if rising_edge(clk) then
         if not opened then
@@ -596,9 +611,16 @@ begin
           if emit_s = '1' then
             x := wf_head.nxt4(to_integer(e_r));
             ps(1) := resize(e_r, 7);
-            ps(2) := wf_head.nxt(to_integer(e_r));
+            -- The window no longer carries the absolute hop-1/hop-3 positions
+            -- (nxr / nok are the hop6 form), so a position that leaves the
+            -- window traces as 7F, like the EOC line does.
+            ps(2) := hop6_abs(wf_head.nxr(to_integer(e_r)));
             ps(3) := wf_head.nxt2(to_integer(e_r));
-            ps(4) := wf_head.nxt3(to_integer(e_r));
+            if ps(3)(6 downto 5) = "00" then
+              ps(4) := hop6_abs(wf_head.nxr(to_integer(ps(3)(4 downto 0))));
+            else
+              ps(4) := to_unsigned(FAR_NXT, 7);
+            end if;
             if eoc_s = '1' then
               write(ln, hn(ci, 4) & " " & hx(wf_head.base, 8) & " " & hx(e_r, 2) & " 1 "
                         & hx(e_r, 2) & " 7F 7F 7F E 00 " & hn(eln, 6));
