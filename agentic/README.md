@@ -420,6 +420,7 @@ resets.
 | `report.py` | status.json and report.html |
 | `gui.py` | the live dashboard window (Tkinter) |
 | `hacc_tmux.sh`, `mirror.py` | the loop in tmux on the HACC host, and its dashboard on the laptop |
+| `ab_tracks.py` | a tracks-off twin of a finished run, and the two side by side |
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |
 | `setup.py` | doctor + preparation |
 | `tools.py`, `config.json` | shared helpers and settings |

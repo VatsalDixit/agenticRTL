@@ -126,6 +126,7 @@ Running and watching a run:
 | [`gui.py`](agentic/gui.py), [`report.py`](agentic/report.py) | Live dashboard window, and status.json / report.html |
 | [`hacc_tmux.sh`](agentic/hacc_tmux.sh), [`mirror.py`](agentic/mirror.py) | Running the loop on the HACC host, and watching it from a laptop |
 | [`compare.py`](agentic/compare.py) | Compares two runs, including cost per percent gained |
+| [`ab_tracks.py`](agentic/ab_tracks.py) | Sets up a tracks-off twin of a run from the same starting commit, and compares the two at equal iterations and equal spend |
 | [`tools.py`](agentic/tools.py) | Shared helpers: config, timeouts, git, logging |
 
 Tests (no model or simulator needed):
