@@ -421,6 +421,7 @@ resets.
 | `gui.py` | the live dashboard window (Tkinter) |
 | `hacc_tmux.sh`, `mirror.py` | the loop in tmux on the HACC host, and its dashboard on the laptop |
 | `ab_tracks.py` | the tracks A/B: a tracks-on/off pair from one start, or a tracks-off twin of a run, and the two side by side |
+| `paper_figs.py` | figures of one or two runs (trajectory, outcomes, cost), PNG + PDF + JSON of the plotted numbers |
 | `freeze.py`, `frozen.json` | hashes of the measuring instrument |
 | `setup.py` | doctor + preparation |
 | `tools.py`, `config.json` | shared helpers and settings |

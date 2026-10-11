@@ -127,6 +127,7 @@ Running and watching a run:
 | [`hacc_tmux.sh`](agentic/hacc_tmux.sh), [`mirror.py`](agentic/mirror.py) | Running the loop on the HACC host, and watching it from a laptop |
 | [`compare.py`](agentic/compare.py) | Compares two runs, including cost per percent gained |
 | [`ab_tracks.py`](agentic/ab_tracks.py) | Sets up tracks-on and tracks-off runs from one start (pair), or a tracks-off twin of a finished run (twin), and compares two runs at equal iterations and equal spend |
+| [`paper_figs.py`](agentic/paper_figs.py) | Paper-style figures of one or two runs: the search trajectory per metric, candidate outcomes per iteration, and best throughput against cost |
 | [`tools.py`](agentic/tools.py) | Shared helpers: config, timeouts, git, logging |
 
 Tests (no model or simulator needed):
