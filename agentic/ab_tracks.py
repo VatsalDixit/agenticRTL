@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-Did the build tracks pay? A tracks-off twin of a tracks-on run, and the two
-side by side.
+Did the build tracks pay? Tracks-on and tracks-off runs from one start, and
+the two side by side.
 
-  twin     set up the twin: a git worktree at the reference run's starting
-           commit, with one commit on top that sets tracks_enabled false and
-           nothing else, its own copy of agentic/data, and the command that
-           starts it in tmux with the reference's goal, model, candidates,
-           seed and iteration count. Prints the plan; --apply carries it out.
+  pair     two new runs from one start: a kit (the blind kit by default) with
+           rtl/ taken from another commit (hacc-real200's i35 by default,
+           where that run stalled while a multi-step build paid). The start
+           is one parentless commit, so a session's history holds nothing
+           but it: the blind kit's own history still carries the v3 plan and
+           commit messages about earlier runs, which the session git gate
+           would show. One worktree runs it as is, the other with one more
+           commit setting tracks_enabled false. Prints the plan and the two
+           tmux commands; --apply carries it out.
+  twin     a tracks-off twin of a finished tracks-on run: a git worktree at
+           the reference run's starting commit, with one commit on top that
+           sets tracks_enabled false and nothing else, its own copy of
+           agentic/data, and the command that starts it in tmux with the
+           reference's goal, model, candidates, seed and iteration count.
+           Prints the plan; --apply carries it out.
   compare  the two runs at equal iterations and at equal spend, on the
            guarded throughput only (a fast iteration's bytes/cycle is two
-           tables, not the score), and what the reference's tracks cost and
+           tables, not the score), and what each run's tracks cost and
            bought.
+
+    python ab_tracks.py pair --repo /local/home/vdixit/agenticRTL --name i35pair1 \\
+        --dir /local/home/vdixit/ab [--apply]
+    python ab_tracks.py compare /local/home/vdixit/ab/i35pair1-tracks/.agentic/runs/i35pair1-tracks \\
+        /local/home/vdixit/ab/i35pair1-notracks/.agentic/runs/i35pair1-notracks
 
     python ab_tracks.py twin RUNS/fastguard200 --name fastguard200-notracks \\
         --dir /local/home/vdixit/ab/fastguard200-notracks [--apply]
@@ -61,8 +76,8 @@ def repo_of(run_dir):
     return os.path.dirname(os.path.dirname(runs))
 
 
-def git(args, cwd, check=True):
-    res = subprocess.run(['git'] + args, cwd=cwd, capture_output=True, text=True)
+def git(args, cwd, check=True, stdin=None):
+    res = subprocess.run(['git'] + args, cwd=cwd, capture_output=True, text=True, input=stdin)
     if check and res.returncode != 0:
         die('git %s failed: %s' % (' '.join(args), (res.stderr or res.stdout).strip()))
     return res.stdout.strip() if res.returncode == 0 else None
@@ -228,6 +243,145 @@ def twin(args):
     print('it a different experiment. The @reboot crontab line restarts only the')
     print("default tmux session; add one with AGENTIC_TMUX_SESSION=%s for the twin."
           % env['AGENTIC_TMUX_SESSION'])
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pair
+
+I35 = 'c0757e673fddf89518e6890f9e085f77671f8b25'   # hacc-real200 i35, on dsw4-design
+
+
+def resolve(root, names):
+    for name in names:
+        sha = git(['rev-parse', '--verify', '--quiet', name + '^{commit}'], root, check=False)
+        if sha:
+            return sha
+    return None
+
+
+def launch(target, run, local, slots, goal, model, candidates, iters):
+    env = (('AGENTIC_TMUX_SESSION', 'ab-' + run),
+           ('AGENTIC_HOME', os.path.join(local, 'home-' + run)),
+           ('AGENTIC_SIM_SLOTS', str(slots)))
+    script = shlex.quote(os.path.join(target, 'agentic', 'hacc_tmux.sh'))
+    prefix = ' '.join('%s=%s' % (k, shlex.quote(v)) for k, v in env)
+    start = ' '.join([prefix, script, '--run', shlex.quote(run), '--goal', shlex.quote(goal),
+                      '--model', shlex.quote(str(model)), '--candidates', str(candidates),
+                      '--iters', str(iters)])
+    reboot = '@reboot %s %s --reboot >> %s 2>&1' % (
+        prefix, script, shlex.quote(os.path.join(local, 'agentic-reboot-%s.log' % run)))
+    return start, reboot
+
+
+def pair(args):
+    root = git(['rev-parse', '--show-toplevel'], os.path.abspath(args.repo), check=False) \
+        or die('%s is not inside a git checkout' % args.repo)
+    kit = resolve(root, [args.kit] if args.kit else ['fast-guard-blind', 'origin/fast-guard-blind']) \
+        or die('no kit commit: fetch the fast-guard-blind branch into %s or give --kit' % root)
+    rtl = resolve(root, [args.rtl]) \
+        or die('commit %s is not in %s: fetch the dsw4-design branch or give --rtl' % (args.rtl, root))
+    warn = []
+
+    cfg = json.loads(git(['show', kit + ':agentic/config.json'], root))
+    if not cfg.get('tracks_enabled', True):
+        die('tracks_enabled is false in the kit at %s; the tracks arm would have none' % kit[:10])
+    if git(['cat-file', '-e', rtl + ':rtl/vhsnunzip_unbuffered.vhd'], root, check=False) is None:
+        die('%s has no rtl/vhsnunzip_unbuffered.vhd' % rtl[:10])
+    if git(['cat-file', '-e', kit + ':agentic/packmodel.py'], root, check=False) is not None:
+        warn.append('the kit carries the packing model, whose dsw4 rules describe the hand-built '
+                    'design: the tracks arm could be told the answer. The blind kit has none.')
+    kit_rtl, new_rtl = git(['rev-parse', kit + ':rtl'], root), git(['rev-parse', rtl + ':rtl'], root)
+    if kit_rtl == new_rtl:
+        warn.append("rtl/ is the same at both commits: both arms start from the kit's own design")
+    if 'AGENTIC_HOME' not in (git(['show', kit + ':agentic/hacc_tmux.sh'], root, check=False) or ''):
+        warn.append('hacc_tmux.sh at %s does not read AGENTIC_HOME: the two arms would share '
+                    "Claude Code's HOME" % kit[:10])
+
+    model = args.model or cfg.get('model')
+    candidates = args.candidates or cfg.get('candidates')
+    names = (args.name + '-tracks', args.name + '-notracks')
+    parent = os.path.abspath(args.dir)
+    for name in names:
+        for ref_name in ('refs/heads/ab/' + name, 'refs/heads/agentic/' + name):
+            if git(['rev-parse', '--verify', '--quiet', ref_name], root, check=False):
+                die('branch %s already exists; pick another --name' % ref_name[11:])
+        if os.path.exists(os.path.join(parent, name)):
+            die('%s already exists' % os.path.join(parent, name))
+    local = os.path.dirname(root)
+
+    print()
+    print('checkout    %s' % root)
+    print('kit         %s  %s' % (kit[:12], git(['log', '-1', '--format=%cs %s', kit], root)[:70]))
+    print('rtl/ from   %s  %s' % (rtl[:12], git(['log', '-1', '--format=%cs %s', rtl], root)[:70]))
+    print('start       one parentless commit: the kit tree with rtl/ replaced')
+    print('arms        %s (tracks_enabled true), %s (tracks_enabled false)' % names)
+    print('both        goal "%s", model %s, %s candidates, %d iterations, %d simulator slots'
+          % (args.goal, model, candidates, args.iters, args.slots))
+    print('            fast_draws %r, guard_every %s, track sessions $%s / %s min'
+          % (cfg.get('fast_draws', ''), cfg.get('guard_every', 0),
+             cfg.get('track_session_budget_usd', 40.0), cfg.get('track_session_timeout_min', 120)))
+    for w in warn:
+        print()
+        print('WARNING: ' + w)
+
+    targets = [os.path.join(parent, name) for name in names]
+    print()
+    print('%s:' % ('doing' if args.apply else 'would do (add --apply)'))
+    print('  build the start commit (git mktree + commit-tree, no parent)')
+    for name, target in zip(names, targets):
+        print('  git worktree add -b ab/%s %s <start>' % (name, shlex.quote(target)))
+    print('  commit tracks_enabled false on ab/%s' % names[1])
+    print('  copy %s/agentic/data into both' % root)
+
+    if args.apply:
+        entries = git(['ls-tree', kit], root).splitlines()
+        rtl_entry = '040000 tree %s\trtl' % new_rtl
+        tree_in = [rtl_entry if e.split('\t', 1)[1] == 'rtl' else e for e in entries]
+        if rtl_entry not in tree_in:
+            tree_in.append(rtl_entry)
+        tree = git(['mktree'], root, stdin='\n'.join(tree_in) + '\n')
+        start = git(['commit-tree', tree, '-m',
+                     'A/B start: kit %s with rtl/ from %s' % (kit[:12], rtl[:12])], root)
+        os.makedirs(parent, exist_ok=True)
+        data = os.path.join(root, 'agentic', 'data')
+        for name, target, on in zip(names, targets, (True, False)):
+            git(['worktree', 'add', '-b', 'ab/' + name, target, start], root)
+            if not on:
+                off = dict(cfg, tracks_enabled=False)
+                with open(os.path.join(target, 'agentic', 'config.json'), 'w',
+                          encoding='utf-8') as fil:
+                    fil.write(json.dumps(off, indent=2) + '\n')
+                git(['commit', '-q', '-m', 'A/B arm: build tracks off',
+                     '--', 'agentic/config.json'], target)
+            if os.path.isdir(data):
+                shutil.copytree(data, os.path.join(target, 'agentic', 'data'))
+            print('  done: %s at %s' % (name, git(['rev-parse', '--short', 'HEAD'], target)))
+        if not os.path.isdir(data):
+            print('  WARNING: %s does not exist; run agentic/make_data.py in both' % data)
+
+    print()
+    print('start both (they run side by side, so each gets half the simulator slots):')
+    reboots = []
+    for name, target in zip(names, targets):
+        cmd, reboot = launch(target, name, local, args.slots, args.goal, model, candidates,
+                             args.iters)
+        print('  ' + cmd)
+        reboots.append(reboot)
+    print()
+    print('restart after a host reboot: add to the crontab, below its HOME=%s line:' % local)
+    for reboot in reboots:
+        print('  ' + reboot)
+    print()
+    print('when both are done:')
+    print('  python %s compare %s %s' % (
+        shlex.quote(os.path.abspath(__file__)),
+        *[shlex.quote(os.path.join(t, '.agentic', 'runs', n)) for t, n in zip(targets, names)]))
+    print()
+    print('Decided in advance: the primary metric is the guarded throughput gain at equal')
+    print('spend. Secondary: whether the tracks arm passes the start design\'s plateau, and')
+    print('what each track cost and bought. A second pair (another --name) measures the')
+    print('run-to-run spread; without it a small difference means nothing.')
     return 0
 
 
@@ -431,6 +585,22 @@ def compare(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     sub = ap.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('pair', help='set up two new runs, tracks on and off, from one start')
+    p.add_argument('--repo', default='.', help='the checkout the runs are made from')
+    p.add_argument('--name', required=True,
+                   help='run name prefix: the runs are NAME-tracks and NAME-notracks')
+    p.add_argument('--dir', required=True, help='folder the two worktrees go in')
+    p.add_argument('--kit', default=None,
+                   help='commit or branch the kit comes from (default: fast-guard-blind)')
+    p.add_argument('--rtl', default=I35,
+                   help='commit rtl/ comes from (default: hacc-real200 i35, c0757e6)')
+    p.add_argument('--goal', default='maximize throughput',
+                   help='"maximize" sets no target, so both arms run exactly --iters')
+    p.add_argument('--iters', type=int, default=25)
+    p.add_argument('--model', default=None, help="default: the kit's config.json")
+    p.add_argument('--candidates', type=int, default=None, help="default: the kit's config.json")
+    p.add_argument('--slots', type=int, default=11, help='simulator slots per arm')
+    p.add_argument('--apply', action='store_true', help='do it; without this, only print')
     t = sub.add_parser('twin', help='set up a tracks-off twin of a run')
     t.add_argument('ref', help='the tracks-on run: its folder or state.json')
     t.add_argument('--name', required=True, help='the twin run name')
@@ -440,12 +610,12 @@ def main():
     t.add_argument('--iters', type=int, default=None,
                    help='iteration cap (default: as many as the reference ran)')
     t.add_argument('--apply', action='store_true', help='do it; without this, only print')
-    c = sub.add_parser('compare', help='the reference and its twin side by side')
-    c.add_argument('ref')
-    c.add_argument('twin')
+    c = sub.add_parser('compare', help='two runs side by side, the tracks-on one first')
+    c.add_argument('ref', help='the tracks-on run: its folder or state.json')
+    c.add_argument('twin', help='the tracks-off run')
     c.add_argument('--csv', default=None, help='also write the per-iteration series here')
     args = ap.parse_args()
-    return twin(args) if args.cmd == 'twin' else compare(args)
+    return {'pair': pair, 'twin': twin, 'compare': compare}[args.cmd](args)
 
 
 if __name__ == '__main__':
